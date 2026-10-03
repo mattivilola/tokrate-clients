@@ -8,6 +8,25 @@ enum DashboardRange: String, CaseIterable, Identifiable {
     var duration: TimeInterval { self == .day ? 86_400 : MetricHistory.retention }
 }
 
+enum CohortComparisonSort: String, CaseIterable, Identifiable {
+    case recent, higherThroughput, lowerTTFT
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .recent: "Most recent"
+        case .higherThroughput: "Higher throughput"
+        case .lowerTTFT: "Lower TTFT"
+        }
+    }
+    var shortTitle: String {
+        switch self {
+        case .recent: "Recent"
+        case .higherThroughput: "Throughput"
+        case .lowerTTFT: "TTFT"
+        }
+    }
+}
+
 /// The exact local comparison dimensions. Missing fields stay distinct from explicit values.
 struct ModelCohort: Hashable, Identifiable, Sendable {
     let model: String?
@@ -131,6 +150,53 @@ struct MetricStats: Equatable, Sendable {
     }
 }
 
+struct PeriodMetricStats: Equatable, Sendable {
+    let throughput: MetricStats
+    let ttft: MetricStats
+}
+
+struct LocalPeriodComparison: Equatable, Sendable {
+    let range: DashboardRange
+    let recent15Minutes: PeriodMetricStats
+    let last24Hours: PeriodMetricStats
+    let previous24Hours: PeriodMetricStats
+    let currentRange: PeriodMetricStats
+    let previousRange: PeriodMetricStats?
+    let throughputChangePercent: Double?
+    let ttftChangePercent: Double?
+
+    init(records: [TurnMetric], range: DashboardRange, now: Date) {
+        func stats(from values: [TurnMetric]) -> PeriodMetricStats {
+            let throughput = values.filter { $0.outputTokens >= 20 && $0.turnThroughputTPS.isFinite && $0.turnThroughputTPS >= 0 }
+            let ttft = values.compactMap(\.codexTTFTSeconds).filter { $0.isFinite && $0 >= 0 }
+            return PeriodMetricStats(
+                throughput: MetricStats(values: throughput.map(\.turnThroughputTPS)),
+                ttft: MetricStats(values: ttft)
+            )
+        }
+
+        self.range = range
+        let recentStart = now.addingTimeInterval(-15 * 60)
+        let dayStart = now.addingTimeInterval(-86_400)
+        let previousDayStart = now.addingTimeInterval(-2 * 86_400)
+        recent15Minutes = stats(from: records.filter { $0.completedAt >= recentStart && $0.completedAt <= now })
+        last24Hours = stats(from: records.filter { $0.completedAt >= dayStart && $0.completedAt <= now })
+        previous24Hours = stats(from: records.filter { $0.completedAt >= previousDayStart && $0.completedAt < dayStart })
+        currentRange = range == .day ? last24Hours : stats(from: records)
+        previousRange = range == .day ? previous24Hours : nil
+        throughputChangePercent = Self.changePercent(current: last24Hours.throughput, previous: previous24Hours.throughput)
+        ttftChangePercent = Self.changePercent(current: last24Hours.ttft, previous: previous24Hours.ttft)
+    }
+
+    private static func changePercent(current: MetricStats, previous: MetricStats) -> Double? {
+        guard current.count >= 5, previous.count >= 5,
+              let currentMedian = current.median,
+              let previousMedian = previous.median, previousMedian > 0 else { return nil }
+        let change = ((currentMedian - previousMedian) / previousMedian) * 100
+        return change.isFinite ? change : nil
+    }
+}
+
 struct PersonalTrend: Equatable, Sendable {
     enum Status: Equatable, Sendable {
         case noRecentObservations
@@ -177,6 +243,7 @@ struct DashboardSnapshot {
     let medianTTFT: Double?
     let personalTrend: PersonalTrend?
     let cohortSummaries: [CohortSummary]
+    let localPeriodComparison: LocalPeriodComparison?
     let records: [TurnMetric]
     let dates: ClosedRange<Date>
 
@@ -202,6 +269,13 @@ struct DashboardSnapshot {
             resolvedCohort = nil
         }
         selectedCohort = resolvedCohort
+
+        let selectedRetained = resolvedCohort.map { cohort in
+            retained.filter { ModelCohort($0) == cohort }
+        } ?? []
+        localPeriodComparison = selection.isAllModels || resolvedCohort == nil
+            ? nil
+            : LocalPeriodComparison(records: selectedRetained, range: range, now: now)
 
         let start = now.addingTimeInterval(-range.duration)
         dates = start...max(now, start.addingTimeInterval(1))
@@ -266,6 +340,38 @@ struct DashboardSnapshot {
     static func median(_ values: [Double]) -> Double? { MetricStats(values: values).median }
 
     static func rate(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "—" }
+
+    static func ordered(_ summaries: [CohortSummary], by sort: CohortComparisonSort) -> [CohortSummary] {
+        summaries.sorted { left, right in
+            switch sort {
+            case .recent:
+                return left.latestAt == right.latestAt
+                    ? left.id < right.id
+                    : left.latestAt > right.latestAt
+            case .higherThroughput:
+                return compare(left.throughput.median, right.throughput.median, descending: true, left: left, right: right)
+            case .lowerTTFT:
+                return compare(left.ttft.median, right.ttft.median, descending: false, left: left, right: right)
+            }
+        }
+    }
+
+    private static func compare(
+        _ leftValue: Double?,
+        _ rightValue: Double?,
+        descending: Bool,
+        left: CohortSummary,
+        right: CohortSummary
+    ) -> Bool {
+        switch (leftValue, rightValue) {
+        case let (left?, right?) where left != right:
+            return descending ? left > right : left < right
+        case (_?, nil): return true
+        case (nil, _?): return false
+        default:
+            return left.latestAt == right.latestAt ? left.id < right.id : left.latestAt > right.latestAt
+        }
+    }
 
     private static func isThroughputEligible(_ metric: TurnMetric) -> Bool {
         metric.outputTokens >= 20 && metric.turnThroughputTPS.isFinite && metric.turnThroughputTPS >= 0

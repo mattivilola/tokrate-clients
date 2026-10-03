@@ -57,7 +57,12 @@ struct CohortSelectionView: View {
 struct CohortComparisonView: View {
     let snapshot: DashboardSnapshot
     @Binding var range: DashboardRange
+    @State private var sort: CohortComparisonSort = .recent
     var compact = true
+
+    private var orderedSummaries: [DashboardSnapshot.CohortSummary] {
+        DashboardSnapshot.ordered(snapshot.cohortSummaries, by: sort)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 12) {
@@ -70,13 +75,22 @@ struct CohortComparisonView: View {
                 .pickerStyle(.segmented).labelsHidden()
                 .accessibilityLabel("History range")
                 .frame(width: 150)
+                Picker(selection: $sort) {
+                    ForEach(CohortComparisonSort.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                } label: {
+                    Text("Sort: \(sort.shortTitle)")
+                }
+                .pickerStyle(.menu)
+                .accessibilityLabel("Sort model comparisons by speed metric")
             }
-            if snapshot.cohortSummaries.isEmpty {
+            if orderedSummaries.isEmpty {
                 Text("Completed turns from each model will appear here.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: compact ? 72 : 130)
             } else {
-                ForEach(snapshot.cohortSummaries) { summary in
+                ForEach(orderedSummaries) { summary in
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(alignment: .firstTextBaseline, spacing: 7) {
                             Text(summary.cohort.displayModel)
@@ -108,12 +122,16 @@ struct CohortComparisonView: View {
                         )
                     }
                     .padding(.vertical, 5)
-                    if summary.id != snapshot.cohortSummaries.last?.id {
+                    if summary.id != orderedSummaries.last?.id {
                         Divider().opacity(0.55)
                     }
                 }
             }
-            Text("Whole-turn measurements · no pooled comparison · effort shown when reported; speed tier/workload uncontrolled")
+            if range == .week {
+                Text("Previous 7 days unavailable · local history retains 7 days.")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            Text("Whole-turn measurements · speed ordering is not a quality ranking · effort shown when reported; speed tier/workload uncontrolled")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .dashboardCard(padding: 12)

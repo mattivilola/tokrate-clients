@@ -56,9 +56,11 @@ struct SharingView: View {
             Label("Community collection is paused", systemImage: "pause.circle").font(.caption)
         } else {
             HStack(spacing: 6) {
-                Text("Community · \(windowLabel(board.window))")
+                Text("Community publication · \(windowLabel(board.window))")
                 if board.state == "stale" {
-                    statusTag("Older data", color: .orange)
+                    statusTag("Older data · signals may be outdated", color: .orange)
+                } else {
+                    statusTag("State: \(publicationStateLabel(board.state))", color: .secondary)
                 }
                 if board.state == "insufficient_data" || board.publicationMode == "early_data" {
                     statusTag("Early data", color: .secondary)
@@ -66,14 +68,18 @@ struct SharingView: View {
                 Spacer(minLength: 0)
             }
             .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+            if let dataTime = timeLabel(board.dataAsOf ?? board.generatedAt) {
+                Text("Data as of \(dataTime)")
+                    .font(.system(size: 8)).foregroundStyle(.secondary)
+            }
 
             if selection.isAllModels {
                 if board.cohorts.isEmpty {
                     Text("Community comparison is gathering data.")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 } else {
-                    ForEach(board.cohorts) { cohort in communityRow(cohort) }
-                    ForEach(matchingAlerts(in: board, cohorts: board.cohorts)) { alert in alertRow(alert) }
+                    ForEach(board.cohorts) { cohort in communityRow(cohort, isStale: board.state == "stale") }
+                    alertStatusAndRows(in: board, cohorts: board.cohorts)
                 }
             } else if let target = selectedCohort {
                 let matches = board.cohorts.filter { exactlyMatches($0, target: target) }
@@ -82,8 +88,8 @@ struct SharingView: View {
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    ForEach(matches) { cohort in communityRow(cohort) }
-                    ForEach(matchingAlerts(in: board, cohorts: matches)) { alert in alertRow(alert) }
+                    ForEach(matches) { cohort in communityRow(cohort, isStale: board.state == "stale") }
+                    alertStatusAndRows(in: board, cohorts: matches)
                 }
             } else {
                 Text("Choose a reported model and client version to see its community comparison.")
@@ -94,6 +100,8 @@ struct SharingView: View {
                 Text("Method: \(methodology)")
                     .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
             }
+            Text("Geographic coverage unknown · answer quality not measured · streaming speed unavailable. No alert is not a health status.")
+                .font(.system(size: 9)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text("Community rows use reported primary-client samples. Effort is shown when reported; speed tier and workload are uncontrolled.")
                 .font(.system(size: 9)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
@@ -112,7 +120,7 @@ struct SharingView: View {
         return cohort.id == expectedID
     }
 
-    private func communityRow(_ cohort: GlobalBoard.Cohort) -> some View {
+    private func communityRow(_ cohort: GlobalBoard.Cohort, isStale: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Text(cohort.model).lineLimit(1)
@@ -144,6 +152,13 @@ struct SharingView: View {
                 }
                 .font(.system(size: 9)).foregroundStyle(.secondary).monospacedDigit()
             }
+            if let comparison = cohort.comparison {
+                communityComparison(comparison, isStale: isStale)
+            }
+            if let signals = cohort.signals {
+                if let signal = signals.throughput { signalRow("Throughput trend", signal: signal, unit: "t/s", isStale: isStale) }
+                if let signal = signals.ttft { signalRow("TTFT trend", signal: signal, unit: "ms", isStale: isStale) }
+            }
         }
         .font(.system(size: 10))
         .padding(.vertical, 3)
@@ -151,13 +166,132 @@ struct SharingView: View {
 
     private func matchingAlerts(in board: GlobalBoard, cohorts: [GlobalBoard.Cohort]) -> [GlobalBoard.Alert] {
         let ids = Set(cohorts.map(\.id))
-        return board.alerts.filter { alert in
-            if let cohortId = alert.cohortId { return ids.contains(cohortId) }
-            guard let model = alert.model, let provider = alert.provider, let version = alert.clientVersion else { return false }
-            let matchingRows = board.cohorts.filter { $0.model == model && $0.provider == provider && $0.clientVersion == version }
-            guard matchingRows.count == 1, let match = matchingRows.first else { return false }
-            return cohorts.contains { $0.id == match.id }
+        return board.alerts.filter { alert in alert.cohortId.map(ids.contains) == true }
+    }
+
+    @ViewBuilder
+    private func alertStatusAndRows(in board: GlobalBoard, cohorts: [GlobalBoard.Cohort]) -> some View {
+        let alerts = matchingAlerts(in: board, cohorts: cohorts)
+        if alerts.isEmpty {
+            Text(board.state == "stale" ? "No active alert in this older snapshot. This does not confirm provider health." : "No active published alert. This does not confirm provider health.")
+                .font(.system(size: 9)).foregroundStyle(.secondary)
+        } else {
+            ForEach(alerts) { alert in alertRow(alert) }
         }
+    }
+
+    private func communityComparison(_ comparison: GlobalBoard.Comparison, isStale: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(isStale ? "Community · older snapshot · current vs previous period" : "Community · current vs previous period")
+                .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+            if let throughput = comparison.throughput {
+                comparisonLine("Throughput", metric: throughput, unit: "t/s", digits: 1)
+            }
+            if let ttft = comparison.ttft {
+                comparisonLine("Codex TTFT", metric: ttft, unit: "ms", digits: 0)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func comparisonLine(_ title: String, metric: GlobalBoard.ComparisonMetric, unit: String, digits: Int) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(title): \(periodValue(metric.current, unit: unit, digits: digits)) vs \(periodValue(metric.previous, unit: unit, digits: digits)) · \(percent(metric.changePercent))")
+                .font(.system(size: 9, weight: .medium)).monospacedDigit().fixedSize(horizontal: false, vertical: true)
+            Text("Current \(coverage(metric.current)) · previous \(coverage(metric.previous)) · \(availability(metric.availability))")
+                .font(.system(size: 8)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func signalRow(_ title: String, signal: GlobalBoard.Signal, unit: String, isStale: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(title): \(isStale ? "older snapshot · " : "")\(signalStateLabel(signal.state))")
+                .font(.system(size: 9, weight: .medium))
+            Text("\(isStale ? "Latest 5-min bucket in this older snapshot" : "Latest 5-min bucket") · \(countLabel(signal.recentTurns, noun: "turns")) · \(countLabel(signal.recentContributors, noun: "contributors") )")
+                .font(.system(size: 8)).monospacedDigit().foregroundStyle(.secondary)
+            Text("Baseline · \(countLabel(signal.baselineBuckets, noun: "buckets")) · \(countLabel(signal.baselineDays, noun: "days")) · \(signal.baselineHours.map { String(format: "%.0f hours", $0) } ?? "hours unavailable")")
+                .font(.system(size: 8)).monospacedDigit().foregroundStyle(.secondary)
+            HStack(spacing: 3) {
+                if let change = signal.changePercent { Text("\(String(format: "%+.1f%%", change)) vs baseline") }
+                if let median = signal.baselineMedian { Text("· baseline median \(String(format: "%.1f", median)) \(unit)") }
+            }
+            .font(.system(size: 8)).monospacedDigit().foregroundStyle(.secondary)
+            if let reason = signal.reason {
+                Text(signalReasonLabel(reason)).font(.system(size: 8)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 3)
+    }
+
+    private func countLabel(_ value: Int?, noun: String) -> String {
+        value.map { "\($0) \(noun)" } ?? "\(noun) unavailable"
+    }
+
+    private func timeLabel(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let formatter = ISO8601DateFormatter()
+        let date = formatter.date(from: value) ?? {
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter.date(from: value)
+        }()
+        return date?.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func publicationStateLabel(_ state: String) -> String {
+        switch state {
+        case "stale": "older data"
+        case "insufficient_data": "gathering data"
+        case "early_data": "early data"
+        case "ready", "available": "current snapshot"
+        default: state.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    private func signalStateLabel(_ state: String?) -> String {
+        switch state {
+        case "insufficient_baseline", "building_baseline": "building baseline"
+        case "no_large_change": "no large change detected"
+        case "slower", "slowdown": "possible slowdown"
+        case "alert", "change_detected": "change detected"
+        case let state?: state.replacingOccurrences(of: "_", with: " ")
+        case nil: "unavailable"
+        }
+    }
+
+    private func signalReasonLabel(_ reason: String) -> String {
+        switch reason {
+        case "insufficient_baseline": "More baseline data is needed."
+        case "no_large_change": "No large change was detected."
+        case "slowdown": "A possible slowdown was detected."
+        default: reason.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    private func periodValue(_ period: GlobalBoard.ComparisonPeriod?, unit: String, digits: Int) -> String {
+        guard let median = period?.median else { return "— \(unit)" }
+        return "\(String(format: "%.*f", digits, median)) \(unit)"
+    }
+
+    private func coverage(_ period: GlobalBoard.ComparisonPeriod?) -> String {
+        guard let period else { return "unavailable" }
+        let turns = period.turns.map(String.init) ?? "turn count unavailable"
+        let contributors = period.contributors.map { "\($0) people" } ?? "contributor count unavailable"
+        return "\(turns) turns, \(contributors)"
+    }
+
+    private func availability(_ value: String?) -> String {
+        switch value {
+        case "available": "comparison available"
+        case "insufficient_current": "insufficient current data"
+        case "insufficient_previous": "insufficient previous data"
+        case "outside_retention": "previous period outside retention"
+        case let value?: value.replacingOccurrences(of: "_", with: " ")
+        case nil: "comparison status unavailable"
+        }
+    }
+
+    private func percent(_ value: Double?) -> String {
+        value.map { String(format: "%+.1f%%", $0) } ?? "change unavailable"
     }
 
     private func alertRow(_ alert: GlobalBoard.Alert) -> some View {

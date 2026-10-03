@@ -48,6 +48,48 @@ public struct GlobalBoard: Decodable, Sendable {
         public let minTtftMs: Double?
         public let maxTtftMs: Double?
         public let p95TtftMs: Double?
+        public let comparison: Comparison?
+        public let signals: Signals?
+    }
+
+    /// Additive server trend data. Every field is optional so older and partial boards remain readable.
+    public struct Comparison: Decodable, Sendable {
+        public let throughput: ComparisonMetric?
+        public let ttft: ComparisonMetric?
+    }
+
+    public struct ComparisonMetric: Decodable, Sendable {
+        public let method: String?
+        public let current: ComparisonPeriod?
+        public let previous: ComparisonPeriod?
+        public let changePercent: Double?
+        public let availability: String?
+    }
+
+    public struct ComparisonPeriod: Decodable, Sendable {
+        public let startAt: String?
+        public let endAt: String?
+        public let median: Double?
+        public let contributors: Int?
+        public let turns: Int?
+    }
+
+    public struct Signals: Decodable, Sendable {
+        public let throughput: Signal?
+        public let ttft: Signal?
+    }
+
+    public struct Signal: Decodable, Sendable {
+        public let state: String?
+        public let reason: String?
+        public let baselineBuckets: Int?
+        public let baselineDays: Int?
+        public let baselineHours: Double?
+        public let baselineMedian: Double?
+        public let changePercent: Double?
+        public let lastObservedAt: String?
+        public let recentContributors: Int?
+        public let recentTurns: Int?
     }
     public struct Alert: Decodable, Identifiable, Sendable {
         public var id: String { "\(cohortId ?? model ?? "all"):\(metric ?? "unknown"):\(state ?? "alert")" }

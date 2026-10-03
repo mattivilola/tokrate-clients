@@ -121,6 +121,69 @@ final class DashboardSnapshotTests: XCTestCase {
         XCTAssertEqual(DashboardSelection.restored(from: "cohort:\(oldParts)"), .cohort(restoredLegacy))
     }
 
+    func testLocalPeriodComparisonKeepsMetricCountsIndependentAndRequiresFiveValues() {
+        let current = (0..<5).map { index in
+            metric("current-\(index)", secondsAgo: Double(index + 1) * 60, rate: 20, ttft: index < 4 ? 2 : nil, reasoningEffort: "high")
+        }
+        let previous = (0..<5).map { index in
+            metric("previous-\(index)", secondsAgo: 90_000 + Double(index), rate: 10, ttft: 1, reasoningEffort: "high")
+        }
+        let otherEffort = (0..<5).map { index in
+            metric("other-\(index)", secondsAgo: Double(index + 1) * 30, rate: 999, ttft: 0.01, reasoningEffort: "low")
+        }
+        let selected = ModelCohort(model: "test-model", provider: "openai", clientVersion: "0.159.2", reasoningEffort: "high")
+        let day = DashboardSnapshot(records: current + previous + otherEffort, range: .day, selection: .cohort(selected), now: now)
+        let comparison = try! XCTUnwrap(day.localPeriodComparison)
+
+        XCTAssertEqual(comparison.recent15Minutes.throughput.count, 5)
+        XCTAssertEqual(comparison.last24Hours.throughput.count, 5)
+        XCTAssertEqual(comparison.last24Hours.throughput.median, 20)
+        XCTAssertEqual(comparison.previous24Hours.throughput.count, 5)
+        XCTAssertEqual(comparison.throughputChangePercent, 100)
+        XCTAssertEqual(comparison.last24Hours.ttft.count, 4)
+        XCTAssertEqual(comparison.previous24Hours.ttft.count, 5)
+        XCTAssertNil(comparison.ttftChangePercent)
+        XCTAssertNotNil(comparison.previousRange)
+    }
+
+    func testLocalPercentChangeIsNilForInsufficientSamplesOrZeroBaselineAndWeekHasNoPriorWeek() {
+        let fourCurrent = (0..<4).map { index in
+            metric("four-current-\(index)", secondsAgo: Double(index + 1) * 60, rate: 10, ttft: 1)
+        }
+        let zeroPrevious = (0..<5).map { index in
+            metric("zero-previous-\(index)", secondsAgo: 90_000 + Double(index), rate: 0, ttft: 0)
+        }
+        let insufficient = DashboardSnapshot(records: fourCurrent + zeroPrevious, range: .day, now: now)
+        XCTAssertEqual(insufficient.localPeriodComparison?.last24Hours.throughput.count, 4)
+        XCTAssertNil(insufficient.localPeriodComparison?.throughputChangePercent)
+        XCTAssertNil(insufficient.localPeriodComparison?.ttftChangePercent)
+
+        let current = (0..<5).map { index in
+            metric("current-\(index)", secondsAgo: Double(index + 1) * 60, rate: 10, ttft: 1)
+        }
+        let enoughZeroBaseline = DashboardSnapshot(records: current + zeroPrevious, range: .day, now: now)
+        XCTAssertNil(enoughZeroBaseline.localPeriodComparison?.throughputChangePercent)
+        XCTAssertNil(enoughZeroBaseline.localPeriodComparison?.ttftChangePercent)
+
+        let week = DashboardSnapshot(records: current + zeroPrevious, range: .week, now: now)
+        XCTAssertNil(week.localPeriodComparison?.previousRange)
+        XCTAssertEqual(week.localPeriodComparison?.range, .week)
+    }
+
+    func testAllModelOrderingUsesNeutralDefaultAndLeavesMissingSpeedValuesLast() {
+        let recent = metric("recent", secondsAgo: 10, model: "model-recent", rate: 9, ttft: nil)
+        let fast = metric("fast", secondsAgo: 20, model: "model-fast", rate: 30, ttft: 0.3)
+        let noThroughput = metric("missing", secondsAgo: 5, model: "model-missing", outputTokens: 10, rate: 999, ttft: 0.2)
+        let snapshot = DashboardSnapshot(records: [recent, fast, noThroughput], range: .day, selection: .all, now: now)
+
+        let neutral = DashboardSnapshot.ordered(snapshot.cohortSummaries, by: .recent)
+        let throughput = DashboardSnapshot.ordered(snapshot.cohortSummaries, by: .higherThroughput)
+        let ttft = DashboardSnapshot.ordered(snapshot.cohortSummaries, by: .lowerTTFT)
+        XCTAssertEqual(neutral.first?.cohort.model, "model-missing")
+        XCTAssertEqual(throughput.map(\.cohort.model), ["model-fast", "model-recent", "model-missing"])
+        XCTAssertEqual(ttft.map(\.cohort.model), ["model-missing", "model-fast", "model-recent"])
+    }
+
     func testPersonalTrendDoesNotPoolEffortsOrUnknownModelProviders() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

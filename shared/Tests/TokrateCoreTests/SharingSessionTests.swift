@@ -63,7 +63,7 @@ final class SharingSessionTests: XCTestCase {
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
         XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
-        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.6")
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.7")
         XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
@@ -79,7 +79,7 @@ final class SharingSessionTests: XCTestCase {
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
         let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
-        XCTAssertEqual(reported.appVersion, "0.1.6")
+        XCTAssertEqual(reported.appVersion, "0.1.7")
         XCTAssertEqual(reported.reasoningEffort, "ultra")
         let missing = try XCTUnwrap(SharedSample(metric()))
         XCTAssertEqual(missing.reasoningEffort, "unknown")
@@ -169,5 +169,22 @@ final class SharingSessionTests: XCTestCase {
         let oldBoard = try JSONDecoder().decode(GlobalBoard.self, from: Data(legacy.utf8))
         XCTAssertNil(oldBoard.cohorts.first?.reasoningEffort)
         XCTAssertNil(oldBoard.cohorts.first?.client)
+    }
+
+    func testGlobalBoardDecodesOptionalComparisonAndSignalFieldsIncludingNulls() throws {
+        let json = #"{"schemaVersion":1,"collectionEnabled":true,"state":"ready","window":"24h","cohorts":[{"id":"cohort","model":"gpt-test","provider":"openai","contributors":3,"turns":9,"comparison":{"throughput":{"method":"median of turn observations","current":{"startAt":"2026-10-02T10:00:00Z","endAt":"2026-10-03T10:00:00Z","median":12.5,"contributors":3,"turns":9},"previous":null,"changePercent":null,"availability":"outside_retention"},"ttft":{"current":{"median":800,"contributors":2,"turns":4},"previous":{"median":1000,"contributors":2,"turns":5},"changePercent":-20,"availability":"available"}},"signals":{"throughput":null,"ttft":{"state":"insufficient_baseline","reason":"Need more baseline buckets","baselineBuckets":2,"baselineDays":1,"baselineHours":2.5,"baselineMedian":900,"changePercent":null,"lastObservedAt":"2026-10-03T09:55:00Z","recentContributors":2,"recentTurns":4}}}],"alerts":[]}"#
+        let board = try JSONDecoder().decode(GlobalBoard.self, from: Data(json.utf8))
+        let cohort = try XCTUnwrap(board.cohorts.first)
+        let throughput = try XCTUnwrap(cohort.comparison?.throughput)
+        XCTAssertEqual(throughput.method, "median of turn observations")
+        XCTAssertEqual(throughput.current?.median, 12.5)
+        XCTAssertNil(throughput.previous)
+        XCTAssertNil(throughput.changePercent)
+        XCTAssertEqual(throughput.availability, "outside_retention")
+        XCTAssertEqual(cohort.comparison?.ttft?.changePercent, -20)
+        XCTAssertNil(cohort.signals?.throughput)
+        XCTAssertEqual(cohort.signals?.ttft?.baselineBuckets, 2)
+        XCTAssertEqual(cohort.signals?.ttft?.baselineDays, 1)
+        XCTAssertEqual(cohort.signals?.ttft?.recentTurns, 4)
     }
 }

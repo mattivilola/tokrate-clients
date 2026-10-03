@@ -50,9 +50,9 @@ struct MenuBarView: View {
             if snapshot.selection.isAllModels {
                 CohortComparisonView(snapshot: snapshot, range: $range)
             } else {
+                SummaryView(snapshot: snapshot)
                 ThroughputGaugeView(metric: snapshot.latest)
                 TrendChartView(snapshot: snapshot, range: $range)
-                SummaryView(snapshot: snapshot)
                 PersonalTrendView(trend: snapshot.personalTrend, reasoningEffort: snapshot.selectedCohort?.reasoningEffort)
             }
             SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, showToggle: false)
