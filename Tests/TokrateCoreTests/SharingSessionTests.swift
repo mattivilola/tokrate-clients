@@ -1,0 +1,137 @@
+import CryptoKit
+import Foundation
+import TokrateCore
+import XCTest
+
+private final class MemoryIdentity: SharingIdentity, @unchecked Sendable {
+    let key = Curve25519.Signing.PrivateKey().rawRepresentation
+    private let lock = NSLock()
+    private var count = 0
+    var calls: Int { lock.withLock { count } }
+    func loadOrCreate() throws -> Data { lock.withLock { count += 1 }; return key }
+}
+private actor MockTransport: SharingTransport {
+    var requests: [URLRequest] = []
+    var uploadStatus = 200
+    var pause = false
+    var continuation: CheckedContinuation<Void, Never>?
+    func configure(uploadStatus: Int = 200, pause: Bool = false) { self.uploadStatus = uploadStatus; self.pause = pause }
+    func send(_ request: URLRequest) async throws -> (Data, Int) {
+        requests.append(request)
+        if pause { await withCheckedContinuation { continuation = $0 } }
+        if request.httpMethod == "POST" { return (Data(), uploadStatus) }
+        return (Data(#"{"schemaVersion":1,"generatedAt":"2026-10-03T10:00:00Z","dataAsOf":null,"collectionEnabled":true,"state":"insufficient_data","window":"15m","cohorts":[],"alerts":[],"unknownField":true}"#.utf8), 200)
+    }
+    func resume() { continuation?.resume(); continuation = nil; pause = false }
+    func snapshot() -> [URLRequest] { requests }
+    func isSuspended() -> Bool { continuation != nil }
+}
+
+@MainActor
+final class SharingSessionTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_791_020_401)
+    private func metric(id: String = "LOCAL_PRIVATE_DIGEST", date: Date? = nil, model: String? = "gpt-test") -> TurnMetric {
+        TurnMetric(id: id, completedAt: date ?? now, model: model, outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary")
+    }
+
+    func testLocalOnlyDoesNotCreateIdentityOrContactServer() async {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enqueue([metric()], now: now)
+        await session.refresh(now: now)
+        XCTAssertEqual(identity.calls, 0)
+        let requests = await transport.snapshot()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(session.pendingCount, 0)
+        XCTAssertNil(session.board)
+    }
+
+    func testFutureOnlySignedAllowlistAndFiveMinuteBuckets() async throws {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enable(now: now, startPolling: false)
+        session.enqueue([metric(id: "old", date: now.addingTimeInterval(-1)), metric(), metric()], now: now)
+        XCTAssertEqual(session.pendingCount, 1)
+        await session.refresh(now: now)
+        let requests = await transport.snapshot()
+        XCTAssertEqual(requests.count, 2)
+        let request = requests[0], body = try XCTUnwrap(request.httpBody)
+        let publicKeyData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(request.value(forHTTPHeaderField: "X-Tokrate-Key"))))
+        let signature = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(request.value(forHTTPHeaderField: "X-Tokrate-Signature"))))
+        XCTAssertTrue(try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData).isValidSignature(signature, for: body))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
+        XCTAssertEqual(samples.count, 1)
+        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
+        let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
+        XCTAssertEqual(observed.timeIntervalSince1970.truncatingRemainder(dividingBy: 300), 0)
+        XCTAssertEqual(session.pendingCount, 0)
+        XCTAssertNotNil(session.board)
+        session.disable()
+        XCTAssertNil(session.board)
+        await session.refresh(now: now.addingTimeInterval(100))
+        let after = await transport.snapshot()
+        XCTAssertEqual(after.count, 2)
+    }
+
+    func testRetryKeepsRandomSampleIDAndRefreshIsRateLimited() async throws {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        await transport.configure(uploadStatus: 503)
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enable(now: now, startPolling: false)
+        session.enqueue([metric()], now: now)
+        await session.refresh(now: now)
+        await session.refresh(now: now.addingTimeInterval(1))
+        await session.refresh(now: now.addingTimeInterval(30))
+        let requests = await transport.snapshot()
+        XCTAssertEqual(requests.count, 4)
+        func sampleID(_ request: URLRequest) throws -> String {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            return try XCTUnwrap((object["samples"] as? [[String: Any]])?.first?["sampleId"] as? String)
+        }
+        XCTAssertEqual(try sampleID(requests[0]), try sampleID(requests[2]))
+        XCTAssertNotEqual(requests[0].httpBody, requests[2].httpBody)
+        XCTAssertEqual(session.pendingCount, 1)
+        session.disable()
+        XCTAssertEqual(session.pendingCount, 0)
+    }
+
+    func testOffDuringInflightUploadCannotPollOrRestoreBoard() async {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        await transport.configure(pause: true)
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enable(now: now, startPolling: false)
+        session.enqueue([metric()], now: now)
+        let task = Task { await session.refresh(now: now) }
+        while !(await transport.isSuspended()) { await Task.yield() }
+        session.disable()
+        await transport.resume()
+        await task.value
+        XCTAssertNil(session.board)
+        XCTAssertEqual(session.pendingCount, 0)
+        let requests = await transport.snapshot()
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testUnsafeModelIsUnknownAndInvalidTimingsAreOmitted() throws {
+        let sample = try XCTUnwrap(SharedSample(metric(model: "/private/prompt text")))
+        XCTAssertEqual(sample.model, "unknown")
+        XCTAssertNil(SharedSample(TurnMetric(id: "bad", completedAt: now, model: nil, outputTokens: 10_000_001, durationSeconds: 1, codexTTFTSeconds: nil, turnThroughputTPS: 1)))
+        let nullSample = try XCTUnwrap(SharedSample(TurnMetric(id: "bad-ttft", completedAt: now, model: nil, outputTokens: 1, durationSeconds: 1, codexTTFTSeconds: 2, turnThroughputTPS: 1)))
+        XCTAssertNil(nullSample.ttftMs)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: SampleEnvelope(sentAt: now, samples: [nullSample]).encoded()) as? [String: Any])
+        let row = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
+        XCTAssertTrue(row["ttftMs"] is NSNull)
+        XCTAssertTrue(row["reasoningOutputTokens"] is NSNull)
+    }
+
+    func testQueueIsBoundedAndExpiresAfterADay() {
+        let session = SharingSession(identity: MemoryIdentity(), transport: MockTransport())
+        session.enable(now: now, startPolling: false)
+        session.enqueue((0..<1100).map { metric(id: "\($0)") }, now: now)
+        XCTAssertEqual(session.pendingCount, 1000)
+        session.enqueue([], now: now.addingTimeInterval(86_401))
+        XCTAssertEqual(session.pendingCount, 0)
+    }
+}
