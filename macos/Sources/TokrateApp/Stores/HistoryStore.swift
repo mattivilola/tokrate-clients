@@ -25,8 +25,9 @@ final class HistoryStore {
 
     var records: [TurnMetric] { history.records }
     var menuBarTitle: String {
-        guard let latest = history.records.first else { return "Tokrate" }
-        guard Date.now.timeIntervalSince(latest.completedAt) <= 900 else { return "Tokrate" }
+        guard isMonitoring, let latest = history.records.first else { return "— t/s" }
+        let age = Date.now.timeIntervalSince(latest.completedAt)
+        guard age >= 0, age <= 900, latest.turnThroughputTPS.isFinite, latest.turnThroughputTPS >= 0 else { return "— t/s" }
         return String(format: "%.1f t/s", latest.turnThroughputTPS)
     }
     var folderDescription: String { hasCustomFolder ? "Custom folder" : "Codex sessions" }

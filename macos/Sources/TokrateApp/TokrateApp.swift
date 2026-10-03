@@ -14,13 +14,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct TokrateApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     private var historyStore: HistoryStore { appDelegate.historyStore }
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView(store: historyStore)
         } label: {
-            Label(historyStore.menuBarTitle, systemImage: "speedometer")
+            HStack(spacing: 4) {
+                Image(systemName: "speedometer")
+                if showMenuBarSpeed {
+                    Text(historyStore.menuBarTitle).monospacedDigit()
+                }
+            }
+            .accessibilityLabel(showMenuBarSpeed ? "Tokrate, latest completed turn: \(historyStore.menuBarTitle)" : "Tokrate")
         }
         .menuBarExtraStyle(.window)
 

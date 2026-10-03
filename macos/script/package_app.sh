@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIGURATION="${1:-release}"
 SWIFT_FLAGS=()
 if [[ "${2:-}" == "--disable-sandbox" ]]; then SWIFT_FLAGS+=(--disable-sandbox); fi
 case "$CONFIGURATION" in debug|release) ;; *) echo 'Expected debug or release' >&2; exit 2;; esac
 swift build "${SWIFT_FLAGS[@]}" --package-path "$ROOT_DIR" --build-system native -j 2 --configuration "$CONFIGURATION" --product TokrateApp
 BIN_DIR="$(swift build "${SWIFT_FLAGS[@]}" --package-path "$ROOT_DIR" --build-system native --configuration "$CONFIGURATION" --show-bin-path)"
-BUNDLE="$ROOT_DIR/dist/Tokrate.app"
+BUNDLE="$ROOT_DIR/macos/dist/Tokrate.app"
 mkdir -p "$BUNDLE/Contents/MacOS"
 cp "$BIN_DIR/TokrateApp" "$BUNDLE/Contents/MacOS/Tokrate"
 chmod +x "$BUNDLE/Contents/MacOS/Tokrate"
@@ -20,8 +20,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Tokrate</string>
 <key>CFBundleDisplayName</key><string>Tokrate</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.3</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>0.1.4</string>
+<key>CFBundleVersion</key><string>5</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

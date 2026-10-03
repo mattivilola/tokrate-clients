@@ -4,6 +4,7 @@ import TokrateCore
 struct MenuBarView: View {
     let store: HistoryStore
     @State private var range: DashboardRange = .today
+    @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -16,11 +17,14 @@ struct MenuBarView: View {
                 Spacer()
                 Label(store.isMonitoring ? "Monitoring" : "Paused", systemImage: store.isMonitoring ? "circle.fill" : "pause.fill")
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                WebsiteLinkView(compact: true)
                 Menu {
                     Button("Full history…") { openWindow(id: "history"); NSApp.activate(ignoringOtherApps: true) }
                     Button(store.isMonitoring ? "Pause monitoring" : "Resume monitoring") {
                         if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
                     }
+                    Toggle("Show speed in menu bar", isOn: $showMenuBarSpeed)
+                        .help("Shows the latest completed turn’s throughput, updated after each turn.")
                     Divider()
                     Link("Privacy details", destination: URL(string: "https://tokrate.dev/privacy")!)
                     Button("Quit Tokrate") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")

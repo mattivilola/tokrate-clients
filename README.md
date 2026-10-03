@@ -4,6 +4,13 @@ Tokrate is a local macOS menu bar app and command-line inspector for completed-t
 
 Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, Today / 7 days trend, summary metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. Its throughput metric is Codex-reported output tokens divided by whole-turn duration, including tool work and waits. The app labels Codex's reported TTFT separately; streaming-only tokens per second remain unavailable.
 
+## Repository layout
+
+- `macos/`: shipping SwiftUI app, UI tests, packaging and signing scripts.
+- `windows/` and `linux/`: planned native tray clients; no releases yet.
+- `shared/`: current Swift metric core, contribution logic, CLI and core tests. Portability beyond macOS is not yet verified.
+- Root `Package.swift`, `docs/`, and `LICENSE`: package assembly, cross-client contract and MIT license.
+
 ## Build
 
 Requires macOS 14 or newer and Swift 6.
@@ -13,7 +20,7 @@ swift build
 swift test
 ```
 
-To stage and launch the menu bar app as a macOS bundle, run `./script/build_and_run.sh`. The script builds `dist/Tokrate.app` first. The command-line client is available with `swift run tokrate inspect <session.jsonl>`.
+To stage and launch the menu bar app as a macOS bundle, run `./macos/script/build_and_run.sh`. The script builds `macos/dist/Tokrate.app` first. The command-line client is available with `swift run tokrate inspect <session.jsonl>`.
 
 ## Local data
 
@@ -32,14 +39,14 @@ Offline retries use a memory-only queue capped at 1,000 samples and 24 hours; qu
 ## Release packaging
 
 ```sh
-./script/package_app.sh release
+./macos/script/package_app.sh release
 ```
 
-This builds a native-architecture `dist/Tokrate.app` (macOS 14+, bundle ID `dev.tokrate.mac`, version 0.1.3). It does not sign, notarize, publish, or launch. Release ownership must separately sign with Developer ID and hardened runtime, verify, submit and staple notarization, then archive the final bundle. `./script/build_and_run.sh --verify` stages a debug bundle and checks the launched process. Building again replaces bundle contents; sign only after the final build. The package has no third-party dependencies.
+This builds a native-architecture `macos/dist/Tokrate.app` (macOS 14+, bundle ID `dev.tokrate.mac`, version 0.1.4). It does not sign, notarize, publish, or launch. Release ownership must separately sign with Developer ID and hardened runtime, verify, submit and staple notarization, then archive the final bundle. `./macos/script/build_and_run.sh --verify` stages a debug bundle and checks the launched process. Building again replaces bundle contents; sign only after the final build. The package has no third-party dependencies.
 
 Validation: `swift test --build-system native -j 2` exercises parser timing, cumulative counts, malformed input, incremental file reading, retention, no requests/identity while sharing is off, default-on preferences, persisted-off preferences, allowlisted signed bytes, five-minute buckets, no historical backfill, stable retries, polling rate limits, bounded queue expiry, and opt-out during a suspended upload. Tests use mocks and do not contact production.
 
-To sign the already-built bundle, use `./script/sign_release.sh "$DEVELOPER_ID_IDENTITY"`. The script applies hardened runtime and a secure timestamp, verifies the signature, and stages `dist/Tokrate-0.1.3-macos-arm64.zip` on Apple Silicon. It adds no entitlements. To additionally submit, wait for acceptance, staple, verify Gatekeeper, and recreate the final archive, pass an already-configured Keychain notary profile as the second argument. No credential value belongs in the repository. The archive hash changes after stapling; publish only the final verified archive. In an environment that blocks SwiftPM's nested sandbox, `./script/package_app.sh release --disable-sandbox` uses the same local build without SwiftPM's inner sandbox.
+To sign the already-built bundle, use `./macos/script/sign_release.sh "$DEVELOPER_ID_IDENTITY"`. The script applies hardened runtime and a secure timestamp, verifies the signature, and stages `macos/dist/Tokrate-0.1.4-macos-arm64.zip` on Apple Silicon. It adds no entitlements. To additionally submit, wait for acceptance, staple, verify Gatekeeper, and recreate the final archive, pass an already-configured Keychain notary profile as the second argument. No credential value belongs in the repository. The archive hash changes after stapling; publish only the final verified archive. In an environment that blocks SwiftPM's nested sandbox, `./macos/script/package_app.sh release --disable-sandbox` uses the same local build without SwiftPM's inner sandbox.
 
 Version 0.1.1 replaces the automatically updating relative timestamp in the native menu with a static completion timestamp. This avoids recursive SwiftUI menu refreshes observed with saved turn history.
 
@@ -50,3 +57,5 @@ Version 0.1.3 starts monitoring and default-on sharing from the application laun
 The 0.1.3 dashboard uses native adaptive materials and static blue/teal gauges, with no continuous animation or ticking date views. The dial shows the latest completed turn from the retained seven-day history, even when the selected chart range has no turns. Today uses at most 48 interval medians; seven days uses at most 56. Summary medians and counts cover the selected range. Missing TTFT remains unavailable. The dial scale expands for higher rates; it is not a benchmark or quality score.
 
 For offscreen UI previews, `DashboardSnapshot(records:range:now:calendar:)` accepts supplied `TurnMetric` values and a fixed date. `ThroughputGaugeView(metric:compact:)`, `TrendChartView(snapshot:range:compact:)`, and `SummaryView(snapshot:)` are presentation-only views and do not construct a history store, read logs, access Keychain, or start network requests. Include `DashboardStyle.swift` when compiling these components separately. Use an explicit light/dark color scheme in a SwiftUI renderer.
+
+Version 0.1.4 adds **Open global stats** to the dashboard and full history, opening the canonical `https://tokrate.dev` website in your browser even when in-app sharing is off. The gear menu includes **Show speed in menu bar** (on by default, persisted). Turning it off leaves only the speedometer icon. When enabled, the value updates after completed turns; it is not a live streaming-speed measurement. Paused monitoring shows a dash rather than a stale rate.

@@ -76,6 +76,7 @@ struct HistoryView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            WebsiteLinkView()
             Button(store.isMonitoring ? "Pause" : "Start monitoring") {
                 if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
             }

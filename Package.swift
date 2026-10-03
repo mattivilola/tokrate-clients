@@ -10,10 +10,10 @@ let package = Package(
         .executable(name: "TokrateApp", targets: ["TokrateApp"])
     ],
     targets: [
-        .target(name: "TokrateCore"),
-        .executableTarget(name: "tokrate", dependencies: ["TokrateCore"]),
-        .executableTarget(name: "TokrateApp", dependencies: ["TokrateCore"]),
-        .testTarget(name: "TokrateCoreTests", dependencies: ["TokrateCore"]),
-        .testTarget(name: "TokrateAppTests", dependencies: ["TokrateApp", "TokrateCore"])
+        .target(name: "TokrateCore", path: "shared/Sources/TokrateCore"),
+        .executableTarget(name: "tokrate", dependencies: ["TokrateCore"], path: "shared/Sources/tokrate"),
+        .executableTarget(name: "TokrateApp", dependencies: ["TokrateCore"], path: "macos/Sources/TokrateApp"),
+        .testTarget(name: "TokrateCoreTests", dependencies: ["TokrateCore"], path: "shared/Tests/TokrateCoreTests"),
+        .testTarget(name: "TokrateAppTests", dependencies: ["TokrateApp", "TokrateCore"], path: "macos/Tests/TokrateAppTests")
     ]
 )
