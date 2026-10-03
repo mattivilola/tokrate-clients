@@ -10,7 +10,8 @@ final class HistoryStore {
         let records: [TurnMetric]
     }
 
-    let sharing = SharingSession(identity: KeychainIdentity())
+    let sharingPreferences = SharingPreferences(session: SharingSession(identity: KeychainIdentity()))
+    var sharing: SharingSession { sharingPreferences.session }
     private(set) var history: MetricHistory
     private(set) var isMonitoring = false
     private(set) var errorMessage: String?
@@ -46,6 +47,12 @@ final class HistoryStore {
         } else {
             history = MetricHistory()
         }
+    }
+
+    func startAutomatically() {
+        let launchedAt = Date.now
+        sharingPreferences.activate(now: launchedAt)
+        startMonitoring()
     }
 
     func selectFolder(_ url: URL) {

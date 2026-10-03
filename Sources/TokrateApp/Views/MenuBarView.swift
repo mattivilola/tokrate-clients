@@ -24,7 +24,17 @@ struct MenuBarView: View {
         } else {
             Button("Start monitoring") { store.startMonitoring() }
         }
-        Text(store.sharing.isEnabled ? "Community sharing on" : "Local only")
+        Toggle("Share new turns", isOn: Binding(
+            get: { store.sharingPreferences.isSharingRequested },
+            set: { store.sharingPreferences.setSharingEnabled($0) }
+        ))
+        if store.sharingPreferences.isSharingRequested && !store.sharing.isEnabled {
+            Text("Sharing needs attention")
+            Button("Retry sharing") { store.sharingPreferences.retry() }
+        } else {
+            Text(store.sharing.isEnabled ? "Community sharing on" : "Local only · sharing off")
+        }
+        Text("Only new numeric measurements")
         Text("Streaming TPS unavailable")
             .foregroundStyle(.secondary)
         Divider()

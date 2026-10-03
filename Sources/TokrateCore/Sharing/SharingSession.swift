@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Owns the network consent lifetime. Every await is followed by a generation check.
+/// Owns the active sharing lifetime. Every await is followed by a generation check.
 @MainActor @Observable
 public final class SharingSession {
     public private(set) var isEnabled = false

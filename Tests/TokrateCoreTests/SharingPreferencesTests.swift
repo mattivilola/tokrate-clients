@@ -1,0 +1,143 @@
+import CryptoKit
+import Foundation
+import TokrateCore
+import XCTest
+
+@MainActor
+private final class MemorySharingPreference: SharingPreferenceStore {
+    var sharingEnabled: Bool?
+    init(_ value: Bool? = nil) { sharingEnabled = value }
+}
+
+private final class PreferenceIdentity: SharingIdentity, @unchecked Sendable {
+    private let lock = NSLock()
+    private let key = Curve25519.Signing.PrivateKey().rawRepresentation
+    private var failure = false
+    private var count = 0
+    var calls: Int { lock.withLock { count } }
+    func setFailure(_ value: Bool) { lock.withLock { failure = value } }
+    func loadOrCreate() throws -> Data {
+        try lock.withLock {
+            count += 1
+            if failure { throw Failure.unavailable }
+            return key
+        }
+    }
+    private enum Failure: Error { case unavailable }
+}
+
+private actor PreferenceTransport: SharingTransport {
+    private var requests = 0
+    func count() -> Int { requests }
+    func send(_ request: URLRequest) async throws -> (Data, Int) {
+        requests += 1
+        if request.httpMethod == "POST" { return (Data(), 202) }
+        return (Data(#"{"schemaVersion":1,"generatedAt":null,"dataAsOf":null,"collectionEnabled":true,"state":"insufficient_data","window":"15m","cohorts":[],"alerts":[]}"#.utf8), 200)
+    }
+}
+
+@MainActor
+final class SharingPreferencesTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_791_020_401)
+    private func metric(_ id: String, at date: Date) -> TurnMetric {
+        TurnMetric(id: id, completedAt: date, model: "reported-model", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10)
+    }
+
+    func testDefaultOnActivatesExactlyOnceAndNeverBackfillsHistory() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let session = SharingSession(identity: identity, transport: transport)
+        let preference = MemorySharingPreference()
+        let model = SharingPreferences(session: session, store: preference)
+        XCTAssertTrue(model.isSharingRequested)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertEqual(identity.calls, 0)
+        model.activate(now: now, startPolling: false)
+        model.activate(now: now.addingTimeInterval(20), startPolling: false)
+        XCTAssertTrue(session.isEnabled)
+        XCTAssertEqual(identity.calls, 1)
+        session.enqueue([
+            metric("historical", at: now.addingTimeInterval(-1)),
+            metric("after-first-launch", at: now.addingTimeInterval(10))
+        ], now: now.addingTimeInterval(30))
+        XCTAssertEqual(session.pendingCount, 1, "Repeated activation must not move the original launch boundary")
+        await session.refresh(now: now.addingTimeInterval(30))
+        let count = await transport.count()
+        XCTAssertEqual(count, 2)
+    }
+
+    func testPersistedOffSurvivesNewModelAndMakesNoRequestsOrIdentityAccess() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let preference = MemorySharingPreference(false)
+        for _ in 0..<2 {
+            let session = SharingSession(identity: identity, transport: transport)
+            let model = SharingPreferences(session: session, store: preference)
+            model.activate(now: now, startPolling: false)
+            model.retry(now: now, startPolling: false)
+            session.enqueue([metric("ignored", at: now)], now: now)
+            await session.refresh(now: now)
+            XCTAssertFalse(model.isSharingRequested)
+            XCTAssertFalse(session.isEnabled)
+            XCTAssertEqual(session.pendingCount, 0)
+        }
+        XCTAssertEqual(identity.calls, 0)
+        let count = await transport.count()
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(preference.sharingEnabled, false)
+    }
+
+    func testSwitchOffPersistsAndReenableStartsANewEligibilityWindow() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let preference = MemorySharingPreference()
+        let firstSession = SharingSession(identity: identity, transport: transport)
+        let first = SharingPreferences(session: firstSession, store: preference)
+        first.activate(now: now, startPolling: false)
+        firstSession.enqueue([metric("pending", at: now)], now: now)
+        first.setSharingEnabled(false)
+        XCTAssertEqual(preference.sharingEnabled, false)
+        XCTAssertFalse(firstSession.isEnabled)
+        XCTAssertEqual(firstSession.pendingCount, 0)
+        XCTAssertNil(firstSession.board)
+
+        let relaunchedSession = SharingSession(identity: identity, transport: transport)
+        let relaunched = SharingPreferences(session: relaunchedSession, store: preference)
+        relaunched.activate(now: now.addingTimeInterval(20), startPolling: false)
+        XCTAssertFalse(relaunchedSession.isEnabled)
+        relaunched.setSharingEnabled(true, now: now.addingTimeInterval(30), startPolling: false)
+        XCTAssertEqual(preference.sharingEnabled, true)
+        relaunchedSession.enqueue([
+            metric("while-off", at: now.addingTimeInterval(25)),
+            metric("after-enable", at: now.addingTimeInterval(31))
+        ], now: now.addingTimeInterval(31))
+        XCTAssertEqual(relaunchedSession.pendingCount, 1)
+        XCTAssertTrue(relaunched.isSharingRequested)
+        XCTAssertTrue(relaunchedSession.isEnabled)
+        await relaunchedSession.refresh(now: now.addingTimeInterval(31))
+        let count = await transport.count()
+        XCTAssertEqual(count, 2)
+    }
+
+    func testKeychainFailureKeepsRequestedOnAndCanRetryWithoutBackfill() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        identity.setFailure(true)
+        let preference = MemorySharingPreference()
+        let session = SharingSession(identity: identity, transport: transport)
+        let model = SharingPreferences(session: session, store: preference)
+        model.activate(now: now, startPolling: false)
+        XCTAssertTrue(model.isSharingRequested)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertTrue(session.status.contains("Keychain"))
+        XCTAssertNil(preference.sharingEnabled, "A transient failure must not save an off preference")
+        await session.refresh(now: now)
+        let before = await transport.count()
+        XCTAssertEqual(before, 0)
+        identity.setFailure(false)
+        model.retry(now: now.addingTimeInterval(30), startPolling: false)
+        XCTAssertTrue(session.isEnabled)
+        XCTAssertEqual(identity.calls, 2)
+        session.enqueue([
+            metric("during-failure", at: now.addingTimeInterval(10)),
+            metric("after-retry", at: now.addingTimeInterval(31))
+        ], now: now.addingTimeInterval(31))
+        XCTAssertEqual(session.pendingCount, 1)
+    }
+}

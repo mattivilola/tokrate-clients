@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public protocol SharingIdentity: Sendable {
-    /// Called only after explicit consent, never during launch or local-only operation.
+    /// Called only while sharing is requested, including automatic default-on launch; never while sharing is off.
     func loadOrCreate() throws -> Data
 }
 

@@ -2,24 +2,30 @@ import SwiftUI
 import TokrateCore
 
 struct SharingView: View {
-    let sharing: SharingSession
-    @State private var showingConsent = false
+    let preferences: SharingPreferences
+    private var sharing: SharingSession { preferences.session }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label(sharing.isEnabled ? "Community sharing" : "Local only", systemImage: sharing.isEnabled ? "network" : "lock.shield")
+                Label(preferences.isSharingRequested ? (sharing.isEnabled ? "Community sharing" : "Sharing needs attention") : "Local only", systemImage: sharing.isEnabled ? "network" : "lock.shield")
                     .font(.headline)
                 Spacer()
                 Toggle("Share new turns", isOn: Binding(
-                    get: { sharing.isEnabled },
-                    set: { enabled in if enabled { showingConsent = true } else { sharing.disable() } }
+                    get: { preferences.isSharingRequested },
+                    set: { preferences.setSharingEnabled($0) }
                 ))
                 .toggleStyle(.switch)
             }
-            if sharing.isEnabled {
+            Text("Shares new turn measurements with tokrate.dev. No prompts, responses, code, paths, or session/account IDs. Switching off keeps measurements local and is remembered next time.")
+                .font(.caption).foregroundStyle(.secondary)
+            if preferences.isSharingRequested {
                 Text(sharing.status + (sharing.pendingCount > 0 ? " · \(sharing.pendingCount) pending" : ""))
                     .font(.caption).foregroundStyle(.secondary)
+                if !sharing.isEnabled {
+                    Button("Retry sharing") { preferences.retry() }
+                        .buttonStyle(.link)
+                }
                 if let board = sharing.board {
                     if !board.collectionEnabled {
                         Label("Community collection is paused", systemImage: "pause.circle")
@@ -51,17 +57,13 @@ struct SharingView: View {
                     Text("Community data will appear when available.").foregroundStyle(.secondary)
                 }
             } else {
-                Text("Your seven-day history stays on this Mac. Sharing is optional; community statistics appear only while sharing is on.")
+                Text("Sharing is off. No community requests are made; your seven-day history stays on this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Link("Privacy details", destination: URL(string: "https://tokrate.dev/privacy")!)
+                .font(.caption)
         }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
-        .alert("Share future turn measurements?", isPresented: $showingConsent) {
-            Button("Cancel", role: .cancel) { }
-            Button("Enable sharing") { sharing.enable() }
-        } message: {
-            Text("Send model, software versions, token counts, whole-turn timing, Codex-reported TTFT, and five-minute time buckets to tokrate.dev. No prompts, responses, paths, or session/account IDs are sent. A random signing identity is saved in Keychain so the service can recognize this installation; your IP is visible during requests. Only new turns are shared. Turning sharing off stops requests, clears pending uploads, and hides community data; it cannot retract samples already received.")
-        }
     }
 }

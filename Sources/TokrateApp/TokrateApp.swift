@@ -1,16 +1,20 @@
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    let historyStore = HistoryStore()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Intentional menu-bar utility: the dashboard opens on demand.
         NSApp.setActivationPolicy(.accessory)
+        historyStore.startAutomatically()
     }
 }
 
 @main
 struct TokrateApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var historyStore = HistoryStore()
+    private var historyStore: HistoryStore { appDelegate.historyStore }
 
     var body: some Scene {
         MenuBarExtra {

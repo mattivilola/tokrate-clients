@@ -17,7 +17,7 @@ struct HistoryView: View {
         VStack(alignment: .leading, spacing: 18) {
             header
             SummaryView(records: sevenDayRecords)
-            SharingView(sharing: store.sharing)
+            SharingView(preferences: store.sharingPreferences)
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
