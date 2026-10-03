@@ -1,3 +1,11 @@
 # Tokrate for Windows
 
-Planned; no working client or release is available yet. This folder will own the native tray UI, packaging and platform integration. Shared metric definitions and the contribution protocol live in `../docs/metrics-contract.md`. The current Swift core in `../shared/` is a reference implementation; portability must be verified before reuse.
+The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. It is under development; no stable Windows release is published yet.
+
+Target: Windows 11 x64 with Microsoft Edge WebView2. CI builds a per-user NSIS installer and runs the actual executable with isolated fixture logs and sharing disabled. Test artifacts are explicitly unsigned. A trusted public release requires Windows Authenticode signing; the Mac certificate cannot sign Windows programs.
+
+Codex sessions default to `%USERPROFILE%\.codex\sessions`, or `$CODEX_HOME/sessions` when configured. For Codex inside WSL, choose the corresponding distribution's sessions folder using **Settings → Choose session folder**. WSL permissions/path behavior still needs desktop acceptance testing.
+
+Click the tray icon or **Open dashboard** to see the gauge, model/effort selector, 24h/7d charts, local comparisons and sharing toggle. Windows tray icons do not support adjacent text: optional speed appears in the tooltip and tray menu. Closing the dashboard hides it to the tray; **Quit Tokrate** stops the app. Launching again reopens the existing instance.
+
+The signing key is stored in Windows Credential Manager. Sharing is ON for a new installation and remembers OFF; while OFF the app performs no community requests. Read the root README/privacy information and desktop test/release gates before distributing.

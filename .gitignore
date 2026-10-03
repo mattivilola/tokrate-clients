@@ -2,3 +2,10 @@
 dist/
 .DS_Store
 .swiftpm/
+node_modules/
+desktop/target/
+desktop/core/target/
+desktop/src-tauri/target/
+desktop/dist/
+desktop/src-tauri/gen/
+desktop/src-tauri/icons/generated/

@@ -1,0 +1,1 @@
+{"identifier":"default","description":"Only the bundled local dashboard can use the narrow application commands.","windows":["main"],"permissions":["core:default"]}

@@ -17,7 +17,8 @@ The public board normally requires 10 contributors and 50 eligible turns. During
 ## Repository layout
 
 - `macos/`: shipping SwiftUI app, UI tests, packaging and signing scripts.
-- `windows/` and `linux/`: planned native tray clients; no releases yet.
+- `windows/` and `linux/`: platform guidance for the new Tauri tray clients; no stable releases yet.
+- `desktop/`: Windows/Linux Rust core, shared dashboard, native host and CI packaging (0.1.8 development). See [desktop setup and release gates](desktop/README.md).
 - `shared/`: current Swift metric core, contribution logic, CLI and core tests. Portability beyond macOS is not yet verified.
 - Root `Package.swift`, `docs/`, and `LICENSE`: package assembly, cross-client contract and MIT license.
 
