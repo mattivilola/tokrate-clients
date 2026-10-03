@@ -8,7 +8,9 @@ struct MenuBarView: View {
     var body: some View {
         if let latest = store.records.first {
             Text("Latest turn throughput")
-            Text(latest.completedAt, style: .relative)
+            // Native menu items must not use ticking date text: it can recursively
+            // invalidate the SwiftUI menu host on macOS. Format a static string.
+            Text(latest.completedAt.formatted(date: .abbreviated, time: .shortened))
             Text("\(latest.outputTokens) output tokens · \(latest.durationSeconds, specifier: "%.1f") s")
             Text("\(latest.turnThroughputTPS, specifier: "%.1f") tokens/s")
         } else {
