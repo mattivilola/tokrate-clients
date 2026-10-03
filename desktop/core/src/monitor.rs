@@ -12,6 +12,7 @@ const READER_BATCH_BYTES: usize = 65_536;
 const MAX_FILES: usize = 2_000;
 const MAX_DISCOVERED_PATHS: usize = 100_000;
 const MAX_READERS_PER_LANE: usize = 24;
+const ROTATING_CAUGHT_UP_TAIL_SLOTS: usize = 4;
 const MAX_ARCHIVE_IDS_WHILE_LIVE_CATCHES_UP: usize = 8_192;
 const RECENT_TAIL_BYTES: u64 = 262_144;
 
@@ -21,7 +22,6 @@ struct WatchedFile {
     identity: Option<FileIdentity>,
     last_discovered_size: u64,
     modified_at: DateTime<Utc>,
-    live_serviced: Option<(u64, DateTime<Utc>)>,
     archive_ids_while_live_catches_up: HashSet<String>,
 }
 
@@ -39,6 +39,7 @@ pub struct Monitor {
     root: PathBuf,
     files: HashMap<String, WatchedFile>,
     last_discovery: Option<DateTime<Utc>>,
+    next_caught_up_index: usize,
     next_archive_index: usize,
     bytes_read_last_poll: usize,
 }
@@ -52,6 +53,7 @@ impl Monitor {
             root,
             files: HashMap::new(),
             last_discovery: None,
+            next_caught_up_index: 0,
             next_archive_index: 0,
             bytes_read_last_poll: 0,
         }
@@ -70,27 +72,10 @@ impl Monitor {
         let mut byte_budget = MAX_POLL_BYTES_PER_CALL;
         let mut live_budget = LIVE_BUDGET_BYTES;
         let mut live_records = Vec::new();
-        let mut live_keys: Vec<String> = self
-            .files
-            .iter()
-            .filter(|(_, file)| {
-                !file.live.is_caught_up()
-                    || file.live_serviced.map_or(true, |(size, modified)| {
-                        file.last_discovered_size > size || file.modified_at != modified
-                    })
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
-        live_keys.sort_by(|left, right| {
-            let left_file = &self.files[left];
-            let right_file = &self.files[right];
-            right_file
-                .modified_at
-                .cmp(&left_file.modified_at)
-                .then_with(|| left.cmp(right))
-        });
+        let (live_keys, next_caught_up_index) = self.select_live_keys();
+        self.next_caught_up_index = next_caught_up_index;
 
-        for key in live_keys.into_iter().take(MAX_READERS_PER_LANE) {
+        for key in live_keys {
             if live_budget == 0 {
                 break;
             }
@@ -111,7 +96,6 @@ impl Monitor {
                 live_budget = live_budget.saturating_sub(consumed);
                 byte_budget = byte_budget.saturating_sub(consumed);
                 if file.live.is_caught_up() {
-                    file.live_serviced = Some((file.last_discovered_size, file.modified_at));
                     file.archive_ids_while_live_catches_up.clear();
                 }
                 if file.live.excludes_session() {
@@ -197,6 +181,66 @@ impl Monitor {
         self.bytes_read_last_poll
     }
 
+    fn select_live_keys(&self) -> (Vec<String>, usize) {
+        let mut pending = Vec::new();
+        let mut caught_up = Vec::new();
+        for (key, file) in &self.files {
+            if file.live.is_caught_up() {
+                caught_up.push(key.clone());
+            } else {
+                pending.push(key.clone());
+            }
+        }
+        let recent_first = |left: &String, right: &String| {
+            self.files[right]
+                .modified_at
+                .cmp(&self.files[left].modified_at)
+                .then_with(|| left.cmp(right))
+        };
+        pending.sort_by(&recent_first);
+        caught_up.sort_by(&recent_first);
+
+        // Keep most live capacity on files that are still catching up or are among
+        // the newest sessions. A small reserved lane rotates across older, caught-up
+        // tails so an open but quiet Codex log can still surface a later append.
+        let priority_capacity = MAX_READERS_PER_LANE - ROTATING_CAUGHT_UP_TAIL_SLOTS;
+        let mut selected = Vec::with_capacity(MAX_READERS_PER_LANE);
+        selected.extend(pending.iter().take(priority_capacity).cloned());
+        let remaining_priority = priority_capacity.saturating_sub(selected.len());
+        selected.extend(caught_up.iter().take(remaining_priority).cloned());
+
+        let selected_set: HashSet<String> = selected.iter().cloned().collect();
+        let rotating: Vec<&String> = caught_up
+            .iter()
+            .filter(|key| !selected_set.contains(key.as_str()))
+            .collect();
+        let rotate_count = ROTATING_CAUGHT_UP_TAIL_SLOTS.min(rotating.len());
+        let next_index = if rotating.is_empty() {
+            0
+        } else {
+            (self.next_caught_up_index + rotate_count) % rotating.len()
+        };
+        for offset in 0..rotate_count {
+            selected.push(rotating[(self.next_caught_up_index + offset) % rotating.len()].clone());
+        }
+
+        // If there were fewer old tails than reserved slots, reclaim the unused
+        // capacity for the next pending files and then the next-newest tails.
+        if selected.len() < MAX_READERS_PER_LANE {
+            let selected_set: HashSet<String> = selected.iter().cloned().collect();
+            let remaining = MAX_READERS_PER_LANE - selected.len();
+            let extras: Vec<String> = pending
+                .iter()
+                .chain(caught_up.iter())
+                .filter(|key| !selected_set.contains(key.as_str()))
+                .take(remaining)
+                .cloned()
+                .collect();
+            selected.extend(extras);
+        }
+        (selected, next_index)
+    }
+
     fn discover_files(&mut self, now: DateTime<Utc>) -> io::Result<()> {
         let cutoff = now - Duration::days(7);
         let candidates = discover_candidates(&self.root, cutoff)?;
@@ -227,7 +271,6 @@ impl Monitor {
                         identity: candidate.identity,
                         last_discovered_size: candidate.size,
                         modified_at: candidate.modified_at,
-                        live_serviced: None,
                         archive_ids_while_live_catches_up: HashSet::new(),
                     },
                 );

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration as StdDuration, SystemTime};
 use uuid::Uuid;
 
 struct TestDir(PathBuf);
@@ -272,6 +273,72 @@ fn recent_monitor_waits_for_partial_lines_and_enforces_poll_budget() {
     }
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].output_tokens, 42);
+}
+
+#[test]
+fn monitor_rotates_caught_up_live_tails_so_older_open_sessions_are_serviced() {
+    let temp = TestDir::new();
+    let base = Utc::now();
+    let timestamp = base.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let modified_base = SystemTime::now() - StdDuration::from_secs(3_600);
+    for index in 0..32 {
+        let path = temp.path().join(format!("session-{index:02}.jsonl"));
+        fs::write(
+            &path,
+            jsonl(&[event(
+                "session_meta",
+                json!({ "id": format!("session-{index}"), "source": "cli" }),
+                &timestamp,
+            )]),
+        )
+        .unwrap();
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(modified_base + StdDuration::from_secs(index))
+            .unwrap();
+    }
+
+    let mut monitor = Monitor::new(temp.path().to_path_buf());
+    for _ in 0..12 {
+        monitor.poll(base).unwrap();
+        assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
+    }
+
+    // Keep the writer open, as Codex does. Holding `now` constant prevents periodic
+    // discovery from making this old session appear recent and masking starvation.
+    let old_path = temp.path().join("session-00.jsonl");
+    let start = (base - Duration::seconds(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let completed =
+        (base - Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut append = fs::OpenOptions::new().append(true).open(old_path).unwrap();
+    append
+        .write_all(&jsonl(&[
+            event(
+                "token_usage_record",
+                json!({ "turn_id": "late-turn", "turn_token_usage": { "output_tokens": 987 } }),
+                &start,
+            ),
+            event(
+                "event_msg",
+                json!({ "type": "task_complete", "turn_id": "late-turn", "started_at": start, "completed_at": completed, "duration_ms": 1000 }),
+                &completed,
+            ),
+        ]))
+        .unwrap();
+
+    let mut found = false;
+    for _ in 0..6 {
+        let records = monitor.poll(base).unwrap();
+        assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
+        if records.iter().any(|record| record.output_tokens == 987) {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "older caught-up live tails must rotate into the poll lane"
+    );
 }
 
 #[test]

@@ -12,7 +12,12 @@ with tempfile.TemporaryDirectory(prefix="tokrate-native-smoke-") as root:
     ]
     (root/"sessions"/"fixture.jsonl").write_text("\n".join(json.dumps(e) for e in events)+"\n")
     env = dict(os.environ, TOKRATE_SMOKE_DIR=str(root))
-    subprocess.run([str(pathlib.Path(sys.argv[1]).resolve()), "--smoke-test"], env=env, check=True, timeout=90)
+    try:
+        subprocess.run([str(pathlib.Path(sys.argv[1]).resolve()), "--smoke-test"], env=env, check=True, timeout=90)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        diagnostic = root / "smoke-state.json"
+        print("Native smoke diagnostics:", diagnostic.read_text() if diagnostic.exists() else "monitor never started", flush=True)
+        raise
     result=json.loads((root/"smoke-result.json").read_text())
     assert result == {"nativeWebview":True,"parsedFixture":True,"sharingOff":True}, result
     print(json.dumps(result))

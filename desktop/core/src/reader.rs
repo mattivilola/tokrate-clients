@@ -85,7 +85,9 @@ impl IncrementalReader {
         if max_bytes == 0 {
             return Ok(Vec::new());
         }
-        let metadata = fs::metadata(&self.path)?;
+        // Query size and identity from an open handle. Windows path metadata can lag an
+        // append while another process still has the JSONL writer open.
+        let metadata = File::open(&self.path)?.metadata()?;
         let current_size = metadata.len();
         let current_identity = file_identity(&metadata);
         if current_size < self.offset

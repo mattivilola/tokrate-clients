@@ -258,6 +258,10 @@ impl Runtime {
         if self.history_read_error {
             self.monitor_status="Monitoring in memory. Saved history is unreadable and preserved; back it up and repair it before restarting.".into();
         }
+        if self.smoke {
+            let evidence = serde_json::json!({"records": self.history.records().len(), "sharing": self.settings.sharing, "monitorStatus": self.monitor_status});
+            let _ = std::fs::write(self.dir.join("smoke-state.json"), evidence.to_string());
+        }
         self.tray_text()
     }
     fn tray_text(&self) -> String {
@@ -503,6 +507,47 @@ mod tests {
         let patch = serde_json::from_value(serde_json::json!({"sharing":true})).unwrap();
         assert!(runtime.update(patch).is_err());
         assert!(!runtime.settings.sharing);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn corrupt_history_remains_preserved_while_monitoring_continues() {
+        let dir = temporary();
+        let original = b"{history needing recovery";
+        std::fs::write(dir.join("history.json"), original).unwrap();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        runtime.poll_monitor();
+        assert!(runtime.history_read_error);
+        assert!(runtime.monitor_status.contains("preserved"));
+        assert_eq!(std::fs::read(dir.join("history.json")).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn tray_never_presents_an_old_turn_as_current() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let now = Utc::now();
+        let metric = TurnMetric::new(
+            "fixture".into(),
+            now - chrono::Duration::minutes(16),
+            Some("fixture-model".into()),
+            200,
+            10.0,
+            None,
+            20.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        runtime.history.merge(&[metric.clone()], now);
+        assert_eq!(runtime.tray_text(), "Tokrate · no selected turn");
+        let mut fresh = metric;
+        fresh.id = "fresh".into();
+        fresh.completed_at = now;
+        runtime.history.merge(&[fresh], now);
+        assert_eq!(runtime.tray_text(), "20.0 t/s · completed turn");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
