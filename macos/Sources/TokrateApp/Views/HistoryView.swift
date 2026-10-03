@@ -22,7 +22,7 @@ struct HistoryView: View {
                     VStack(spacing: 12) {
                         TrendChartView(snapshot: snapshot, range: $range, compact: false)
                         SummaryView(snapshot: snapshot)
-                        PersonalTrendView(trend: snapshot.personalTrend)
+                        PersonalTrendView(trend: snapshot.personalTrend, reasoningEffort: snapshot.selectedCohort?.reasoningEffort)
                     }
                 }
             }
@@ -98,7 +98,7 @@ struct HistoryView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(record.model ?? "Unknown")
                         .foregroundStyle(record.model == nil ? .secondary : .primary)
-                    Text([record.provider, record.clientVersion.map { "client \($0)" }].compactMap { $0 }.joined(separator: " · "))
+                    Text(ModelCohort(record).detailLabel)
                         .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }

@@ -113,7 +113,7 @@ struct CohortComparisonView: View {
                     }
                 }
             }
-            Text("Whole-turn measurements · no pooled comparison · effort/speed tier not controlled")
+            Text("Whole-turn measurements · no pooled comparison · effort shown when reported; speed tier/workload uncontrolled")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .dashboardCard(padding: 12)
@@ -139,6 +139,7 @@ struct CohortComparisonView: View {
 
 struct PersonalTrendView: View {
     let trend: PersonalTrend?
+    var reasoningEffort: String? = nil
 
     var body: some View {
         if let trend {
@@ -155,10 +156,10 @@ struct PersonalTrendView: View {
                     if trend.comparesTTFT {
                         metricLine("Codex TTFT", current: trend.currentTTFT, baseline: trend.baselineTTFT, unit: "s", digits: 2, sampleLabel: "values")
                     }
-                    Text("Workload/tools may have changed; not a provider diagnosis. Effort/speed tier is not controlled.")
+                    Text("Workload/tools may have changed; not a provider diagnosis. Reasoning effort: \(reasoningEffort ?? "unknown"); speed tier/workload are uncontrolled.")
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 } else {
-                    Text("Same model, provider, and client version; effort/speed tier is not controlled.")
+                    Text("Same model, provider, client version, and reasoning effort: \(reasoningEffort ?? "unknown"); speed tier/workload are uncontrolled.")
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 }
             }

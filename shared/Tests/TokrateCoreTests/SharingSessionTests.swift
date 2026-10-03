@@ -30,8 +30,8 @@ private actor MockTransport: SharingTransport {
 @MainActor
 final class SharingSessionTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_791_020_401)
-    private func metric(id: String = "LOCAL_PRIVATE_DIGEST", date: Date? = nil, model: String? = "gpt-test") -> TurnMetric {
-        TurnMetric(id: id, completedAt: date ?? now, model: model, outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary")
+    private func metric(id: String = "LOCAL_PRIVATE_DIGEST", date: Date? = nil, model: String? = "gpt-test", reasoningEffort: String? = nil) -> TurnMetric {
+        TurnMetric(id: id, completedAt: date ?? now, model: model, outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary", provider: "openai", reasoningEffort: reasoningEffort)
     }
 
     func testLocalOnlyDoesNotCreateIdentityOrContactServer() async {
@@ -62,7 +62,9 @@ final class SharingSessionTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
-        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
+        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.6")
+        XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
         XCTAssertEqual(observed.timeIntervalSince1970.truncatingRemainder(dividingBy: 300), 0)
@@ -73,6 +75,16 @@ final class SharingSessionTests: XCTestCase {
         await session.refresh(now: now.addingTimeInterval(100))
         let after = await transport.snapshot()
         XCTAssertEqual(after.count, 2)
+    }
+
+    func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
+        let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
+        XCTAssertEqual(reported.appVersion, "0.1.6")
+        XCTAssertEqual(reported.reasoningEffort, "ultra")
+        let missing = try XCTUnwrap(SharedSample(metric()))
+        XCTAssertEqual(missing.reasoningEffort, "unknown")
+        let invalidMetric = TurnMetric(id: "bad-effort", completedAt: now, model: "gpt-test", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10, reasoningEffort: "automatic")
+        XCTAssertEqual(try XCTUnwrap(SharedSample(invalidMetric)).reasoningEffort, "unknown")
     }
 
     func testRetryKeepsRandomSampleIDAndRefreshIsRateLimited() async throws {
@@ -136,12 +148,14 @@ final class SharingSessionTests: XCTestCase {
     }
 
     func testGlobalBoardDecodesOptionalExactCohortAndMetricFields() throws {
-        let json = #"{"schemaVersion":1,"generatedAt":"2026-10-03T10:00:00Z","dataAsOf":null,"collectionEnabled":true,"state":"stale","window":"24h","methodology":{"statistics":"percentiles across contributor medians","publicationMode":"early_data","minimumContributors":1,"minimumTurns":1,"observationBucketMinutes":5,"streamingSpeedAvailable":false,"source":"self-reported community observations","detectorVersion":"community-v1-5m"},"cohorts":[{"id":"[\"gpt-test\",\"openai\",\"0.159.2\",\"codex-rollout-v1\",\"turn-v1\"]","model":"gpt-test","provider":"openai","clientVersion":"0.159.2","parserVersion":"codex-rollout-v1","metricVersion":"turn-v1","contributors":4,"turns":12,"throughputContributors":3,"throughputTurns":11,"ttftContributors":2,"ttftTurns":9,"medianThroughput":8.5,"minThroughput":3.0,"maxThroughput":20.0,"p10Throughput":4.0,"medianTtftMs":900.0,"minTtftMs":200.0,"maxTtftMs":1800.0,"p95TtftMs":1700.0}],"alerts":[]}"#
+        let json = #"{"schemaVersion":1,"generatedAt":"2026-10-03T10:00:00Z","dataAsOf":null,"collectionEnabled":true,"state":"stale","window":"24h","methodology":{"statistics":"percentiles across contributor medians","publicationMode":"early_data","minimumContributors":1,"minimumTurns":1,"observationBucketMinutes":5,"streamingSpeedAvailable":false,"source":"self-reported community observations","detectorVersion":"community-v1-5m"},"cohorts":[{"id":"[\"gpt-test\",\"openai\",\"0.159.2\",\"codex-rollout-v1\",\"turn-v1\",\"high\",\"codex\"]","model":"gpt-test","provider":"openai","clientVersion":"0.159.2","reasoningEffort":"high","client":"codex","parserVersion":"codex-rollout-v1","metricVersion":"turn-v1","contributors":4,"turns":12,"throughputContributors":3,"throughputTurns":11,"ttftContributors":2,"ttftTurns":9,"medianThroughput":8.5,"minThroughput":3.0,"maxThroughput":20.0,"p10Throughput":4.0,"medianTtftMs":900.0,"minTtftMs":200.0,"maxTtftMs":1800.0,"p95TtftMs":1700.0}],"alerts":[]}"#
         let board = try JSONDecoder().decode(GlobalBoard.self, from: Data(json.utf8))
         let cohort = try XCTUnwrap(board.cohorts.first)
         XCTAssertEqual(board.methodology?.statistics, "percentiles across contributor medians")
         XCTAssertEqual(board.publicationMode, "early_data")
         XCTAssertEqual(cohort.clientVersion, "0.159.2")
+        XCTAssertEqual(cohort.reasoningEffort, "high")
+        XCTAssertEqual(cohort.client, "codex")
         XCTAssertEqual(cohort.parserVersion, "codex-rollout-v1")
         XCTAssertEqual(cohort.metricVersion, "turn-v1")
         XCTAssertEqual(cohort.throughputTurns, 11)
@@ -150,5 +164,10 @@ final class SharingSessionTests: XCTestCase {
         XCTAssertEqual(cohort.ttftTurns, 9)
         XCTAssertEqual(cohort.minTtftMs, 200)
         XCTAssertEqual(cohort.maxTtftMs, 1_800)
+
+        let legacy = #"{"schemaVersion":1,"collectionEnabled":true,"state":"early_data","window":"15m","cohorts":[{"id":"legacy","model":"gpt-test","provider":"openai","contributors":1,"turns":1}],"alerts":[]}"#
+        let oldBoard = try JSONDecoder().decode(GlobalBoard.self, from: Data(legacy.utf8))
+        XCTAssertNil(oldBoard.cohorts.first?.reasoningEffort)
+        XCTAssertNil(oldBoard.cohorts.first?.client)
     }
 }

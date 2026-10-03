@@ -2,6 +2,8 @@ import Foundation
 
 /// A completed Codex turn summarized without its prompt, response, or source path.
 public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
+    /// Only populated when every observed turn_context agrees on an allowlisted effort.
+    public let reasoningEffort: String?
     /// A SHA-256 pseudonym derived locally from the session and turn identifiers.
     public let id: String
     public let completedAt: Date
@@ -29,8 +31,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         clientVersion: String? = nil,
         reasoningOutputTokens: Int? = nil,
         sourceKind: String? = nil,
-        provider: String? = nil
+        provider: String? = nil,
+        reasoningEffort: String? = nil
     ) {
+        self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         self.clientVersion = clientVersion
         self.reasoningOutputTokens = reasoningOutputTokens
         self.sourceKind = sourceKind
@@ -43,5 +47,14 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         self.codexTTFTSeconds = codexTTFTSeconds
         self.turnThroughputTPS = turnThroughputTPS
         self.streamingTPS = streamingTPS
+    }
+}
+
+public enum ReportedReasoningEffort {
+    public static func isAllowed(_ value: String) -> Bool {
+        switch value {
+        case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra": true
+        default: false
+        }
     }
 }

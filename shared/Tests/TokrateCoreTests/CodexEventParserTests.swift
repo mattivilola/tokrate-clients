@@ -48,8 +48,8 @@ final class CodexEventParserTests: XCTestCase {
 
     func testInterleavedTurnsKeepTheirOwnModelAndTiming() throws {
         var parser = CodexEventParser(sourceIdentity: "session-file")
-        _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": "a", "model": "model-a"]))
-        _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": "b", "model": "model-b"]))
+        _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": "a", "model": "model-a", "effort": "xhigh"]))
+        _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": "b", "model": "model-b", "effort": "high"]))
         _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "a", "turn_token_usage": ["output_tokens": 10]]))
         _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "b", "turn_token_usage": ["output_tokens": 90]]))
 
@@ -65,9 +65,56 @@ final class CodexEventParserTests: XCTestCase {
         let metricB = try XCTUnwrap(parser.consume(line: second))
         let metricA = try XCTUnwrap(parser.consume(line: first))
         XCTAssertEqual(metricB.model, "model-b")
+        XCTAssertEqual(metricB.reasoningEffort, "high")
         XCTAssertEqual(metricB.turnThroughputTPS, 30, accuracy: 0.001)
         XCTAssertEqual(metricA.model, "model-a")
+        XCTAssertEqual(metricA.reasoningEffort, "xhigh")
         XCTAssertEqual(metricA.turnThroughputTPS, 1, accuracy: 0.001)
+    }
+
+    func testReasoningEffortUsesOnlyConsistentAllowlistedTurnContexts() throws {
+        XCTAssertTrue(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].allSatisfy(ReportedReasoningEffort.isAllowed))
+        XCTAssertFalse(ReportedReasoningEffort.isAllowed("automatic"))
+
+        var parser = CodexEventParser(sourceIdentity: "file")
+        _ = parser.consume(line: try event(type: "session_meta", payload: ["effort": "ultra"]))
+        _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": "consistent", "effort": "medium"]))
+        _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": "consistent", "effort": "medium"]))
+        _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "consistent", "turn_token_usage": ["output_tokens": 8, "reasoning_output_tokens": 3, "effort": "max"]]))
+        let complete: (String) throws -> Data = { id in
+            try self.event(type: "event_msg", payload: ["type": "task_complete", "turn_id": id, "started_at": "2026-10-03T10:00:00Z", "completed_at": "2026-10-03T10:00:01Z", "duration_ms": 1_000])
+        }
+        XCTAssertEqual(try parser.consume(line: complete("consistent"))?.reasoningEffort, "medium")
+
+        var conflictParser = CodexEventParser(sourceIdentity: "conflict")
+        _ = conflictParser.consume(line: try event(type: "turn_context", payload: ["turn_id": "t", "effort": "high"]))
+        _ = conflictParser.consume(line: try event(type: "turn_context", payload: ["turn_id": "t", "effort": "low"]))
+        _ = conflictParser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "t", "turn_token_usage": ["output_tokens": 5]]))
+        XCTAssertNil(conflictParser.consume(line: try complete("t"))?.reasoningEffort)
+
+        var invalidParser = CodexEventParser(sourceIdentity: "invalid")
+        _ = invalidParser.consume(line: try event(type: "turn_context", payload: ["turn_id": "t", "effort": "automatic"]))
+        _ = invalidParser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "t", "turn_token_usage": ["output_tokens": 5]]))
+        XCTAssertNil(invalidParser.consume(line: try complete("t"))?.reasoningEffort)
+
+        var missingParser = CodexEventParser(sourceIdentity: "missing")
+        _ = missingParser.consume(line: try event(type: "turn_context", payload: ["turn_id": "t", "model": "reported-model"]))
+        _ = missingParser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "t", "turn_token_usage": ["output_tokens": 5]]))
+        XCTAssertNil(missingParser.consume(line: try complete("t"))?.reasoningEffort)
+
+        var noContextParser = CodexEventParser(sourceIdentity: "no-context")
+        _ = noContextParser.consume(line: try event(type: "session_meta", payload: ["effort": "high"]))
+        _ = noContextParser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "t", "turn_token_usage": ["output_tokens": 5, "reasoning_output_tokens": 4]]))
+        XCTAssertNil(noContextParser.consume(line: try complete("t"))?.reasoningEffort)
+    }
+
+    func testTurnMetricDecodesRecordsWithoutReasoningEffort() throws {
+        let metric = TurnMetric(id: "id", completedAt: Date(timeIntervalSince1970: 10), model: "gpt-test", outputTokens: 5, durationSeconds: 1, codexTTFTSeconds: nil, turnThroughputTPS: 5, reasoningEffort: "high")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(metric)) as? [String: Any])
+        object.removeValue(forKey: "reasoningEffort")
+        let legacy = try JSONDecoder().decode(TurnMetric.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.reasoningEffort)
+        XCTAssertEqual(try JSONDecoder().decode(TurnMetric.self, from: JSONEncoder().encode(metric)).reasoningEffort, "high")
     }
 
     func testMalformedMissingAndUnsafeCountersAreIgnored() throws {

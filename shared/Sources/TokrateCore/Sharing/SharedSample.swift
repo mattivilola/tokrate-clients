@@ -6,11 +6,12 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client = "codex"
     public let clientVersion: String
-    public let appVersion = "0.1.5"
+    public let appVersion = "0.1.6"
     public let parserVersion = "codex-rollout-v1"
     public let metricVersion = "turn-v1"
     public let model: String
     public let provider: String
+    public let reasoningEffort: String
     public let sourceKind: String
     public let outputTokens: Int
     public let reasoningOutputTokens: Int?
@@ -27,6 +28,7 @@ public struct SharedSample: Encodable, Sendable {
         model = Self.safeIdentifier(metric.model, maximum: 80) ?? "unknown"
         sourceKind = ["primary", "subagent"].contains(metric.sourceKind ?? "") ? metric.sourceKind! : "unknown"
         provider = metric.provider == "openai" ? "openai" : "unknown"
+        reasoningEffort = metric.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown"
         outputTokens = metric.outputTokens
         reasoningOutputTokens = metric.reasoningOutputTokens.flatMap { (0...metric.outputTokens).contains($0) ? $0 : nil }
         durationMs = duration
@@ -37,7 +39,7 @@ public struct SharedSample: Encodable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
+        case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, reasoningEffort, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
     }
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -50,6 +52,7 @@ public struct SharedSample: Encodable, Sendable {
         try container.encode(metricVersion, forKey: .metricVersion)
         try container.encode(model, forKey: .model)
         try container.encode(provider, forKey: .provider)
+        try container.encode(reasoningEffort, forKey: .reasoningEffort)
         try container.encode(sourceKind, forKey: .sourceKind)
         try container.encode(outputTokens, forKey: .outputTokens)
         try container.encode(reasoningOutputTokens, forKey: .reasoningOutputTokens)

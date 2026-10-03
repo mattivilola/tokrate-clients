@@ -78,7 +78,7 @@ struct SharingView: View {
             } else if let target = selectedCohort {
                 let matches = board.cohorts.filter { exactlyMatches($0, target: target) }
                 if matches.isEmpty {
-                    Text("Community data for this exact model, provider, and client version is not available yet.")
+                Text("Community data for this exact model, provider, client version, and reasoning effort is not available yet.")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
@@ -94,7 +94,7 @@ struct SharingView: View {
                 Text("Method: \(methodology)")
                     .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
             }
-            Text("Community rows use reported primary-client samples. Local unknown sources may be included; effort/speed tier is not controlled.")
+            Text("Community rows use reported primary-client samples. Effort is shown when reported; speed tier and workload are uncontrolled.")
                 .font(.system(size: 9)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -108,11 +108,8 @@ struct SharingView: View {
     }
 
     private func exactlyMatches(_ cohort: GlobalBoard.Cohort, target: ModelCohort) -> Bool {
-        guard let model = target.model, let provider = target.provider, let version = target.clientVersion,
-              isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
-              isSafe(version, pattern: "^[a-zA-Z0-9.+_-]{1,40}$"),
-              provider == "openai" else { return false }
-        return cohort.model == model && cohort.provider == provider && cohort.clientVersion == version
+        guard let expectedID = target.communityBoardID else { return false }
+        return cohort.id == expectedID
     }
 
     private func communityRow(_ cohort: GlobalBoard.Cohort) -> some View {
@@ -124,8 +121,9 @@ struct SharingView: View {
                 Text(cohort.medianThroughput.map { String(format: "%.1f t/s", $0) } ?? "—")
                     .monospacedDigit().fontWeight(.medium)
             }
+            Text("\(cohort.client ?? "client unknown") · client \(cohort.clientVersion ?? "version unknown") · reasoning effort \(cohort.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown")")
+                .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             HStack(spacing: 4) {
-                Text("client \(cohort.clientVersion ?? "version unreported")")
                 Spacer(minLength: 4)
                 if let minimum = cohort.minThroughput, let maximum = cohort.maxThroughput {
                     Text("min \(String(format: "%.1f", minimum)) · max \(String(format: "%.1f", maximum))")
@@ -156,7 +154,9 @@ struct SharingView: View {
         return board.alerts.filter { alert in
             if let cohortId = alert.cohortId { return ids.contains(cohortId) }
             guard let model = alert.model, let provider = alert.provider, let version = alert.clientVersion else { return false }
-            return cohorts.contains { $0.model == model && $0.provider == provider && $0.clientVersion == version }
+            let matchingRows = board.cohorts.filter { $0.model == model && $0.provider == provider && $0.clientVersion == version }
+            guard matchingRows.count == 1, let match = matchingRows.first else { return false }
+            return cohorts.contains { $0.id == match.id }
         }
     }
 
@@ -191,7 +191,4 @@ struct SharingView: View {
             .background(color.opacity(0.1), in: Capsule())
     }
 
-    private func isSafe(_ value: String, pattern: String) -> Bool {
-        value.range(of: pattern, options: .regularExpression) != nil
-    }
 }

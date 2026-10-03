@@ -13,37 +13,49 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     let model: String?
     let provider: String?
     let clientVersion: String?
+    let reasoningEffort: String?
 
-    init(model: String?, provider: String?, clientVersion: String?) {
+    init(model: String?, provider: String?, clientVersion: String?, reasoningEffort: String? = nil) {
         self.model = model
         self.provider = provider
         self.clientVersion = clientVersion
+        self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
     }
 
     init(_ metric: TurnMetric) {
-        self.init(model: metric.model, provider: metric.provider, clientVersion: metric.clientVersion)
+        self.init(model: metric.model, provider: metric.provider, clientVersion: metric.clientVersion, reasoningEffort: metric.reasoningEffort)
     }
 
     var id: String {
-        [model, provider, clientVersion].map(Self.encode).joined(separator: ".")
+        [model, provider, clientVersion, reasoningEffort].map(Self.encode).joined(separator: ".")
     }
 
     var displayModel: String { model ?? "Unknown model" }
     var detailLabel: String {
-        [provider, clientVersion.map { "client \($0)" }]
-            .compactMap { $0 }
+        [provider ?? "provider unknown", clientVersion.map { "Codex \($0)" } ?? "Codex version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
             .joined(separator: " · ")
-            .ifEmpty("provider or client version unavailable")
     }
     var selectionLabel: String { "\(displayModel) · \(detailLabel)" }
 
+    /// Matches the public board's stable seven-dimension JSON identity.
+    var communityBoardID: String? {
+        guard let model, isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
+              provider == "openai" else { return nil }
+        let version = clientVersion.flatMap { isSafe($0, pattern: "^[a-zA-Z0-9.+_-]{1,40}$") ? $0 : nil } ?? "unknown"
+        let dimensions = [model, "openai", version, "codex-rollout-v1", "turn-v1", reasoningEffort ?? "unknown", "codex"]
+        guard let data = try? JSONSerialization.data(withJSONObject: dimensions, options: [.fragmentsAllowed, .withoutEscapingSlashes]) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     init?(id: String) {
         let parts = id.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3,
+        guard parts.count == 3 || parts.count == 4,
               let model = Self.decode(parts[0]),
               let provider = Self.decode(parts[1]),
               let clientVersion = Self.decode(parts[2]) else { return nil }
-        self.init(model: model, provider: provider, clientVersion: clientVersion)
+        let effort: String?? = parts.count == 4 ? Self.decode(parts[3]) : .some(nil)
+        guard let effort else { return nil }
+        self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort)
     }
 
     private static func encode(_ value: String?) -> String {
@@ -56,10 +68,10 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         guard let data = Data(base64Encoded: value), let decoded = String(data: data, encoding: .utf8) else { return nil }
         return .some(decoded)
     }
-}
 
-private extension String {
-    func ifEmpty(_ fallback: String) -> String { isEmpty ? fallback : self }
+    private func isSafe(_ value: String, pattern: String) -> Bool {
+        value.range(of: pattern, options: .regularExpression) != nil
+    }
 }
 
 enum DashboardSelection: Hashable, Sendable {
@@ -244,7 +256,11 @@ struct DashboardSnapshot {
         }
 
         let scopedRetained = retained.filter { ModelCohort($0) == resolvedCohort }
-        personalTrend = Self.personalTrend(in: scopedRetained, now: now, calendar: calendar)
+        let hasKnownModelAndProvider = resolvedCohort?.model.map { !$0.isEmpty && $0 != "unknown" } == true
+            && resolvedCohort?.provider.map { !$0.isEmpty && $0 != "unknown" } == true
+        personalTrend = hasKnownModelAndProvider
+            ? Self.personalTrend(in: scopedRetained, now: now, calendar: calendar)
+            : nil
     }
 
     static func median(_ values: [Double]) -> Double? { MetricStats(values: values).median }

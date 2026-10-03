@@ -60,7 +60,7 @@ struct TrendChartView: View {
                 .frame(height: compact ? 76 : 170)
                 .accessibilityLabel("Local turn throughput over \(range == .day ? "24 hours" : "seven days"), in tokens per whole-turn second")
             }
-            Text("Whole-turn · 20+ output tokens · effort/speed tier not controlled")
+            Text("Whole-turn · 20+ output tokens · effort shown per cohort; speed tier/workload uncontrolled")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
                 .help("Median whole-turn throughput in each time interval, for turns with at least 20 output tokens. Each turn includes tool work, waiting, and reasoning.")
         }

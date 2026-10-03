@@ -53,7 +53,7 @@ struct MenuBarView: View {
                 ThroughputGaugeView(metric: snapshot.latest)
                 TrendChartView(snapshot: snapshot, range: $range)
                 SummaryView(snapshot: snapshot)
-                PersonalTrendView(trend: snapshot.personalTrend)
+                PersonalTrendView(trend: snapshot.personalTrend, reasoningEffort: snapshot.selectedCohort?.reasoningEffort)
             }
             SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, showToggle: false)
             if let error = store.errorMessage {

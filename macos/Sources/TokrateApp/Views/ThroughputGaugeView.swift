@@ -40,10 +40,17 @@ struct ThroughputGaugeView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Latest turn throughput")
             .accessibilityValue(value.map { String(format: "%.1f output tokens per whole-turn second", $0) } ?? "No completed turns yet")
-            HStack(spacing: 5) {
-                Circle().fill(metric == nil ? Color.secondary : DashboardStyle.teal).frame(width: 5, height: 5)
-                Text(metric?.model ?? (metric == nil ? "Waiting for a completed turn" : "Model not reported"))
-                    .lineLimit(1).truncationMode(.middle)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Circle().fill(metric == nil ? Color.secondary : DashboardStyle.teal).frame(width: 5, height: 5)
+                    Text(metric?.model ?? (metric == nil ? "Waiting for a completed turn" : "Model not reported"))
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                if let metric {
+                    Text(ModelCohort(metric).detailLabel)
+                        .lineLimit(1).truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                }
             }
             .font(.system(size: 11, weight: .medium))
             .padding(.top, 8)

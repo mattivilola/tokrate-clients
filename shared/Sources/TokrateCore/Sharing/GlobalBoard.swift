@@ -28,6 +28,8 @@ public struct GlobalBoard: Decodable, Sendable {
         public let model: String
         public let provider: String
         public let clientVersion: String?
+        public let reasoningEffort: String?
+        public let client: String?
         public let parserVersion: String?
         public let metricVersion: String?
         public let contributors: Int

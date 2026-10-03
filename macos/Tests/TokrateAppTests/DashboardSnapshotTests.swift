@@ -13,7 +13,8 @@ final class DashboardSnapshotTests: XCTestCase {
         clientVersion: String? = "0.159.2",
         outputTokens: Int = 100,
         rate: Double,
-        ttft: Double? = nil
+        ttft: Double? = nil,
+        reasoningEffort: String? = nil
     ) -> TurnMetric {
         TurnMetric(
             id: id,
@@ -24,7 +25,8 @@ final class DashboardSnapshotTests: XCTestCase {
             codexTTFTSeconds: ttft,
             turnThroughputTPS: rate,
             clientVersion: clientVersion,
-            provider: provider
+            provider: provider,
+            reasoningEffort: reasoningEffort
         )
     }
 
@@ -93,6 +95,50 @@ final class DashboardSnapshotTests: XCTestCase {
         XCTAssertEqual(week.ttft.count, 3)
         XCTAssertEqual(week.ttft.minimum, 0.5)
         XCTAssertEqual(week.ttft.maximum, 3)
+    }
+
+    func testReasoningEffortSplitsCohortsAndLegacySelectionsRestoreAsUnknown() {
+        let records = [
+            metric("high", secondsAgo: 20, model: "gpt-s", clientVersion: "1.0", rate: 10, reasoningEffort: "high"),
+            metric("low", secondsAgo: 10, model: "gpt-s", clientVersion: "1.0", rate: 20, reasoningEffort: "low"),
+            metric("unknown", secondsAgo: 5, model: "gpt-s", clientVersion: "1.0", rate: 30)
+        ]
+        let all = DashboardSnapshot(records: records, range: .day, selection: .all, now: now)
+        XCTAssertEqual(all.cohortSummaries.count, 3)
+        XCTAssertEqual(Set(all.cohortSummaries.map(\.cohort.reasoningEffort)), Set(["high", "low", nil]))
+        XCTAssertTrue(all.cohortSummaries.allSatisfy { $0.cohort.detailLabel.contains("reasoning effort") })
+
+        let high = ModelCohort(model: "gpt-s", provider: "openai", clientVersion: "1.0", reasoningEffort: "high")
+        let selected = DashboardSnapshot(records: records, range: .day, selection: .cohort(high), now: now)
+        XCTAssertEqual(selected.records.map(\.id), ["high"])
+        XCTAssertEqual(DashboardSelection.restored(from: DashboardSelection.cohort(high).persistenceValue), .cohort(high))
+        XCTAssertEqual(high.communityBoardID, #"["gpt-s","openai","1.0","codex-rollout-v1","turn-v1","high","codex"]"#)
+
+        let oldParts = ["gpt-s", "openai", "1.0"].map { Data($0.utf8).base64EncodedString() }.joined(separator: ".")
+        let restoredLegacy = try! XCTUnwrap(ModelCohort(id: oldParts))
+        XCTAssertNil(restoredLegacy.reasoningEffort)
+        XCTAssertEqual(restoredLegacy, ModelCohort(model: "gpt-s", provider: "openai", clientVersion: "1.0"))
+        XCTAssertEqual(DashboardSelection.restored(from: "cohort:\(oldParts)"), .cohort(restoredLegacy))
+    }
+
+    func testPersonalTrendDoesNotPoolEffortsOrUnknownModelProviders() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let highBaseline = (0..<20).map { index in
+            metric("effort-base-\(index)", secondsAgo: 36 * 3_600 + Double(index / 10) * 86_400 + Double(index), rate: 100, reasoningEffort: "high")
+        }
+        let lowCurrent = (0..<5).map { index in
+            metric("effort-now-\(index)", secondsAgo: Double(index) * 60, rate: 60, reasoningEffort: "low")
+        }
+        let selectedLow = ModelCohort(model: "test-model", provider: "openai", clientVersion: "0.159.2", reasoningEffort: "low")
+        let split = DashboardSnapshot(records: highBaseline + lowCurrent, range: .day, selection: .cohort(selectedLow), now: now, calendar: calendar)
+        XCTAssertEqual(split.personalTrend?.status, .buildingBaseline)
+        XCTAssertEqual(split.personalTrend?.baselineThroughput.count, 0)
+
+        let unknown = (0..<25).map { index in
+            metric("unknown-\(index)", secondsAgo: Double(index) * 60, model: nil, provider: "unknown", rate: 1)
+        }
+        XCTAssertNil(DashboardSnapshot(records: unknown, range: .day, now: now, calendar: calendar).personalTrend)
     }
 
     func testPersonalTrendRequiresRecentCurrentTurnsAndTwoBaselineDays() {

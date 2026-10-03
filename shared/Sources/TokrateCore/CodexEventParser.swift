@@ -13,6 +13,8 @@ public struct CodexEventParser: Sendable {
         var ttftMilliseconds: Double?
         var model: String?
         var modelWasAmbiguous = false
+        var reasoningEffort: String?
+        var reasoningEffortWasAmbiguous = false
     }
 
     private var sourceIdentity: String
@@ -70,6 +72,7 @@ public struct CodexEventParser: Sendable {
             guard let turnID = payload["turn_id"] as? String, !turnID.isEmpty else { return nil }
             var state = turns[turnID, default: TurnState()]
             updateModel(payload["model"] as? String, in: &state)
+            updateReasoningEffort(payload["effort"], in: &state)
             turns[turnID] = state
             return nil
         }
@@ -152,8 +155,24 @@ public struct CodexEventParser: Sendable {
             clientVersion: clientVersion,
             reasoningOutputTokens: state.reasoningOutputTokens,
             sourceKind: sourceKind,
-            provider: provider
+            provider: provider,
+            reasoningEffort: state.reasoningEffortWasAmbiguous ? nil : state.reasoningEffort
         )
+    }
+
+    private func updateReasoningEffort(_ value: Any?, in state: inout TurnState) {
+        guard !state.reasoningEffortWasAmbiguous else { return }
+        guard let value = value as? String, ReportedReasoningEffort.isAllowed(value) else {
+            state.reasoningEffort = nil
+            state.reasoningEffortWasAmbiguous = true
+            return
+        }
+        if let previous = state.reasoningEffort, previous != value {
+            state.reasoningEffort = nil
+            state.reasoningEffortWasAmbiguous = true
+        } else {
+            state.reasoningEffort = value
+        }
     }
 
     private func updateModel(_ model: String?, in state: inout TurnState) {
