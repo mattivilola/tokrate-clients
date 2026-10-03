@@ -3,42 +3,46 @@ import TokrateCore
 
 struct MenuBarView: View {
     let store: HistoryStore
+    @State private var range: DashboardRange = .today
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        if let latest = store.records.first {
-            Text("Latest turn throughput")
-            // Native menu items must not use ticking date text: it can recursively
-            // invalidate the SwiftUI menu host on macOS. Format a static string.
-            Text(latest.completedAt.formatted(date: .abbreviated, time: .shortened))
-            Text("\(latest.outputTokens) output tokens · \(latest.durationSeconds, specifier: "%.1f") s")
-            Text("\(latest.turnThroughputTPS, specifier: "%.1f") tokens/s")
-        } else {
-            Text("No completed turns yet")
+        let snapshot = DashboardSnapshot(records: store.records, range: range)
+        ScrollView {
+        VStack(spacing: 10) {
+            HStack(spacing: 9) {
+                Image(systemName: "speedometer").font(.system(size: 21, weight: .medium)).foregroundStyle(DashboardStyle.gradient)
+                Text("Tokrate").font(.system(size: 19, weight: .semibold, design: .rounded))
+                Spacer()
+                Label(store.isMonitoring ? "Monitoring" : "Paused", systemImage: store.isMonitoring ? "circle.fill" : "pause.fill")
+                    .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                Menu {
+                    Button("Full history…") { openWindow(id: "history"); NSApp.activate(ignoringOtherApps: true) }
+                    Button(store.isMonitoring ? "Pause monitoring" : "Resume monitoring") {
+                        if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
+                    }
+                    Divider()
+                    Link("Privacy details", destination: URL(string: "https://tokrate.dev/privacy")!)
+                    Button("Quit Tokrate") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
+                } label: {
+                    Image(systemName: "gearshape").font(.system(size: 15)).foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("Tokrate settings and full history")
+            }
+            .padding(.horizontal, 4).padding(.bottom, 2)
+            ThroughputGaugeView(metric: snapshot.latest)
+            TrendChartView(snapshot: snapshot, range: $range)
+            SummaryView(snapshot: snapshot)
+            SharingView(preferences: store.sharingPreferences)
+            if let error = store.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption2).foregroundStyle(.orange).lineLimit(2).help(error)
+            }
         }
-
-        Divider()
-        Button("Open dashboard") { openWindow(id: "history"); NSApp.activate(ignoringOtherApps: true) }
-        if store.isMonitoring {
-            Button("Pause monitoring") { store.stopMonitoring() }
-        } else {
-            Button("Start monitoring") { store.startMonitoring() }
+        .padding(16)
         }
-        Toggle("Share new turns", isOn: Binding(
-            get: { store.sharingPreferences.isSharingRequested },
-            set: { store.sharingPreferences.setSharingEnabled($0) }
-        ))
-        if store.sharingPreferences.isSharingRequested && !store.sharing.isEnabled {
-            Text("Sharing needs attention")
-            Button("Retry sharing") { store.sharingPreferences.retry() }
-        } else {
-            Text(store.sharing.isEnabled ? "Community sharing on" : "Local only · sharing off")
-        }
-        Text("Only new numeric measurements")
-        Text("Streaming TPS unavailable")
-            .foregroundStyle(.secondary)
-        Divider()
-        Button("Quit Tokrate") { NSApplication.shared.terminate(nil) }
-            .keyboardShortcut("q")
+        .frame(width: 460, height: 680)
+        .background(.regularMaterial)
     }
 }

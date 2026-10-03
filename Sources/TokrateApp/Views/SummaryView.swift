@@ -1,27 +1,28 @@
 import SwiftUI
-import TokrateCore
 
 struct SummaryView: View {
-    let records: [TurnMetric]
+    let snapshot: DashboardSnapshot
     var body: some View {
-        HStack(spacing: 16) {
-            metric("Latest turn", value: records.first.map { String(format: "%.1f", $0.turnThroughputTPS) } ?? "—", detail: "output tokens / whole-turn second")
-            metric("Seven-day median", value: median.map { String(format: "%.1f", $0) } ?? "—", detail: "includes tools, waits, and reasoning")
-            metric("Completed turns", value: records.count.formatted(), detail: "stored only on this Mac")
+        HStack(spacing: 0) {
+            metric("Median", value: DashboardSnapshot.rate(snapshot.medianRate), unit: "t/s")
+            Divider().frame(height: 32)
+            metric("Completed", value: snapshot.turnCount.formatted(), unit: "turns")
+            Divider().frame(height: 32)
+            metric("Codex TTFT", value: snapshot.medianTTFT.map { String(format: "%.2f", $0) } ?? "—", unit: "s")
         }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
     }
-    private var median: Double? {
-        let values = records.map(\.turnThroughputTPS).sorted()
-        guard !values.isEmpty else { return nil }
-        return values.count.isMultiple(of: 2) ? (values[values.count / 2 - 1] + values[values.count / 2]) / 2 : values[values.count / 2]
-    }
-    private func metric(_ title: String, value: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 32, weight: .medium, design: .rounded)).monospacedDigit()
-            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-        }.frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+    private func metric(_ title: String, value: String, unit: String) -> some View {
+        VStack(spacing: 4) {
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value).font(.system(size: 19, weight: .semibold, design: .rounded)).monospacedDigit()
+                Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .help(title == "Codex TTFT" ? "Median Codex-reported time to first token; first-visible-text semantics are unverified." : "\(title) for the selected history range.")
     }
 }

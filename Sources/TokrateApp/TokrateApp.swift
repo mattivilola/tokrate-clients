@@ -22,7 +22,7 @@ struct TokrateApp: App {
         } label: {
             Label(historyStore.menuBarTitle, systemImage: "speedometer")
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
 
         Window("Tokrate", id: "history") {
             HistoryView(store: historyStore)

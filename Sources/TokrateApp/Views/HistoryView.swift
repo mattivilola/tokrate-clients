@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct HistoryView: View {
     let store: HistoryStore
     @State private var isChoosingFolder = false
+    @State private var range: DashboardRange = .week
 
     private var sevenDayRecords: [TurnMetric] {
         let cutoff = Date.now.addingTimeInterval(-MetricHistory.retention)
@@ -13,11 +14,18 @@ struct HistoryView: View {
     }
 
     var body: some View {
+        let snapshot = DashboardSnapshot(records: store.records, range: range)
         ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             header
-            SummaryView(records: sevenDayRecords)
-            SharingView(preferences: store.sharingPreferences)
+            HStack(alignment: .top, spacing: 18) {
+                ThroughputGaugeView(metric: snapshot.latest, compact: false).frame(width: 340)
+                VStack(spacing: 18) {
+                    TrendChartView(snapshot: snapshot, range: $range, compact: false)
+                    SummaryView(snapshot: snapshot)
+                }
+            }
+            SharingView(preferences: store.sharingPreferences, compact: false)
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
@@ -34,7 +42,11 @@ struct HistoryView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 180)
             } else {
-                throughputChart
+                HStack {
+                    Text("Recent turns").font(.headline)
+                    Spacer()
+                    Text("Latest \(min(500, sevenDayRecords.count)) of \(sevenDayRecords.count.formatted()) · seven days").font(.caption).foregroundStyle(.secondary)
+                }
                 metricsTable
             }
             footer
@@ -73,35 +85,8 @@ struct HistoryView: View {
         }
     }
 
-    private var throughputChart: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Last seven days")
-                .font(.headline)
-            Chart(sevenDayRecords) { record in
-                PointMark(
-                    x: .value("Completed", record.completedAt),
-                    y: .value("Turn throughput", record.turnThroughputTPS)
-                )
-                .foregroundStyle(.blue)
-                .symbolSize(42)
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .day)) { value in
-                    AxisGridLine()
-                    AxisTick()
-                    AxisValueLabel(format: .dateTime.weekday(.abbreviated).day())
-                }
-            }
-            .chartYAxisLabel("Output tokens / whole-turn second")
-            .frame(height: 145)
-            .padding(.horizontal, 4)
-        }
-        .padding(16)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-    }
-
     private var metricsTable: some View {
-        Table(sevenDayRecords) {
+        Table(Array(sevenDayRecords.prefix(500))) {
             TableColumn("Completed") { record in
                 Text(record.completedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
             }

@@ -13,6 +13,7 @@ let package = Package(
         .target(name: "TokrateCore"),
         .executableTarget(name: "tokrate", dependencies: ["TokrateCore"]),
         .executableTarget(name: "TokrateApp", dependencies: ["TokrateCore"]),
-        .testTarget(name: "TokrateCoreTests", dependencies: ["TokrateCore"])
+        .testTarget(name: "TokrateCoreTests", dependencies: ["TokrateCore"]),
+        .testTarget(name: "TokrateAppTests", dependencies: ["TokrateApp", "TokrateCore"])
     ]
 )

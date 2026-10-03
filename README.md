@@ -2,7 +2,7 @@
 
 Tokrate is a local macOS menu bar app and command-line inspector for completed-turn metrics from Codex session JSONL files. It starts monitoring local Codex session logs automatically on launch. Community sharing is on by default; switching it off is remembered across launches. It makes no network requests while sharing is off and does not retain prompt or response text.
 
-The macOS app shows a seven-day history chart and per-turn rows. Its throughput metric is Codex-reported output tokens divided by whole-turn duration, including tool work and waits. The app labels Codex's reported TTFT separately; streaming-only tokens per second remain unavailable.
+Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, Today / 7 days trend, summary metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. Its throughput metric is Codex-reported output tokens divided by whole-turn duration, including tool work and waits. The app labels Codex's reported TTFT separately; streaming-only tokens per second remain unavailable.
 
 ## Build
 
@@ -21,7 +21,7 @@ The app reads `~/.codex/sessions` automatically on launch, or a folder you selec
 
 ## Optional community sharing
 
-The app launches as a menu-bar utility. Choose **Open dashboard** for the local chart, recent turns, and sharing controls. Monitoring starts automatically on every launch. Sharing also starts automatically unless you previously switched it off. The **Share new turns** toggle appears in both the menu and dashboard, changes immediately without a confirmation dialog, and remembers your choice. Pausing monitoring leaves already-queued sharing active; turn **Share new turns** off to stop all community requests.
+The app launches as a menu-bar utility. Click its icon for the dashboard; choose **Full history…** from the gear menu for the larger window and folder controls. Monitoring starts automatically on every launch. Sharing also starts automatically unless you previously switched it off. The **Share with community** toggle appears in both the compact dashboard and full history window, changes immediately without a confirmation dialog, and remembers your choice. Pausing monitoring leaves already-queued sharing active; turn **Share with community** off to stop all community requests.
 
 While sharing is requested, the app creates or reuses a random Ed25519 identity in the macOS Keychain and sends only new completed-turn measurements to `https://tokrate.dev/api/public/v1/samples`. The public key identifies this installation pseudonymously; no account registration is required. The server sees the source IP during each connection. Community statistics and alerts are fetched only while sharing is enabled, at most every 30 seconds.
 
@@ -46,3 +46,7 @@ Version 0.1.1 replaces the automatically updating relative timestamp in the nati
 Version 0.1.2 reads recent events independently of historical replay, so large existing Codex logs cannot delay new-turn capture for hours. Both readers share local deduplication identifiers; sharing still permits only turns completed after this launch or after sharing was enabled.
 
 Version 0.1.3 starts monitoring and default-on sharing from the application launch delegate, without opening a window or menu. A saved off choice prevents identity access and all community requests. If Keychain access fails, the switch retains your preference, the app reports that sharing could not start, and **Retry sharing** is available; local monitoring continues.
+
+The 0.1.3 dashboard uses native adaptive materials and static blue/teal gauges, with no continuous animation or ticking date views. The dial shows the latest completed turn from the retained seven-day history, even when the selected chart range has no turns. Today uses at most 48 interval medians; seven days uses at most 56. Summary medians and counts cover the selected range. Missing TTFT remains unavailable. The dial scale expands for higher rates; it is not a benchmark or quality score.
+
+For offscreen UI previews, `DashboardSnapshot(records:range:now:calendar:)` accepts supplied `TurnMetric` values and a fixed date. `ThroughputGaugeView(metric:compact:)`, `TrendChartView(snapshot:range:compact:)`, and `SummaryView(snapshot:)` are presentation-only views and do not construct a history store, read logs, access Keychain, or start network requests. Include `DashboardStyle.swift` when compiling these components separately. Use an explicit light/dark color scheme in a SwiftUI renderer.
