@@ -24,6 +24,8 @@ public struct CodexEventParser: Sendable {
     private var sourceKind = "unknown"
     private var provider = "unknown"
 
+    var excludesSessionFromMetrics: Bool { isAgentSession }
+
     public init(sourceIdentity: String) {
         self.sourceIdentity = sourceIdentity
     }
@@ -63,7 +65,6 @@ public struct CodexEventParser: Sendable {
 
         if turns.count > 4096 { turns.removeAll(keepingCapacity: true) }
         if emittedTurnIDs.count > 8192 { emittedTurnIDs.removeAll(keepingCapacity: true) }
-        let eventDate = parseDate(event["timestamp"])
 
         if eventType == "turn_context" {
             guard let turnID = payload["turn_id"] as? String, !turnID.isEmpty else { return nil }
@@ -92,6 +93,7 @@ public struct CodexEventParser: Sendable {
               !turnID.isEmpty
         else { return nil }
 
+        let eventDate = parseDate(event["timestamp"])
         if subtype == "task_started" {
             var state = turns[turnID, default: TurnState()]
             if state.startedAt == nil { state.startedAt = parseDate(payload["started_at"]) ?? eventDate }
