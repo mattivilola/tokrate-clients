@@ -292,7 +292,9 @@ fn monitor_rotates_caught_up_live_tails_so_older_open_sessions_are_serviced() {
             )]),
         )
         .unwrap();
-        fs::File::open(path)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
             .unwrap()
             .set_modified(modified_base + StdDuration::from_secs(index))
             .unwrap();
