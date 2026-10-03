@@ -3,7 +3,10 @@ import TokrateCore
 
 struct SharingView: View {
     let preferences: SharingPreferences
+    let selection: DashboardSelection
+    let latestCohort: ModelCohort?
     var compact = true
+    var showToggle = true
     private var sharing: SharingSession { preferences.session }
 
     var body: some View {
@@ -17,12 +20,14 @@ struct SharingView: View {
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
-                Toggle("Share with community", isOn: Binding(
-                    get: { preferences.isSharingRequested },
-                    set: { preferences.setSharingEnabled($0) }
-                ))
-                .toggleStyle(.switch).labelsHidden().tint(.teal)
-                .accessibilityHint("Remembers your choice. Turning off cancels community requests.")
+                if showToggle {
+                    Toggle("Share with community", isOn: Binding(
+                        get: { preferences.isSharingRequested },
+                        set: { preferences.setSharingEnabled($0) }
+                    ))
+                    .toggleStyle(.switch).labelsHidden().tint(.teal)
+                    .accessibilityHint("Remembers your choice. Turning off cancels community requests.")
+                }
             }
             if preferences.isSharingRequested {
                 VStack(alignment: .leading, spacing: 7) {
@@ -31,30 +36,7 @@ struct SharingView: View {
                     if !sharing.isEnabled {
                         Button("Retry sharing") { preferences.retry() }.buttonStyle(.link).font(.caption)
                     } else if let board = sharing.board {
-                        if !board.collectionEnabled {
-                            Label("Community collection is paused", systemImage: "pause.circle").font(.caption)
-                        } else if board.state == "insufficient_data" {
-                            Label("Community comparison is gathering data", systemImage: "chart.xyaxis.line")
-                                .font(.system(size: 10)).foregroundStyle(.secondary)
-                        } else {
-                            HStack {
-                                Text("Community · \(board.window == "15m" ? "15 min" : "24 hours")")
-                                Spacer()
-                                if board.state == "stale" { Text("Older data").foregroundStyle(.orange) }
-                            }.font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                            ForEach(board.cohorts.prefix(compact ? 2 : 5)) { cohort in
-                                HStack {
-                                    Text(cohort.model).lineLimit(1)
-                                    Spacer()
-                                    Text(cohort.medianThroughput.map { String(format: "%.1f t/s", $0) } ?? "—").monospacedDigit()
-                                    Text("\(cohort.contributors) contributors").foregroundStyle(.secondary)
-                                }.font(.system(size: 10))
-                            }
-                            ForEach(board.alerts.prefix(compact ? 1 : 3)) { alert in
-                                Label(alert.message ?? "\(alert.model ?? "Community") · \(alert.metric == "ttft" ? "Codex TTFT" : "turn throughput"): \((alert.state ?? "change detected").replacingOccurrences(of: "_", with: " "))", systemImage: "exclamationmark.circle")
-                                    .font(.system(size: 10)).foregroundStyle(.orange)
-                            }
-                        }
+                        boardContent(board)
                     }
                 }
             }
@@ -66,5 +48,150 @@ struct SharingView: View {
             }
         }
         .dashboardCard(padding: 12)
+    }
+
+    @ViewBuilder
+    private func boardContent(_ board: GlobalBoard) -> some View {
+        if !board.collectionEnabled {
+            Label("Community collection is paused", systemImage: "pause.circle").font(.caption)
+        } else {
+            HStack(spacing: 6) {
+                Text("Community · \(windowLabel(board.window))")
+                if board.state == "stale" {
+                    statusTag("Older data", color: .orange)
+                }
+                if board.state == "insufficient_data" || board.publicationMode == "early_data" {
+                    statusTag("Early data", color: .secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+
+            if selection.isAllModels {
+                if board.cohorts.isEmpty {
+                    Text("Community comparison is gathering data.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                } else {
+                    ForEach(board.cohorts) { cohort in communityRow(cohort) }
+                    ForEach(matchingAlerts(in: board, cohorts: board.cohorts)) { alert in alertRow(alert) }
+                }
+            } else if let target = selectedCohort {
+                let matches = board.cohorts.filter { exactlyMatches($0, target: target) }
+                if matches.isEmpty {
+                    Text("Community data for this exact model, provider, and client version is not available yet.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(matches) { cohort in communityRow(cohort) }
+                    ForEach(matchingAlerts(in: board, cohorts: matches)) { alert in alertRow(alert) }
+                }
+            } else {
+                Text("Choose a reported model and client version to see its community comparison.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+
+            if let methodology = board.methodology?.statistics ?? board.methodology?.source {
+                Text("Method: \(methodology)")
+                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Text("Community rows use reported primary-client samples. Local unknown sources may be included; effort/speed tier is not controlled.")
+                .font(.system(size: 9)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var selectedCohort: ModelCohort? {
+        switch selection {
+        case .latest: latestCohort
+        case .cohort(let cohort): cohort
+        case .all: nil
+        }
+    }
+
+    private func exactlyMatches(_ cohort: GlobalBoard.Cohort, target: ModelCohort) -> Bool {
+        guard let model = target.model, let provider = target.provider, let version = target.clientVersion,
+              isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
+              isSafe(version, pattern: "^[a-zA-Z0-9.+_-]{1,40}$"),
+              provider == "openai" else { return false }
+        return cohort.model == model && cohort.provider == provider && cohort.clientVersion == version
+    }
+
+    private func communityRow(_ cohort: GlobalBoard.Cohort) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text(cohort.model).lineLimit(1)
+                Text("· \(cohort.provider)").foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                Text(cohort.medianThroughput.map { String(format: "%.1f t/s", $0) } ?? "—")
+                    .monospacedDigit().fontWeight(.medium)
+            }
+            HStack(spacing: 4) {
+                Text("client \(cohort.clientVersion ?? "version unreported")")
+                Spacer(minLength: 4)
+                if let minimum = cohort.minThroughput, let maximum = cohort.maxThroughput {
+                    Text("min \(String(format: "%.1f", minimum)) · max \(String(format: "%.1f", maximum))")
+                        .monospacedDigit()
+                }
+                Text("· \(throughputCountLabel(cohort))")
+                    .monospacedDigit()
+            }
+            .foregroundStyle(.secondary)
+            .font(.system(size: 9))
+            if let median = cohort.medianTtftMs {
+                HStack(spacing: 4) {
+                    Text("Codex TTFT median \(String(format: "%.0f", median)) ms")
+                    if let minimum = cohort.minTtftMs, let maximum = cohort.maxTtftMs {
+                        Text("· min \(String(format: "%.0f", minimum)) · max \(String(format: "%.0f", maximum)) ms")
+                    }
+                    Text("· \(ttftCountLabel(cohort))")
+                }
+                .font(.system(size: 9)).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
+        .font(.system(size: 10))
+        .padding(.vertical, 3)
+    }
+
+    private func matchingAlerts(in board: GlobalBoard, cohorts: [GlobalBoard.Cohort]) -> [GlobalBoard.Alert] {
+        let ids = Set(cohorts.map(\.id))
+        return board.alerts.filter { alert in
+            if let cohortId = alert.cohortId { return ids.contains(cohortId) }
+            guard let model = alert.model, let provider = alert.provider, let version = alert.clientVersion else { return false }
+            return cohorts.contains { $0.model == model && $0.provider == provider && $0.clientVersion == version }
+        }
+    }
+
+    private func alertRow(_ alert: GlobalBoard.Alert) -> some View {
+        Label(alert.message ?? "\(alert.model ?? "Community") · \(alert.metric == "ttft" ? "Codex TTFT" : "turn throughput"): \((alert.state ?? "change detected").replacingOccurrences(of: "_", with: " "))", systemImage: "exclamationmark.circle")
+            .font(.system(size: 10)).foregroundStyle(.orange)
+    }
+
+    private func windowLabel(_ window: String) -> String {
+        switch window {
+        case "15m": "15 min"
+        case "24h", "24hr": "24 hours"
+        case "7d": "7 days"
+        case "30d": "30 days"
+        default: window
+        }
+    }
+
+    private func throughputCountLabel(_ cohort: GlobalBoard.Cohort) -> String {
+        if let count = cohort.throughputTurns ?? cohort.throughputCount { return "n=\(count)" }
+        return cohort.medianThroughput == nil ? "count unavailable" : "\(cohort.turns) turns"
+    }
+
+    private func ttftCountLabel(_ cohort: GlobalBoard.Cohort) -> String {
+        if let count = cohort.ttftTurns ?? cohort.ttftCount { return "n=\(count)" }
+        return "count unavailable"
+    }
+
+    private func statusTag(_ title: String, color: Color) -> some View {
+        Text(title).font(.system(size: 8, weight: .semibold)).foregroundStyle(color)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(color.opacity(0.1), in: Capsule())
+    }
+
+    private func isSafe(_ value: String, pattern: String) -> Bool {
+        value.range(of: pattern, options: .regularExpression) != nil
     }
 }

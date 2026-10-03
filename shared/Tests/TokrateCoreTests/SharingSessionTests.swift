@@ -134,4 +134,21 @@ final class SharingSessionTests: XCTestCase {
         session.enqueue([], now: now.addingTimeInterval(86_401))
         XCTAssertEqual(session.pendingCount, 0)
     }
+
+    func testGlobalBoardDecodesOptionalExactCohortAndMetricFields() throws {
+        let json = #"{"schemaVersion":1,"generatedAt":"2026-10-03T10:00:00Z","dataAsOf":null,"collectionEnabled":true,"state":"stale","window":"24h","methodology":{"statistics":"percentiles across contributor medians","publicationMode":"early_data","minimumContributors":1,"minimumTurns":1,"observationBucketMinutes":5,"streamingSpeedAvailable":false,"source":"self-reported community observations","detectorVersion":"community-v1-5m"},"cohorts":[{"id":"[\"gpt-test\",\"openai\",\"0.159.2\",\"codex-rollout-v1\",\"turn-v1\"]","model":"gpt-test","provider":"openai","clientVersion":"0.159.2","parserVersion":"codex-rollout-v1","metricVersion":"turn-v1","contributors":4,"turns":12,"throughputContributors":3,"throughputTurns":11,"ttftContributors":2,"ttftTurns":9,"medianThroughput":8.5,"minThroughput":3.0,"maxThroughput":20.0,"p10Throughput":4.0,"medianTtftMs":900.0,"minTtftMs":200.0,"maxTtftMs":1800.0,"p95TtftMs":1700.0}],"alerts":[]}"#
+        let board = try JSONDecoder().decode(GlobalBoard.self, from: Data(json.utf8))
+        let cohort = try XCTUnwrap(board.cohorts.first)
+        XCTAssertEqual(board.methodology?.statistics, "percentiles across contributor medians")
+        XCTAssertEqual(board.publicationMode, "early_data")
+        XCTAssertEqual(cohort.clientVersion, "0.159.2")
+        XCTAssertEqual(cohort.parserVersion, "codex-rollout-v1")
+        XCTAssertEqual(cohort.metricVersion, "turn-v1")
+        XCTAssertEqual(cohort.throughputTurns, 11)
+        XCTAssertEqual(cohort.minThroughput, 3)
+        XCTAssertEqual(cohort.maxThroughput, 20)
+        XCTAssertEqual(cohort.ttftTurns, 9)
+        XCTAssertEqual(cohort.minTtftMs, 200)
+        XCTAssertEqual(cohort.maxTtftMs, 1_800)
+    }
 }

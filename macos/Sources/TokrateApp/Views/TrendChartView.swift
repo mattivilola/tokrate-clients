@@ -17,7 +17,7 @@ struct TrendChartView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityLabel("History range")
-                .frame(width: 138)
+                .frame(width: 150)
             }
             if snapshot.points.isEmpty {
                 VStack(spacing: 5) {
@@ -45,7 +45,7 @@ struct TrendChartView: View {
                     AxisMarks(values: .automatic(desiredCount: 3)) { axis in
                         AxisValueLabel {
                             if let date = axis.as(Date.self) {
-                                Text(date, format: range == .today ? .dateTime.hour() : .dateTime.weekday(.abbreviated))
+                                Text(date, format: range == .day ? .dateTime.hour() : .dateTime.weekday(.abbreviated))
                                     .font(.system(size: 9))
                             }
                         }
@@ -58,11 +58,11 @@ struct TrendChartView: View {
                     }
                 }
                 .frame(height: compact ? 76 : 170)
-                .accessibilityLabel("Local turn throughput over \(range == .today ? "today" : "seven days"), in tokens per whole-turn second")
+                .accessibilityLabel("Local turn throughput over \(range == .day ? "24 hours" : "seven days"), in tokens per whole-turn second")
             }
-            Text("Typical completed-turn rate · tokens/s")
+            Text("Whole-turn · 20+ output tokens · effort/speed tier not controlled")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
-                .help("Median throughput in each time interval. Each turn includes tool work, waiting, and reasoning.")
+                .help("Median whole-turn throughput in each time interval, for turns with at least 20 output tokens. Each turn includes tool work, waiting, and reasoning.")
         }
         .dashboardCard(padding: 12)
     }

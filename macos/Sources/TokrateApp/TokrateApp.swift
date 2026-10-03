@@ -27,7 +27,7 @@ struct TokrateApp: App {
                     Text(historyStore.menuBarTitle).monospacedDigit()
                 }
             }
-            .accessibilityLabel(showMenuBarSpeed ? "Tokrate, latest completed turn: \(historyStore.menuBarTitle)" : "Tokrate")
+            .accessibilityLabel(showMenuBarSpeed ? "Tokrate, selected model comparison: \(historyStore.menuBarTitle)" : "Tokrate")
         }
         .menuBarExtraStyle(.window)
 

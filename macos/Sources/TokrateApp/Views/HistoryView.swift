@@ -4,37 +4,38 @@ import TokrateCore
 import UniformTypeIdentifiers
 
 struct HistoryView: View {
-    let store: HistoryStore
+    @Bindable var store: HistoryStore
     @State private var isChoosingFolder = false
     @State private var range: DashboardRange = .week
 
-    private var sevenDayRecords: [TurnMetric] {
-        let cutoff = Date.now.addingTimeInterval(-MetricHistory.retention)
-        return store.records.filter { $0.completedAt >= cutoff }
-    }
-
     var body: some View {
-        let snapshot = DashboardSnapshot(records: store.records, range: range)
+        let snapshot = DashboardSnapshot(records: store.records, range: range, selection: store.dashboardSelection)
         ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             header
-            HStack(alignment: .top, spacing: 18) {
-                ThroughputGaugeView(metric: snapshot.latest, compact: false).frame(width: 340)
-                VStack(spacing: 18) {
-                    TrendChartView(snapshot: snapshot, range: $range, compact: false)
-                    SummaryView(snapshot: snapshot)
+            CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
+            if snapshot.selection.isAllModels {
+                CohortComparisonView(snapshot: snapshot, range: $range, compact: false)
+            } else {
+                HStack(alignment: .top, spacing: 18) {
+                    ThroughputGaugeView(metric: snapshot.latest, compact: false).frame(width: 340)
+                    VStack(spacing: 12) {
+                        TrendChartView(snapshot: snapshot, range: $range, compact: false)
+                        SummaryView(snapshot: snapshot)
+                        PersonalTrendView(trend: snapshot.personalTrend)
+                    }
                 }
             }
-            SharingView(preferences: store.sharingPreferences, compact: false)
+            SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, compact: false)
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             }
-            if sevenDayRecords.isEmpty {
+            if snapshot.records.isEmpty {
                 ContentUnavailableView {
-                    Label("No turn history yet", systemImage: "chart.xyaxis.line")
+                    Label(store.records.isEmpty ? "No turn history yet" : "No turns in this range", systemImage: "chart.xyaxis.line")
                 } description: {
-                    Text(store.isMonitoring ? "Reading completed Codex turns. Large histories may take a moment." : "Choose Start monitoring to read local Codex session files. Prompts and responses are never retained.")
+                    Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed Codex turns. Large histories may take a moment." : "Choose Start monitoring to read local Codex session files. Prompts and responses are never retained.") : "Choose 7 days or select another model cohort to view its local turns.")
                 } actions: {
                     Button("Start monitoring") { store.startMonitoring() }
                         .buttonStyle(.borderedProminent)
@@ -45,9 +46,10 @@ struct HistoryView: View {
                 HStack {
                     Text("Recent turns").font(.headline)
                     Spacer()
-                    Text("Latest \(min(500, sevenDayRecords.count)) of \(sevenDayRecords.count.formatted()) · seven days").font(.caption).foregroundStyle(.secondary)
+                    Text("Latest \(min(500, snapshot.records.count)) of \(snapshot.records.count.formatted()) · \(range.title.lowercased())")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                metricsTable
+                metricsTable(records: snapshot.records)
             }
             footer
         }
@@ -86,17 +88,21 @@ struct HistoryView: View {
         }
     }
 
-    private var metricsTable: some View {
-        Table(Array(sevenDayRecords.prefix(500))) {
+    private func metricsTable(records: [TurnMetric]) -> some View {
+        Table(Array(records.prefix(500))) {
             TableColumn("Completed") { record in
                 Text(record.completedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
             }
             .width(min: 130)
             TableColumn("Model") { record in
-                Text(record.model ?? "Unknown")
-                    .foregroundStyle(record.model == nil ? .secondary : .primary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(record.model ?? "Unknown")
+                        .foregroundStyle(record.model == nil ? .secondary : .primary)
+                    Text([record.provider, record.clientVersion.map { "client \($0)" }].compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
-            .width(min: 110)
+            .width(min: 190)
             TableColumn("Output tokens") { record in
                 Text(record.outputTokens.formatted())
                     .monospacedDigit()

@@ -4,47 +4,201 @@ import TokrateCore
 
 final class DashboardSnapshotTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
-    private func metric(_ secondsAgo: Double, rate: Double, ttft: Double? = nil) -> TurnMetric {
-        TurnMetric(id: "\(secondsAgo)", completedAt: now.addingTimeInterval(-secondsAgo), model: "test-model", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: ttft, turnThroughputTPS: rate)
+
+    private func metric(
+        _ id: String,
+        secondsAgo: Double,
+        model: String? = "test-model",
+        provider: String? = "openai",
+        clientVersion: String? = "0.159.2",
+        outputTokens: Int = 100,
+        rate: Double,
+        ttft: Double? = nil
+    ) -> TurnMetric {
+        TurnMetric(
+            id: id,
+            completedAt: now.addingTimeInterval(-secondsAgo),
+            model: model,
+            outputTokens: outputTokens,
+            durationSeconds: 10,
+            codexTTFTSeconds: ttft,
+            turnThroughputTPS: rate,
+            clientVersion: clientVersion,
+            provider: provider
+        )
     }
 
     func testFiftyThousandTurnsProduceAtMostFiftySixChartPoints() {
-        let records = (0..<50_000).map { metric(Double($0) * 12, rate: Double($0 % 100)) }
+        let records = (0..<50_000).map { metric("\($0)", secondsAgo: Double($0) * 12, rate: Double($0 % 100)) }
         let snapshot = DashboardSnapshot(records: records, range: .week, now: now)
-        XCTAssertEqual(snapshot.turnCount, 50_000)
+        XCTAssertEqual(snapshot.throughput.count, 50_000)
         XCTAssertLessThanOrEqual(snapshot.points.count, 56)
         XCTAssertEqual(snapshot.points.reduce(0) { $0 + $1.turns }, 50_000)
         XCTAssertEqual(snapshot.medianRate, 49.5)
         XCTAssertTrue(snapshot.points.allSatisfy { snapshot.dates.contains($0.date) })
     }
 
-    func testFilteringAndMediansDoNotInventMissingValues() {
-        let records = [metric(10, rate: 20, ttft: 2), metric(20, rate: 40), metric(30, rate: 60, ttft: 4), metric(-1, rate: 999), metric(700_000, rate: 999), metric(40, rate: .nan)]
-        let snapshot = DashboardSnapshot(records: records, range: .week, now: now)
-        XCTAssertEqual(snapshot.turnCount, 3)
-        XCTAssertEqual(snapshot.medianRate, 40)
-        XCTAssertEqual(snapshot.medianTTFT, 3)
-        XCTAssertEqual(snapshot.latest?.turnThroughputTPS, 20)
-        let empty = DashboardSnapshot(records: [], range: .week, now: now)
-        XCTAssertNil(empty.medianRate)
-        XCTAssertNil(empty.medianTTFT)
-        XCTAssertNil(empty.latest)
-        XCTAssertTrue(empty.points.isEmpty)
+    func testSelectionUsesLatestCohortOrExactModelProviderAndClientVersion() {
+        let old = metric("old", secondsAgo: 600, model: "gpt-s", clientVersion: "1.0", rate: 10)
+        let selected = metric("selected", secondsAgo: 500, model: "gpt-s", clientVersion: "1.0", rate: 30)
+        let otherVersion = metric("version", secondsAgo: 20, model: "gpt-s", clientVersion: "2.0", rate: 200)
+        let otherProvider = metric("provider", secondsAgo: 10, model: "gpt-s", provider: "other", clientVersion: "1.0", rate: 300)
+        let records = [old, selected, otherVersion, otherProvider]
+
+        let latest = DashboardSnapshot(records: records, range: .week, selection: .latest, now: now)
+        XCTAssertEqual(latest.selectedCohort, ModelCohort(otherProvider))
+        XCTAssertEqual(latest.records.map(\.id), [otherProvider.id])
+
+        let cohort = ModelCohort(model: "gpt-s", provider: "openai", clientVersion: "1.0")
+        let selectedSnapshot = DashboardSnapshot(records: records, range: .week, selection: .cohort(cohort), now: now)
+        XCTAssertEqual(Set(selectedSnapshot.records.map(\.id)), Set([old.id, selected.id]))
+        XCTAssertEqual(selectedSnapshot.throughput.median, 20)
+        XCTAssertEqual(selectedSnapshot.throughput.count, 2)
+        XCTAssertEqual(DashboardSelection.restored(from: DashboardSelection.cohort(cohort).persistenceValue), .cohort(cohort))
+
+        let all = DashboardSnapshot(records: records, range: .week, selection: .all, now: now)
+        XCTAssertNil(all.latest)
+        XCTAssertNil(all.medianRate)
+        XCTAssertNil(all.medianTTFT)
+        XCTAssertTrue(all.points.isEmpty)
+        XCTAssertEqual(all.cohortSummaries.count, 3)
+        XCTAssertEqual(all.cohortSummaries.map(\.throughput.count).sorted(), [1, 1, 2])
     }
 
-    func testTodayFiltersSummaryButLatestRemainsActualLastTurn() {
+    func testRollingRangesUseEligibleTurnsAndMetricSpecificMissingCounts() {
+        let records = [
+            metric("1h", secondsAgo: 3_600, rate: 10),
+            metric("10h", secondsAgo: 36_000, rate: 20, ttft: 1),
+            metric("25h", secondsAgo: 90_000, rate: 30, ttft: 3),
+            metric("6d", secondsAgo: 6 * 86_400, rate: 40),
+            metric("short", secondsAgo: 100, outputTokens: 19, rate: 999, ttft: 0.5),
+            metric("old", secondsAgo: 8 * 86_400, rate: 700)
+        ]
+        let day = DashboardSnapshot(records: records, range: .day, now: now)
+        XCTAssertEqual(day.throughput.count, 2)
+        XCTAssertEqual(day.throughput.median, 15)
+        XCTAssertEqual(day.throughput.minimum, 10)
+        XCTAssertEqual(day.throughput.maximum, 20)
+        XCTAssertEqual(day.ttft.count, 2)
+        XCTAssertEqual(day.ttft.median, 0.75)
+        XCTAssertEqual(day.latest?.id, "1h")
+        XCTAssertEqual(day.turnCount, 2)
+        XCTAssertTrue(day.dates.contains(now.addingTimeInterval(-86_400)))
+
+        let week = DashboardSnapshot(records: records, range: .week, now: now)
+        XCTAssertEqual(week.throughput.count, 4)
+        XCTAssertEqual(week.throughput.median, 25)
+        XCTAssertEqual(week.throughput.minimum, 10)
+        XCTAssertEqual(week.throughput.maximum, 40)
+        XCTAssertEqual(week.ttft.count, 3)
+        XCTAssertEqual(week.ttft.minimum, 0.5)
+        XCTAssertEqual(week.ttft.maximum, 3)
+    }
+
+    func testPersonalTrendRequiresRecentCurrentTurnsAndTwoBaselineDays() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let elapsed = now.timeIntervalSince(calendar.startOfDay(for: now))
-        let record = metric(elapsed + 60, rate: 25)
-        let snapshot = DashboardSnapshot(records: [record], range: .today, now: now, calendar: calendar)
-        XCTAssertEqual(snapshot.turnCount, 0)
-        XCTAssertEqual(snapshot.latest, record)
-        XCTAssertTrue(snapshot.points.isEmpty)
-        let midnight = calendar.startOfDay(for: now)
-        let midnightRecord = TurnMetric(id: "midnight", completedAt: midnight, model: nil, outputTokens: 0, durationSeconds: 1, codexTTFTSeconds: nil, turnThroughputTPS: 0)
-        let midnightSnapshot = DashboardSnapshot(records: [midnightRecord], range: .today, now: midnight, calendar: calendar)
-        XCTAssertEqual(midnightSnapshot.turnCount, 1)
-        XCTAssertTrue(midnightSnapshot.dates.contains(midnightSnapshot.points[0].date))
+        let baseline = (0..<20).map { index in
+            metric("base-\(index)", secondsAgo: 36 * 3_600 + Double(index / 10) * 86_400 + Double(index) * 30, rate: 100, ttft: 1)
+        }
+        let current = (0..<5).map { index in
+            metric("current-\(index)", secondsAgo: Double(index) * 60, rate: 60, ttft: 2.2)
+        }
+        let snapshot = DashboardSnapshot(records: baseline + current, range: .day, now: now, calendar: calendar)
+        let trend = try! XCTUnwrap(snapshot.personalTrend)
+        XCTAssertEqual(trend.status, .slower)
+        XCTAssertEqual(trend.currentThroughput.median, 60)
+        XCTAssertEqual(trend.currentThroughput.count, 5)
+        XCTAssertEqual(trend.baselineThroughput.median, 100)
+        XCTAssertEqual(trend.baselineThroughput.count, 20)
+        XCTAssertEqual(trend.currentTTFT.median, 2.2)
+        XCTAssertEqual(trend.currentTTFT.count, 5)
+
+        let recentTooOld = current.map { item in
+            TurnMetric(id: item.id, completedAt: now.addingTimeInterval(-7_200), model: item.model, outputTokens: item.outputTokens, durationSeconds: item.durationSeconds, codexTTFTSeconds: item.codexTTFTSeconds, turnThroughputTPS: item.turnThroughputTPS, clientVersion: item.clientVersion, provider: item.provider)
+        }
+        let noRecent = DashboardSnapshot(records: baseline + recentTooOld, range: .day, now: now, calendar: calendar)
+        XCTAssertEqual(noRecent.personalTrend?.status, .noRecentObservations)
+
+        let smallCurrent = Array(current.prefix(4))
+        let building = DashboardSnapshot(records: baseline + smallCurrent, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(building.personalTrend?.status, .buildingBaseline)
+    }
+
+    func testTrendUsesThirtyPercentAndOneSecondThresholdsAndMissingTTFTStaysMissing() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let baseline = (0..<20).map { index in
+            metric("b-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), rate: 10)
+        }
+        let current = (0..<5).map { index in
+            metric("c-\(index)", secondsAgo: Double(index) * 60, rate: 7.1)
+        }
+        let belowThreshold = DashboardSnapshot(records: baseline + current, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(belowThreshold.personalTrend?.status, .noLargeChange)
+        XCTAssertNil(belowThreshold.medianTTFT)
+        XCTAssertEqual(belowThreshold.ttft.count, 0)
+
+        let missingRecentTTFT = (0..<5).map { index in
+            metric("c-ttft-\(index)", secondsAgo: Double(index) * 60, rate: 10, ttft: nil)
+        }
+        let missingBaselineTTFT = (0..<20).map { index in
+            metric("b-ttft-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), rate: 10, ttft: nil)
+        }
+        let noFakedTTFT = DashboardSnapshot(records: missingBaselineTTFT + missingRecentTTFT, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(noFakedTTFT.personalTrend?.status, .noLargeChange)
+        XCTAssertEqual(noFakedTTFT.personalTrend?.currentTTFT.count, 0)
+        XCTAssertNil(noFakedTTFT.personalTrend?.currentTTFT.median)
+
+        let baselineWithTTFT = (0..<20).map { index in
+            metric("tb-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), rate: 10, ttft: 1)
+        }
+        let exactTTFTThreshold = (0..<5).map { index in
+            metric("tc-\(index)", secondsAgo: Double(index) * 60, rate: 8, ttft: 2)
+        }
+        let ttftSlower = DashboardSnapshot(records: baselineWithTTFT + exactTTFTThreshold, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(ttftSlower.personalTrend?.status, .slower)
+
+        let subSecondIncrease = (0..<5).map { index in
+            metric("subsecond-\(index)", secondsAgo: Double(index) * 60, rate: 8, ttft: 1.9)
+        }
+        let notEnoughTTFTIncrease = DashboardSnapshot(records: baselineWithTTFT + subSecondIncrease, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(notEnoughTTFTIncrease.personalTrend?.status, .noLargeChange)
+
+        let zeroBaseline = (0..<20).map { index in
+            metric("zero-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), rate: 0)
+        }
+        let zeroCannotCompare = DashboardSnapshot(records: zeroBaseline + current, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(zeroCannotCompare.personalTrend?.status, .buildingBaseline)
+    }
+
+    func testTTFTNeedsItsOwnBaselineAndMayUseShortTurns() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let sparseBaseline = (0..<20).map { index in
+            metric("sparse-b-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), rate: 10, ttft: index == 0 ? 1 : nil)
+        }
+        let sparseCurrent = (0..<5).map { index in
+            metric("sparse-c-\(index)", secondsAgo: Double(index) * 60, rate: 10, ttft: index == 0 ? 3 : nil)
+        }
+        let sparse = DashboardSnapshot(records: sparseBaseline + sparseCurrent, range: .week, now: now, calendar: calendar)
+        XCTAssertEqual(sparse.personalTrend?.status, .noLargeChange)
+        XCTAssertFalse(try XCTUnwrap(sparse.personalTrend).comparesTTFT)
+        XCTAssertTrue(try XCTUnwrap(sparse.personalTrend).comparesThroughput)
+
+        let shortBaseline = (0..<20).map { index in
+            metric("short-b-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), outputTokens: 10, rate: 10, ttft: 1)
+        }
+        let shortCurrent = (0..<5).map { index in
+            metric("short-c-\(index)", secondsAgo: Double(index) * 60, outputTokens: 10, rate: 10, ttft: 2)
+        }
+        let shortTurns = DashboardSnapshot(records: shortBaseline + shortCurrent, range: .week, now: now, calendar: calendar)
+        let shortTrend = try! XCTUnwrap(shortTurns.personalTrend)
+        XCTAssertEqual(shortTrend.status, .slower)
+        XCTAssertFalse(shortTrend.comparesThroughput)
+        XCTAssertTrue(shortTrend.comparesTTFT)
+        XCTAssertEqual(shortTrend.currentTTFT.count, 5)
+        XCTAssertEqual(shortTrend.baselineTTFT.count, 20)
+        XCTAssertEqual(shortTrend.currentThroughput.count, 0)
     }
 }
