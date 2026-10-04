@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod flyout;
 mod runtime;
 mod updater_state;
+use flyout::{Area, FlyoutState};
 use runtime::{Runtime, SettingsPatch, Snapshot};
 use serde::Serialize;
 use std::{
@@ -167,10 +169,14 @@ async fn choose_folder(app: tauri::AppHandle, source: String) -> Result<Snapshot
         "grok-build" => "Choose Grok Build sessions folder",
         _ => return Err("Choose a supported source".into()),
     };
+    // The native dialog takes focus from the flyout; that must not dismiss it.
+    let flyout = app.state::<FlyoutState>();
+    flyout.suppress_blur_hide(true);
     let folder = rfd::AsyncFileDialog::new()
         .set_title(title)
         .pick_folder()
         .await;
+    flyout.suppress_blur_hide(false);
     let state = app.state::<Shared>();
     if let Some(folder) = folder {
         state
@@ -180,6 +186,23 @@ async fn choose_folder(app: tauri::AppHandle, source: String) -> Result<Snapshot
     }
     let result = state.lock().unwrap().snapshot(None);
     Ok(result)
+}
+#[tauri::command]
+fn reset_folder(app: tauri::AppHandle, source: String) -> Result<Snapshot, String> {
+    let state = app.state::<Shared>();
+    let mut runtime = state.lock().unwrap();
+    runtime.reset_source_root(&source)?;
+    Ok(runtime.snapshot(None))
+}
+#[tauri::command]
+async fn open_history(app: tauri::AppHandle) -> Result<(), String> {
+    flyout::open_history(app).await
+}
+#[tauri::command]
+fn hide_flyout(app: tauri::AppHandle) {
+    if flyout::is_flyout_mode(&app) {
+        flyout::hide(&app);
+    }
 }
 #[tauri::command]
 fn open_website(page: String) -> Result<(), String> {
@@ -209,17 +232,13 @@ fn smoke_complete(
 fn quit(app: tauri::AppHandle) {
     app.exit(0)
 }
-fn show(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
-}
 fn main() {
     let smoke = std::env::args().any(|a| a == "--smoke-test");
-    let builder =
-        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)));
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            flyout::show(app, None)
+        }))
+        .manage(FlyoutState::default());
     let builder = if updater_state::updater_plugin_enabled(smoke) {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     } else {
@@ -238,6 +257,9 @@ fn main() {
             install_update,
             restart_after_update,
             choose_folder,
+            reset_folder,
+            open_history,
+            hide_flyout,
             open_website,
             smoke_complete,
             quit
@@ -263,6 +285,7 @@ fn main() {
             app.manage(Arc::new(Mutex::new(updates)));
             let dashboard =
                 MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?;
+            let history = MenuItem::with_id(app, "history", "Full history", true, None::<&str>)?;
             let speed = MenuItem::with_id(
                 app,
                 "speed",
@@ -273,7 +296,7 @@ fn main() {
             let website =
                 MenuItem::with_id(app, "website", "Open global stats", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Tokrate", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&dashboard, &speed, &website, &quit])?;
+            let menu = Menu::with_items(app, &[&dashboard, &history, &speed, &website, &quit])?;
             let tray = TrayIconBuilder::with_id("tokrate")
                 .icon(tauri::image::Image::from_bytes(include_bytes!(
                     "../icons/icon.png"
@@ -282,7 +305,13 @@ fn main() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "dashboard" => show(app),
+                    "dashboard" => flyout::show(app, None),
+                    "history" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = flyout::open_history(app).await;
+                        });
+                    }
                     "website" => {
                         let _ = open_website("home".into());
                     }
@@ -293,10 +322,28 @@ fn main() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        position,
+                        rect,
                         ..
                     } = event
                     {
-                        show(tray.app_handle());
+                        let app = tray.app_handle();
+                        let scale = app
+                            .monitor_from_point(position.x, position.y)
+                            .ok()
+                            .flatten()
+                            .map_or(1.0, |monitor| monitor.scale_factor());
+                        let origin = rect.position.to_physical::<i32>(scale);
+                        let size = rect.size.to_physical::<i32>(scale);
+                        flyout::toggle_from_tray(
+                            app,
+                            Area {
+                                x: origin.x,
+                                y: origin.y,
+                                width: size.width,
+                                height: size.height,
+                            },
+                        );
                     }
                 })
                 .build(app);
@@ -305,19 +352,51 @@ fn main() {
                 app.state::<Shared>().lock().unwrap().monitor_status =
                     "Tray unavailable on this desktop. Keep this dashboard open.".into();
             }
+            // Windows and macOS: a compact, undecorated flyout that hides on blur. Linux and any
+            // desktop without a tray keep an ordinary decorated window that is always reachable.
+            let flyout_mode = flyout::is_flyout_mode(app.handle());
+            if let Some(window) = app.get_webview_window(flyout::MAIN) {
+                if flyout_mode {
+                    let _ = window.set_skip_taskbar(true);
+                } else {
+                    let _ = window.set_decorations(true);
+                    let _ = window.set_resizable(true);
+                }
+            }
+            let (consent_pending, smoke_run) = {
+                let runtime = app.state::<Shared>();
+                let runtime = runtime.lock().unwrap();
+                (runtime.consent_pending(), runtime.is_smoke())
+            };
+            // Stay in the tray at launch unless the user must answer the first-run choice.
+            if smoke_run || consent_pending || !flyout_mode {
+                flyout::show(app.handle(), None);
+            }
             runtime::start_monitor(app.handle().clone(), speed);
             runtime::restart_sharing(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.app_handle().tray_by_id("tokrate").is_some() {
-                    api.prevent_close();
-                    #[cfg(target_os = "linux")]
-                    let _ = window.minimize();
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = window.hide();
+            if window.label() != flyout::MAIN {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.app_handle().tray_by_id(flyout::TRAY_ID).is_some() {
+                        api.prevent_close();
+                        flyout::hide(window.app_handle());
+                    }
                 }
+                tauri::WindowEvent::Focused(false) => {
+                    let app = window.app_handle();
+                    let (consent_pending, smoke) = {
+                        let runtime = app.state::<Shared>();
+                        let runtime = runtime.lock().unwrap();
+                        (runtime.consent_pending(), runtime.is_smoke())
+                    };
+                    flyout::hide_on_blur(app, consent_pending, smoke);
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())

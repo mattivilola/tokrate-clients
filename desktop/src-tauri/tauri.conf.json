@@ -13,11 +13,15 @@
       {
         "label": "main",
         "title": "Tokrate",
-        "width": 640,
-        "height": 860,
-        "minWidth": 380,
-        "minHeight": 540,
-        "visible": true
+        "width": 380,
+        "height": 640,
+        "minWidth": 340,
+        "minHeight": 480,
+        "resizable": false,
+        "maximizable": false,
+        "decorations": false,
+        "shadow": true,
+        "visible": false
       }
     ],
     "security": {

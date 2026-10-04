@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Only the bundled local dashboard can use the narrow application commands.",
-  "windows": ["main"],
+  "description": "Only the bundled local dashboard windows (tray flyout and full history) can use the narrow application commands.",
+  "windows": ["main", "history"],
   "permissions": ["core:default"]
 }

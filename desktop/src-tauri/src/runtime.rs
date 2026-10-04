@@ -93,6 +93,15 @@ pub struct SettingsPatch {
     pub selection: Option<String>,
     pub days: Option<u8>,
 }
+/// Detected state of one coding-tool log folder, for the Sources settings and first-run welcome.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceStatus {
+    id: &'static str,
+    root: String,
+    is_default: bool,
+    found: bool,
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -105,6 +114,7 @@ pub struct Snapshot {
     board: Option<serde_json::Value>,
     revision: u64,
     records_changed: bool,
+    sources: Vec<SourceStatus>,
     smoke: bool,
 }
 pub struct Runtime {
@@ -250,8 +260,36 @@ impl Runtime {
             board: self.board.clone(),
             revision: self.revision,
             records_changed: changed,
+            sources: self.source_statuses(),
             smoke: self.smoke,
         }
+    }
+    fn source_statuses(&self) -> Vec<SourceStatus> {
+        let defaults = Settings::default();
+        [
+            ("codex", &self.settings.root, &defaults.root),
+            (
+                "claude-code",
+                &self.settings.claude_root,
+                &defaults.claude_root,
+            ),
+            ("grok-build", &self.settings.grok_root, &defaults.grok_root),
+        ]
+        .into_iter()
+        .map(|(id, root, default)| SourceStatus {
+            id,
+            root: root.clone(),
+            is_default: root == default,
+            found: std::path::Path::new(root).is_dir(),
+        })
+        .collect()
+    }
+    /// The first-run welcome stays open until the user makes an affirmative or local-only choice.
+    pub fn consent_pending(&self) -> bool {
+        self.consent_prompt_required
+    }
+    pub fn is_smoke(&self) -> bool {
+        self.smoke
     }
     fn save_settings(&self, settings: &Settings) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(settings).map_err(|_| "Settings invalid")?;
@@ -340,6 +378,20 @@ impl Runtime {
         if !root.is_dir() {
             return Err("Choose an existing folder".into());
         }
+        self.apply_source_root(source, root)
+    }
+    /// Restores the tool's default folder even when it does not exist yet (tool not installed).
+    pub fn reset_source_root(&mut self, source: &str) -> Result<(), String> {
+        let defaults = Settings::default();
+        let root = match source {
+            "codex" => defaults.root,
+            "claude-code" => defaults.claude_root,
+            "grok-build" => defaults.grok_root,
+            _ => return Err("Choose a supported source".into()),
+        };
+        self.apply_source_root(source, PathBuf::from(root))
+    }
+    fn apply_source_root(&mut self, source: &str, root: PathBuf) -> Result<(), String> {
         let mut next = self.settings.clone();
         match source {
             "codex" => next.root = root.to_string_lossy().into(),
@@ -691,6 +743,29 @@ mod tests {
         let p = std::env::temp_dir().join(format!("tokrate-host-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+    #[test]
+    fn sources_report_folder_state_and_reset_restores_the_default() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let custom = dir.join("custom-codex");
+        std::fs::create_dir_all(&custom).unwrap();
+        runtime.set_source_root("codex", custom.clone()).unwrap();
+        let sources = runtime.snapshot(None).sources;
+        let codex = sources.iter().find(|s| s.id == "codex").unwrap();
+        assert!(!codex.is_default);
+        assert!(codex.found);
+        assert_eq!(codex.root, custom.to_string_lossy());
+        assert_eq!(sources.len(), 3);
+        runtime.reset_source_root("codex").unwrap();
+        let sources = runtime.snapshot(None).sources;
+        let codex = sources.iter().find(|s| s.id == "codex").unwrap();
+        assert!(codex.is_default);
+        assert!(runtime.reset_source_root("unknown").is_err());
+        assert!(runtime
+            .set_source_root("codex", dir.join("missing"))
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn fresh_install_is_local_and_shows_the_contribution_choice() {
