@@ -22,17 +22,23 @@ fn snapshot(state: State<Shared>, since_revision: Option<u64>) -> Snapshot {
     state.lock().unwrap().snapshot(since_revision)
 }
 #[tauri::command]
-fn update_settings(
+fn update_settings(state: State<Shared>, patch: SettingsPatch) -> Result<Snapshot, String> {
+    let mut s = state.lock().unwrap();
+    s.update(patch)?;
+    Ok(s.snapshot(None))
+}
+#[tauri::command]
+fn record_sharing_consent(
     app: tauri::AppHandle,
     state: State<Shared>,
-    patch: SettingsPatch,
+    accepted: bool,
+    notice_version: String,
 ) -> Result<Snapshot, String> {
-    let restart = patch.sharing.is_some();
     {
         let mut s = state.lock().unwrap();
-        s.update(patch)?;
+        s.record_sharing_consent(accepted, &notice_version)?;
     }
-    if restart {
+    if accepted {
         runtime::restart_sharing(&app);
     }
     Ok(state.lock().unwrap().snapshot(None))
@@ -180,6 +186,7 @@ fn open_website(page: String) -> Result<(), String> {
     let url = match page.as_str() {
         "home" => "https://tokrate.dev",
         "privacy" => "https://tokrate.dev/privacy",
+        "terms" => "https://tokrate.dev/terms",
         "desktop-downloads" => "https://tokrate.dev/download",
         _ => return Err("Unsupported page".into()),
     };
@@ -222,6 +229,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             update_settings,
+            record_sharing_consent,
             retry_sharing,
             update_preferences,
             set_automatic_update_checks,

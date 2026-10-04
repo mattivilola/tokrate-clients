@@ -32,6 +32,7 @@ interface Settings {
 }
 interface Snapshot {
   settings: Settings;
+  consentPromptRequired: boolean;
   records: Metric[];
   status: string;
   monitorStatus: string;
@@ -72,6 +73,7 @@ let state: Snapshot = {
     claudeRoot: "",
     grokRoot: "",
   },
+  consentPromptRequired: false,
   records: [],
   status: "Loading local settings…",
   monitorStatus: "Starting monitoring…",
@@ -86,6 +88,7 @@ let chartMetric: "throughput" | "ttft" = "throughput",
   settingsOpen = false,
   updatesOpen = false,
   historyOpen = false,
+  consentDialogOpen = false,
   sort = "recent";
 const filters = { client: "all", provider: "all" };
 const gate = new AsyncGate();
@@ -97,6 +100,7 @@ let updatePreferences: UpdatePreferences | null = null,
   updateStatus = "Loading update preferences…",
   updateProgress = { downloaded: 0, total: 0 };
 const AUTOMATIC_UPDATE_REVISIT_MS = 60 * 60 * 1000;
+const SHARING_NOTICE_VERSION = "2026-10-04-v1";
 const e = (v: unknown) =>
   String(v ?? "").replace(
     /[&<>"']/g,
@@ -237,7 +241,7 @@ function render() {
     ${state.settings.selection === "all" ? comparisons(period(filtered, now - state.settings.days * DAY, now + 1)) : `<section class="instrument">${gauge(latest?.turnThroughputTPS ?? null)}<div><h1>${e(selected[0]?.model ?? "Waiting for a completed turn")}</h1><small>${e(selected[0] ? clientLabel(selected[0]) : "All coding tools")} · ${e(selected[0]?.reasoningEffort ?? "unknown")} reasoning effort</small><p>${e(selected[0] ? measurementLabel(selected[0]) : "Measurements remain separated by coding tool, source, model and version.")}. Streaming speed is not inferred.</p><span class="timestamp">${latest ? "Completed " + e(time(latest.completedAt)) : "Complete a turn with at least 20 output tokens."}</span></div></section>
       <section class="panel"><div class="panel-head"><h2>Your pace</h2><div class="segments"><button data-metric="throughput" aria-pressed="${chartMetric === "throughput"}">Throughput</button><button data-metric="ttft" aria-pressed="${chartMetric === "ttft"}">First token · Codex</button></div></div>${chart(rows, now)}<small>Bucket medians · gaps mean no observations</small><div class="stats">${stat(summary.throughput, `Median ${selectionSource ? measurementLabel(selectionSource).toLowerCase() : "turn throughput"}`, "t/s")}${stat(summary.ttft, ttftTitle, "seconds")}</div></section>
       <section class="panel"><h2>Now and previously</h2><div class="decision"><div><p class="muted">Last 15 minutes</p><p><strong>${n(recent.throughput.median)} t/s</strong> · ${n(recent.ttft.median)} s TTFT</p><small>${recent.throughput.count} / ${recent.ttft.count} measurements</small></div><div><p class="muted">24 hours vs previous 24 hours</p><p>Throughput ${n(change(current.throughput, previous.throughput))}%</p><p>First-token wait ${n(change(current.ttft, previous.ttft))}%</p><small>Needs 5 samples in each period.</small></div></div><p class="notice">${e(signal(selected, now, "throughput"))}<br>${e(ttftSignal)}<br><small>Your workload may have changed.</small></p></section>`}
-    <section class="panel"><div class="share-row"><div><h2>Share with community</h2><p class="muted">${e(state.status)}${state.pending ? ` · ${state.pending} queued` : ""}</p></div><label class="switch"><input id="sharing" type="checkbox" ${state.settings.sharing ? "checked" : ""} aria-label="Share with community"></label></div><p style="margin-top:12px" class="muted">No prompts, responses or code in uploads. Performance reports use a persistent random signing identity. Sharing is on by default and can be switched off here.</p><button id="retry" style="margin-top:12px" ${!state.settings.sharing ? "disabled" : ""}>Retry sharing</button></section>
+    <section class="panel"><div class="share-row"><div><h2>Share with community</h2><p class="muted">${e(state.status)}${state.pending ? ` · ${state.pending} queued` : ""}</p></div><label class="switch"><input id="sharing" type="checkbox" ${state.settings.sharing ? "checked" : ""} aria-label="Share with community"></label></div><p style="margin-top:12px" class="muted">Contribution is off until you choose. No prompts, responses, code or local file paths are uploaded. You can withdraw at any time.</p><button id="retry" style="margin-top:12px" ${!state.settings.sharing ? "disabled" : ""}>Retry sharing</button></section>
     ${community(selected)}
     <details class="panel settings" ${settingsOpen ? "open" : ""}><summary>Settings & monitoring</summary><div class="settings-content"><p>${e(state.monitorStatus)}</p><label class="switch"><input id="monitoring" type="checkbox" ${state.settings.monitoring ? "checked" : ""}>Monitor local coding-tool sessions</label><label class="switch"><input id="showSpeed" type="checkbox" ${state.settings.showSpeed ? "checked" : ""}>Show speed in tray tooltip/menu</label><small>Adjacent tray text is only available on supported desktops. Values update after completed turns.</small>
       <div><p class="path"><strong>Codex sessions:</strong> ${e(state.settings.root || "Default Codex sessions folder")}</p><button data-folder="codex">Choose folder…</button></div>
@@ -247,8 +251,11 @@ function render() {
     ${native ? updatePanel() : ""}
     <details class="panel history" ${historyOpen ? "open" : ""}><summary>Turn history (${Math.min(500, historyRows.length)} shown)</summary><div class="table-scroll"><table><thead><tr><th>Completed</th><th>Coding tool / model</th><th>Tokens</th><th>Throughput</th><th>Codex TTFT</th></tr></thead><tbody>${historyRows.slice(0, 500).map((m) => `<tr><td>${e(time(m.completedAt))}</td><td>${e(clientLabel(m))} · ${e(m.model ?? "Unknown")}<br>${e(m.reasoningEffort ?? "unknown")} effort · ${e(m.provider ?? "unknown")} provider</td><td>${m.outputTokens}</td><td>${n(m.turnThroughputTPS)} t/s<br><small>${e(measurementLabel(m))}</small></td><td>${n(m.codexTTFTSeconds)}</td></tr>`).join("")}</tbody></table></div></details>
     <footer>Local history: 7 days. Community data refreshes at most every 30 seconds while sharing is on. Measurements use source-specific definitions and do not rate answer quality or verify provider outages. <button id="privacy">Privacy & methodology</button></footer>
+    ${native && (state.consentPromptRequired || consentDialogOpen) ? sharingConsentDialog() : ""}
   </main>`;
   bind();
+  if (native && (state.consentPromptRequired || consentDialogOpen))
+    document.getElementById("accept-sharing")?.focus({ preventScroll: true });
 }
 function updatePanel() {
   const prefs = updatePreferences;
@@ -274,6 +281,9 @@ function updatePanel() {
 function updateBanner() {
   if (!availableUpdate) return "";
   return `<section class="notice update-banner" role="status"><div><strong>Tokrate ${e(availableUpdate.version)} is available.</strong><br><small>Install when you’re ready. Updates never install automatically.</small></div><button id="install-update-banner" ${updateInstallInFlight ? "disabled" : ""}>${updateInstallInFlight ? "Installing…" : "Install update"}</button><button id="update-details">Details</button></section>`;
+}
+function sharingConsentDialog() {
+  return `<div class="consent-backdrop"><section class="consent-card" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-description"><h2 id="consent-title">Contribute performance measurements?</h2><p id="consent-description">Tokrate works locally without sharing. If you choose to contribute, these fields are sent for eligible completed turns: coding tool and its version, Tokrate/parser/measurement versions, model, provider route, reasoning effort, source type, output and reasoning token counts, turn duration, and Codex-reported first-token wait when available. The observation time is rounded to five minutes.</p><p>A persistent pseudonymous signing key identifies this installation across reports. Its private key stays in your operating system’s secure credential store. Tokrate creates or reads that key only after you accept. No prompts, responses, code, or local file paths are uploaded.</p><p>Accepting starts community requests for new measurements and community results. While data is early, published aggregates may be based on one contributing installation. Turning sharing off stops future community requests and clears queued reports; it does not remove reports already received. Automatic software update checks use their separate setting.</p><p class="consent-links"><a id="consent-privacy" href="https://tokrate.dev/privacy">Privacy notice</a><a id="consent-terms" href="https://tokrate.dev/terms">Terms</a></p>${error ? `<p role="alert" class="error">${e(error)}</p>` : ""}<div class="consent-actions"><button id="accept-sharing" class="primary">Yes, let's contribute</button><button id="decline-sharing" class="secondary">Only for local use</button></div></section></div>`;
 }
 async function action(fn: () => Promise<Snapshot | void>) {
   const epoch = gate.beginMutation();
@@ -326,13 +336,25 @@ function bind() {
     sort = (ev.target as HTMLSelectElement).value;
     render();
   });
-  for (const key of ["sharing", "monitoring", "showSpeed"] as const)
+  for (const key of ["monitoring", "showSpeed"] as const)
     document
       .getElementById(key)
       ?.addEventListener(
         "change",
         (ev) => void patch({ [key]: (ev.target as HTMLInputElement).checked }),
       );
+  document.getElementById("sharing")?.addEventListener("change", (ev) => {
+    const enabled = (ev.target as HTMLInputElement).checked;
+    if (enabled) {
+      consentDialogOpen = true;
+      error = "";
+      render();
+    } else {
+      void patch({ sharing: false });
+    }
+  });
+  on("accept-sharing", () => void recordSharingChoice(true));
+  on("decline-sharing", () => void recordSharingChoice(false));
   document.getElementById("automatic-updates")?.addEventListener("change", (ev) => {
     void setAutomaticUpdateChecks((ev.target as HTMLInputElement).checked);
   });
@@ -399,6 +421,16 @@ function bind() {
         "noopener,noreferrer",
       );
   });
+  for (const [id, page, url] of [
+    ["consent-privacy", "privacy", "https://tokrate.dev/privacy"],
+    ["consent-terms", "terms", "https://tokrate.dev/terms"],
+  ] as const) {
+    document.getElementById(id)?.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      if (native) void invoke("open_website", { page });
+      else window.open(url, "_blank", "noopener,noreferrer");
+    });
+  }
   on(
     "retry",
     () =>
@@ -417,6 +449,17 @@ function bind() {
   });
   on("quit", () => {
     if (native) void invoke("quit");
+  });
+}
+async function recordSharingChoice(accepted: boolean) {
+  if (!native) return;
+  await action(async () => {
+    const next = await invoke<Snapshot>("record_sharing_consent", {
+      accepted,
+      noticeVersion: SHARING_NOTICE_VERSION,
+    });
+    consentDialogOpen = false;
+    return next;
   });
 }
 async function loadUpdatePreferences() {

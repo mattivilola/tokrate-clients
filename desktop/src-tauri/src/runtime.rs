@@ -12,10 +12,35 @@ use tauri::Manager;
 use tokrate_core::{signed_request, History, SharingQueue, SourceMonitor, TurnMetric};
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-04-v1";
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SharingConsentAction {
+    Accepted,
+    Declined,
+    Withdrawn,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharingConsent {
+    notice_version: String,
+    recorded_at: String,
+    action: SharingConsentAction,
+}
+impl SharingConsent {
+    fn notice_is_current(&self) -> bool {
+        self.notice_version == SHARING_NOTICE_VERSION
+            && chrono::DateTime::parse_from_rfc3339(&self.recorded_at).is_ok()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct Settings {
     pub sharing: bool,
+    sharing_consent: Option<SharingConsent>,
     pub monitoring: bool,
     pub show_speed: bool,
     pub selection: String,
@@ -39,7 +64,8 @@ impl Default for Settings {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".grok"));
         Self {
-            sharing: true,
+            sharing: false,
+            sharing_consent: None,
             monitoring: true,
             show_speed: true,
             selection: "latest".into(),
@@ -48,6 +74,14 @@ impl Default for Settings {
             claude_root: claude_home.join("projects").to_string_lossy().into(),
             grok_root: grok_home.join("sessions").to_string_lossy().into(),
         }
+    }
+}
+impl Settings {
+    fn sharing_authorized(&self) -> bool {
+        self.sharing
+            && self.sharing_consent.as_ref().is_some_and(|consent| {
+                consent.notice_is_current() && consent.action == SharingConsentAction::Accepted
+            })
     }
 }
 #[derive(Deserialize)]
@@ -63,6 +97,7 @@ pub struct SettingsPatch {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     settings: Settings,
+    consent_prompt_required: bool,
     records: Vec<TurnMetric>,
     status: String,
     monitor_status: String,
@@ -74,6 +109,7 @@ pub struct Snapshot {
 }
 pub struct Runtime {
     settings: Settings,
+    consent_prompt_required: bool,
     history: History,
     monitor: SourceMonitor,
     dir: PathBuf,
@@ -92,32 +128,48 @@ pub struct Runtime {
 impl Runtime {
     pub fn load(dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&dir)?;
-        let (settings, status) = match std::fs::read(dir.join("settings.json")) {
-            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
-                Ok(mut s) if [1, 7].contains(&s.days) => {
-                    if !valid_selection(&s.selection) {
-                        s.selection = "latest".into();
+        let (settings, status, consent_prompt_required) =
+            match std::fs::read(dir.join("settings.json")) {
+                Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+                    Ok(mut s) if [1, 7].contains(&s.days) => {
+                        if !valid_selection(&s.selection) {
+                            s.selection = "latest".into();
+                        }
+                        let requires_reconfirmation = s.sharing && !s.sharing_authorized();
+                        if requires_reconfirmation {
+                            s.sharing = false;
+                        }
+                        let prompt = requires_reconfirmation
+                            && s.sharing_consent
+                                .as_ref()
+                                .map_or(true, |consent| !consent.notice_is_current());
+                        (
+                            s,
+                            if requires_reconfirmation {
+                                "Sharing is off until you review the contribution notice."
+                            } else {
+                                "Starting…"
+                            },
+                            prompt,
+                        )
                     }
-                    (s, "Starting…")
-                }
-                _ => {
-                    let mut s = Settings::default();
-                    s.sharing = false;
-                    (
-                        s,
+                    _ => (
+                        Settings::default(),
                         "Settings could not be read. Sharing is off; review your settings.",
-                    )
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                (Settings::default(), "Starting…")
-            }
-            Err(_) => {
-                let mut s = Settings::default();
-                s.sharing = false;
-                (s, "Settings unavailable. Sharing is off.")
-            }
-        };
+                        false,
+                    ),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                    Settings::default(),
+                    "Choose whether Tokrate may contribute measurements.",
+                    true,
+                ),
+                Err(_) => (
+                    Settings::default(),
+                    "Settings unavailable. Sharing is off.",
+                    false,
+                ),
+            };
         let loaded_history = History::load(&dir.join("history.json"), Utc::now());
         let history_read_error = loaded_history.is_err();
         let history = loaded_history.unwrap_or_default();
@@ -128,6 +180,7 @@ impl Runtime {
                 PathBuf::from(&settings.grok_root),
             ),
             settings,
+            consent_prompt_required,
             history,
             dir,
             status: status.into(),
@@ -185,6 +238,7 @@ impl Runtime {
         let changed = since != Some(self.revision);
         Snapshot {
             settings: self.settings.clone(),
+            consent_prompt_required: self.consent_prompt_required,
             records: if changed {
                 self.history.records().to_vec()
             } else {
@@ -207,10 +261,17 @@ impl Runtime {
     pub fn update(&mut self, p: SettingsPatch) -> Result<(), String> {
         let mut next = self.settings.clone();
         if let Some(v) = p.sharing {
-            if self.smoke && v {
-                return Err("Smoke runs cannot share".into());
+            if v {
+                return Err("Community sharing requires the current informed consent".into());
             }
-            next.sharing = v
+            if next.sharing {
+                next.sharing_consent = Some(SharingConsent {
+                    notice_version: SHARING_NOTICE_VERSION.into(),
+                    recorded_at: Utc::now().to_rfc3339(),
+                    action: SharingConsentAction::Withdrawn,
+                });
+            }
+            next.sharing = false;
         }
         if let Some(v) = p.monitoring {
             next.monitoring = v
@@ -232,7 +293,48 @@ impl Runtime {
         }
         self.save_settings(&next)?;
         self.settings = next;
+        if p.sharing == Some(false) {
+            self.stop_sharing();
+        }
         Ok(())
+    }
+    pub fn record_sharing_consent(
+        &mut self,
+        accepted: bool,
+        notice_version: &str,
+    ) -> Result<(), String> {
+        if notice_version != SHARING_NOTICE_VERSION {
+            return Err("Review the current contribution notice before choosing".into());
+        }
+        if self.smoke && accepted {
+            return Err("Smoke runs cannot share".into());
+        }
+        let mut next = self.settings.clone();
+        next.sharing = accepted;
+        next.sharing_consent = Some(SharingConsent {
+            notice_version: SHARING_NOTICE_VERSION.into(),
+            recorded_at: Utc::now().to_rfc3339(),
+            action: if accepted {
+                SharingConsentAction::Accepted
+            } else {
+                SharingConsentAction::Declined
+            },
+        });
+        self.save_settings(&next)?;
+        self.settings = next;
+        self.consent_prompt_required = false;
+        self.stop_sharing();
+        Ok(())
+    }
+    fn stop_sharing(&mut self) {
+        self.generation += 1;
+        if let Some(task) = self.network.take() {
+            task.abort();
+        }
+        self.queue.disable();
+        self.board = None;
+        self.sharing_active = false;
+        self.status = "Local only".into();
     }
     pub fn set_source_root(&mut self, source: &str, root: PathBuf) -> Result<(), String> {
         if !root.is_dir() {
@@ -253,7 +355,7 @@ impl Runtime {
         Ok(())
     }
     fn valid(&self, g: u64) -> bool {
-        self.settings.sharing && self.generation == g
+        self.settings.sharing_authorized() && self.generation == g
     }
     fn poll_monitor(&mut self) -> String {
         let now = Utc::now();
@@ -394,6 +496,15 @@ fn identity() -> Result<Zeroizing<[u8; 32]>, String> {
         Err(_) => Err("Secure credential storage is locked or unavailable".into()),
     }
 }
+
+fn authorized_effect<T>(authorized: bool, effect: impl FnOnce() -> T) -> Option<T> {
+    if authorized {
+        Some(effect())
+    } else {
+        None
+    }
+}
+
 pub fn start_monitor(app: tauri::AppHandle, speed: tauri::menu::MenuItem<tauri::Wry>) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -425,11 +536,11 @@ pub fn restart_sharing(app: &tauri::AppHandle) {
     s.queue.disable();
     s.board = None;
     s.sharing_active = false;
-    if !s.settings.sharing {
+    let Some(generation) = authorized_effect(s.settings.sharing_authorized(), || s.generation)
+    else {
         s.status = "Local only".into();
         return;
-    }
-    let generation = s.generation;
+    };
     s.status = "Opening secure credential storage…".into();
     let inner = shared.clone();
     s.network = Some(tauri::async_runtime::spawn(async move {
@@ -437,7 +548,14 @@ pub fn restart_sharing(app: &tauri::AppHandle) {
     }));
 }
 async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
-    let key = match tauri::async_runtime::spawn_blocking(identity).await {
+    let identity_loader = {
+        let s = shared.lock().unwrap();
+        authorized_effect(s.valid(generation), || identity)
+    };
+    let Some(identity_loader) = identity_loader else {
+        return;
+    };
+    let key = match tauri::async_runtime::spawn_blocking(identity_loader).await {
         Ok(Ok(k)) => k,
         _ => {
             let mut s = shared.lock().unwrap();
@@ -475,17 +593,22 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
         };
         if !batch.is_empty() {
             if let Ok(request) = signed_request(&batch, &key, Utc::now()) {
-                if !shared.lock().unwrap().valid(generation) {
+                let upload = {
+                    let s = shared.lock().unwrap();
+                    authorized_effect(s.valid(generation), || {
+                        client
+                            .post(format!("{API}/samples"))
+                            .header("Content-Type", "application/json")
+                            .header("X-Tokrate-Key", request.public_key)
+                            .header("X-Tokrate-Signature", request.signature)
+                            .body(request.body)
+                            .send()
+                    })
+                };
+                let Some(upload) = upload else {
                     return;
-                }
-                let result = client
-                    .post(format!("{API}/samples"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Tokrate-Key", request.public_key)
-                    .header("X-Tokrate-Signature", request.signature)
-                    .body(request.body)
-                    .send()
-                    .await;
+                };
+                let result = upload.await;
                 let mut s = shared.lock().unwrap();
                 if !s.valid(generation) {
                     return;
@@ -496,6 +619,13 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
                             .ack(&batch.iter().map(|m| m.sample_id).collect::<Vec<_>>());
                         s.status = "Sharing new turns".into()
                     }
+                    Ok(r) if r.status().as_u16() == 426 => {
+                        s.queue.disable();
+                        s.sharing_active = false;
+                        s.board = None;
+                        s.status = "Update Tokrate before sharing again. Open Application updates and check for a newer version.".into();
+                        return;
+                    }
                     Ok(r) if [400, 413, 422].contains(&r.status().as_u16()) => {
                         s.queue
                             .ack(&batch.iter().map(|m| m.sample_id).collect::<Vec<_>>());
@@ -505,10 +635,14 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
                 }
             }
         }
-        if !shared.lock().unwrap().valid(generation) {
+        let board_request = {
+            let s = shared.lock().unwrap();
+            authorized_effect(s.valid(generation), || fetch_board(&client))
+        };
+        let Some(board_request) = board_request else {
             return;
-        }
-        let board = fetch_board(&client).await;
+        };
+        let board = board_request.await;
         {
             let mut s = shared.lock().unwrap();
             if !s.valid(generation) {
@@ -556,6 +690,140 @@ mod tests {
         p
     }
     #[test]
+    fn fresh_install_is_local_and_shows_the_contribution_choice() {
+        let dir = temporary();
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.sharing);
+        assert!(runtime.consent_prompt_required);
+        assert!(!runtime.settings.sharing_authorized());
+
+        let mut identity_reads = 0;
+        let mut community_requests = 0;
+        assert!(
+            authorized_effect(runtime.settings.sharing_authorized(), || identity_reads +=
+                1)
+            .is_none()
+        );
+        assert!(
+            authorized_effect(runtime.settings.sharing_authorized(), || {
+                community_requests += 1
+            })
+            .is_none()
+        );
+        assert_eq!(identity_reads, 0);
+        assert_eq!(community_requests, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_default_on_is_disabled_until_reconfirmed_but_saved_off_stays_quiet() {
+        let dir = temporary();
+        let mut legacy_on = Settings::default();
+        legacy_on.sharing = true;
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_vec(&legacy_on).unwrap(),
+        )
+        .unwrap();
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.sharing);
+        assert!(runtime.consent_prompt_required);
+        assert!(!runtime.sharing_active);
+        assert!(runtime.board.is_none());
+
+        let mut legacy_off = Settings::default();
+        legacy_off.sharing = false;
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_vec(&legacy_off).unwrap(),
+        )
+        .unwrap();
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.sharing);
+        assert!(!runtime.consent_prompt_required);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn accepted_choice_is_versioned_persisted_and_withdrawal_requires_reacceptance() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(runtime.consent_prompt_required);
+        assert!(runtime
+            .record_sharing_consent(true, "stale-notice")
+            .is_err());
+        runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .unwrap();
+        assert!(runtime.settings.sharing_authorized());
+        assert!(runtime.settings.sharing);
+        assert!(!runtime.consent_prompt_required);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            saved["sharingConsent"]["noticeVersion"],
+            SHARING_NOTICE_VERSION
+        );
+        assert_eq!(saved["sharingConsent"]["action"], "accepted");
+        assert!(!saved["sharingConsent"]["recordedAt"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+
+        let mut patch = serde_json::from_value(serde_json::json!({"sharing": false})).unwrap();
+        runtime.update(patch).unwrap();
+        assert!(!runtime.settings.sharing_authorized());
+        assert_eq!(
+            runtime.settings.sharing_consent.as_ref().unwrap().action,
+            SharingConsentAction::Withdrawn
+        );
+        patch = serde_json::from_value(serde_json::json!({"sharing": true})).unwrap();
+        assert!(runtime.update(patch).is_err());
+        assert!(!runtime.settings.sharing);
+        assert!(!Runtime::load(dir.clone()).unwrap().consent_prompt_required);
+
+        runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .unwrap();
+        assert!(runtime.settings.sharing_authorized());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn declining_is_saved_and_does_not_prompt_again_at_launch() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        runtime
+            .record_sharing_consent(false, SHARING_NOTICE_VERSION)
+            .unwrap();
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.sharing);
+        assert!(!runtime.consent_prompt_required);
+        let consent = runtime.settings.sharing_consent.unwrap();
+        assert_eq!(consent.action, SharingConsentAction::Declined);
+        assert_eq!(consent.notice_version, SHARING_NOTICE_VERSION);
+        assert!(!consent.recorded_at.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_consent_cannot_enable_a_legacy_setting() {
+        let dir = temporary();
+        std::fs::write(
+            dir.join("settings.json"),
+            br#"{"sharing":true,"sharingConsent":{"noticeVersion":"2026-10-04-v1","recordedAt":"not-a-time","action":"accepted"},"monitoring":true,"showSpeed":true,"selection":"latest","days":1,"root":"","claudeRoot":"","grokRoot":""}"#,
+        )
+        .unwrap();
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.sharing);
+        assert!(!runtime.settings.sharing_authorized());
+        assert!(!runtime.sharing_active);
+        assert!(runtime.consent_prompt_required);
+        assert!(runtime.board.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn persisted_off_and_corrupt_preferences_fail_closed() {
         let dir = temporary();
         let mut settings = Settings::default();
@@ -579,6 +847,9 @@ mod tests {
     fn stale_generation_cannot_restore_community_state() {
         let dir = temporary();
         let mut runtime = Runtime::load(dir.clone()).unwrap();
+        runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .unwrap();
         runtime.generation = 7;
         assert!(runtime.valid(7));
         assert!(!runtime.valid(6));
@@ -592,6 +863,9 @@ mod tests {
         let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
         let patch = serde_json::from_value(serde_json::json!({"sharing":true})).unwrap();
         assert!(runtime.update(patch).is_err());
+        assert!(runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .is_err());
         assert!(!runtime.settings.sharing);
         std::fs::remove_dir_all(dir).unwrap();
     }

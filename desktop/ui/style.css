@@ -254,6 +254,68 @@ select {
   height: 22px;
   accent-color: #077f99;
 }
+.consent-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(9 28 34 / 72%);
+}
+.consent-card {
+  width: min(680px, 100%);
+  max-height: min(780px, calc(100vh - 40px));
+  overflow-y: auto;
+  padding: 25px;
+  border: 1px solid #d3e1e5;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 20px 70px rgb(0 0 0 / 28%);
+}
+.consent-card h2 {
+  margin-bottom: 14px;
+}
+.consent-card p {
+  margin-top: 12px;
+}
+.consent-links,
+.consent-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.consent-links a {
+  color: #087d99;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.consent-actions {
+  margin-top: 20px;
+}
+.consent-actions .primary {
+  color: #fff;
+  border-color: #087d99;
+  background: #087d99;
+  font-weight: 700;
+}
+.consent-actions .primary:hover {
+  background: #06677d;
+}
+.consent-actions .secondary {
+  padding: 7px 10px;
+  color: #536e79;
+  border-color: transparent;
+  background: transparent;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.consent-actions .secondary:hover {
+  color: #173440;
+  background: #eef4f5;
+}
 .settings {
   margin-top: 16px;
 }
