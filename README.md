@@ -1,6 +1,6 @@
 # Tokrate clients
 
-Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; Mac 0.1.9 is stable, and [Windows/Linux alpha installers](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) are available with automated native checks and manual desktop testing still pending. Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. It makes no network requests while sharing is off and does not retain prompt or response text.
+Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; Mac 0.1.9 is stable, and [Windows/Linux alpha installers](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) are available with automated native checks and manual desktop testing still pending. Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. Sharing OFF stops contribution and community requests. From version 0.1.10, automatic software update checks have their own switch, on by default. The app does not retain prompt or response text.
 
 Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, an easy model/cohort selector, rolling 24-hour / 7-day trends, median/min/max metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. The dashboard separates coding tool, inference provider, model, reasoning effort and measurement definition. Codex uses completed-turn throughput; Claude Code uses transcript-observed turn throughput; Grok Build uses work-turn throughput including nested agent output. TTFT is currently available only when Codex reports it. These are not streaming generation rates or answer-quality scores.
 
@@ -13,6 +13,12 @@ A random identity in the operating system’s credential store links reports fro
 The public board normally requires 10 contributors and 50 eligible turns. During launch, labelled **Early data** may show aggregates from just one reporting installation and one eligible turn. Contributor keys are never public; small-cohort numbers can still reflect a single installation. Slowdown alerts retain the stronger evidence gates.
 
 **Check it yourself—or ask your AI agent to inspect the code :)** Start with [the upload allowlist](shared/Sources/TokrateCore/Sharing/SharedSample.swift), [network transport](shared/Sources/TokrateCore/Sharing/SharingTransport.swift), and [sharing lifecycle](shared/Sources/TokrateCore/Sharing/SharingSession.swift). The clients are MIT licensed; the website backend is proprietary. See [the service privacy page](https://tokrate.dev/privacy) for server retention and infrastructure details.
+
+## Software updates (from 0.1.10)
+
+Mac uses Sparkle; Windows NSIS and Linux AppImage use Tauri's signed updater. Linux .deb installations link to the download page for package-manager installation. Automatic checks have their own switch, on by default. **Check for Updates** checks immediately; installation requires your action. Sharing OFF does not disable software update checks. Checks contact `tokrate.dev`, and package downloads contact GitHub; they send no contribution key, measurements or agent content. Sparkle system-profile reporting is disabled. Disable automatic checks as well as sharing if you want neither background request type.
+
+Mac stable and Windows/Linux alpha feeds are separate. Public verification keys are embedded in the clients; private release keys are never shipped. Update signatures do not replace macOS notarization or Windows Authenticode. Existing 0.1.9 installations need one manual installation of an updater-enabled release. Native CI is not proof of an installer upgrade on every desktop; Windows/Linux remain alpha.
 
 ## Repository layout
 
@@ -53,7 +59,7 @@ Offline retries use a memory-only queue capped at 1,000 samples and 24 hours; qu
 ./macos/script/package_app.sh release
 ```
 
-This builds a native-architecture `macos/dist/Tokrate.app` (macOS 14+, bundle ID `dev.tokrate.mac`, version 0.1.9). It does not sign, notarize, publish, or launch. Release ownership must separately sign with Developer ID and hardened runtime, verify, submit and staple notarization, then archive the final bundle. `./macos/script/build_and_run.sh --verify` stages a debug bundle and checks the launched process. Building again replaces bundle contents; sign only after the final build. The package has no third-party dependencies.
+This builds a native-architecture `macos/dist/Tokrate.app` (macOS 14+, bundle ID `dev.tokrate.mac`, version 0.1.9). It does not sign, notarize, publish, or launch. Release ownership must separately sign with Developer ID and hardened runtime, verify, submit and staple notarization, then archive the final bundle. `./macos/script/build_and_run.sh --verify` stages a debug bundle and checks the launched process. Building again replaces bundle contents; sign only after the final build. The Mac app embeds Sparkle for signed software updates; the metric core has no third-party dependencies.
 
 Validation: `swift test --build-system native -j 2` exercises parser timing, cumulative counts, malformed input, incremental file reading, retention, no requests/identity while sharing is off, default-on preferences, persisted-off preferences, allowlisted signed bytes, five-minute buckets, no historical backfill, stable retries, polling rate limits, bounded queue expiry, and opt-out during a suspended upload. Tests use mocks and do not contact production.
 

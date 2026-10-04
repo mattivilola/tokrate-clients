@@ -42,7 +42,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(json["client"] as? String, "claude-code")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v1")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-turn-v1")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.9")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.10")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         let serialized = try XCTUnwrap(String(data: bytes, encoding: .utf8))
         XCTAssertFalse(serialized.contains("PRIVATE_PROMPT"))

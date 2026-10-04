@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct HistoryView: View {
     @Bindable var store: HistoryStore
+    @ObservedObject var updates: AppUpdates
     @State private var isChoosingFolder = false
     @State private var range: DashboardRange = .week
 
@@ -85,6 +86,8 @@ struct HistoryView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("Check for Updates…") { updates.checkForUpdates() }
+                .disabled(!updates.canCheckForUpdates)
             WebsiteLinkView()
             Button(store.isMonitoring ? "Pause" : "Start monitoring") {
                 if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }

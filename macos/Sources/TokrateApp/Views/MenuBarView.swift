@@ -3,9 +3,11 @@ import TokrateCore
 
 struct MenuBarView: View {
     @Bindable var store: HistoryStore
+    @ObservedObject var updates: AppUpdates
     @State private var range: DashboardRange = .day
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         let snapshot = DashboardSnapshot(
@@ -36,6 +38,10 @@ struct MenuBarView: View {
                 }
                 WebsiteLinkView(compact: true)
                 Menu {
+                    Button("Check for Updates…") { updates.checkForUpdates() }
+                        .disabled(!updates.canCheckForUpdates)
+                    Button("Update Settings…") { openSettings() }
+                    Divider()
                     Button("Full history…") { openWindow(id: "history"); NSApp.activate(ignoringOtherApps: true) }
                     Button(store.isMonitoring ? "Pause monitoring" : "Resume monitoring") {
                         if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
