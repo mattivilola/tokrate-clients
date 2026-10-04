@@ -1,13 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod runtime;
+mod updater_state;
 use runtime::{Runtime, SettingsPatch, Snapshot};
-use std::sync::{Arc, Mutex};
+use serde::Serialize;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tauri::{
+    ipc::Channel,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State,
 };
+use tauri_plugin_updater::UpdaterExt;
+use updater_state::{UpdatePreferencesSnapshot, UpdateState, UpdateSummary};
 type Shared = Arc<Mutex<Runtime>>;
+type UpdateShared = Arc<Mutex<UpdateState>>;
 #[tauri::command]
 fn snapshot(state: State<Shared>, since_revision: Option<u64>) -> Snapshot {
     state.lock().unwrap().snapshot(since_revision)
@@ -32,6 +41,117 @@ fn update_settings(
 fn retry_sharing(app: tauri::AppHandle, state: State<Shared>) -> Snapshot {
     runtime::restart_sharing(&app);
     state.lock().unwrap().snapshot(None)
+}
+#[tauri::command]
+fn update_preferences(state: State<UpdateShared>) -> UpdatePreferencesSnapshot {
+    state.lock().unwrap().snapshot()
+}
+#[tauri::command]
+fn set_automatic_update_checks(
+    state: State<UpdateShared>,
+    enabled: bool,
+) -> Result<UpdatePreferencesSnapshot, String> {
+    state.lock().unwrap().set_automatic_checks(enabled)
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckResult {
+    started: bool,
+    update: Option<UpdateSummary>,
+}
+async fn perform_update_check(
+    app: tauri::AppHandle,
+    state: State<'_, UpdateShared>,
+    automatic: bool,
+) -> Result<UpdateCheckResult, String> {
+    let started = {
+        let mut state = state.lock().unwrap();
+        state.begin_check(automatic, chrono::Utc::now().timestamp())?
+    };
+    if !started {
+        return Ok(UpdateCheckResult {
+            started: false,
+            update: None,
+        });
+    }
+    let result = async {
+        let update = app
+            .updater_builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|_| "Updater configuration is unavailable")?
+            .check()
+            .await
+            .map_err(|_| "Could not check for updates")?;
+        Ok::<_, String>(state.lock().unwrap().store_pending_update(update))
+    }
+    .await;
+    state.lock().unwrap().finish_check();
+    Ok(UpdateCheckResult {
+        started: true,
+        update: result?,
+    })
+}
+#[tauri::command]
+async fn check_update(
+    app: tauri::AppHandle,
+    state: State<'_, UpdateShared>,
+) -> Result<UpdateCheckResult, String> {
+    perform_update_check(app, state, false).await
+}
+#[tauri::command]
+async fn check_update_automatically(
+    app: tauri::AppHandle,
+    state: State<'_, UpdateShared>,
+) -> Result<UpdateCheckResult, String> {
+    perform_update_check(app, state, true).await
+}
+#[derive(Clone, Serialize)]
+#[serde(tag = "event", content = "data")]
+enum UpdateDownloadEvent {
+    Started { content_length: Option<u64> },
+    Progress { chunk_length: usize },
+    Finished,
+}
+#[tauri::command]
+async fn install_update(
+    state: State<'_, UpdateShared>,
+    on_event: Channel<UpdateDownloadEvent>,
+) -> Result<(), String> {
+    let update = {
+        let mut state = state.lock().unwrap();
+        if !state.can_use_native_updater() {
+            return Err("Updater installation is unavailable for this installation".into());
+        }
+        state
+            .take_pending_update()
+            .ok_or_else(|| "Check for an update before installing".to_owned())?
+    };
+    let chunk_events = on_event.clone();
+    let mut started = false;
+    let result = update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                if !started {
+                    let _ = chunk_events.send(UpdateDownloadEvent::Started { content_length });
+                    started = true;
+                }
+                let _ = chunk_events.send(UpdateDownloadEvent::Progress { chunk_length });
+            },
+            move || {
+                let _ = on_event.send(UpdateDownloadEvent::Finished);
+            },
+        )
+        .await;
+    if result.is_err() {
+        state.lock().unwrap().store_pending_update(Some(update));
+        return Err("The signed update could not be verified or installed".into());
+    }
+    Ok(())
+}
+#[tauri::command]
+fn restart_after_update(app: tauri::AppHandle) {
+    app.restart();
 }
 #[tauri::command]
 async fn choose_folder(app: tauri::AppHandle, source: String) -> Result<Snapshot, String> {
@@ -60,13 +180,21 @@ fn open_website(page: String) -> Result<(), String> {
     let url = match page.as_str() {
         "home" => "https://tokrate.dev",
         "privacy" => "https://tokrate.dev/privacy",
+        "desktop-downloads" => "https://tokrate.dev/download",
         _ => return Err("Unsupported page".into()),
     };
     open::that(url).map_err(|_| "Could not open your browser".into())
 }
 #[tauri::command]
-fn smoke_complete(app: tauri::AppHandle, state: State<Shared>) -> Result<(), String> {
+fn smoke_complete(
+    app: tauri::AppHandle,
+    state: State<Shared>,
+    updates: State<UpdateShared>,
+) -> Result<(), String> {
     state.lock().unwrap().finish_smoke()?;
+    if !updates.lock().unwrap().smoke_network_disabled() {
+        return Err("Smoke runs must keep updater networking disabled".into());
+    }
     app.exit(0);
     Ok(())
 }
@@ -82,20 +210,32 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+    let smoke = std::env::args().any(|a| a == "--smoke-test");
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)));
+    let builder = if updater_state::updater_plugin_enabled(smoke) {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+    builder
         .invoke_handler(tauri::generate_handler![
             snapshot,
             update_settings,
             retry_sharing,
+            update_preferences,
+            set_automatic_update_checks,
+            check_update,
+            check_update_automatically,
+            install_update,
+            restart_after_update,
             choose_folder,
             open_website,
             smoke_complete,
             quit
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let dir = app.path().app_local_data_dir()?;
-            let smoke = std::env::args().any(|a| a == "--smoke-test");
             let runtime = if smoke {
                 let dir =
                     std::env::var_os("TOKRATE_SMOKE_DIR").ok_or("Smoke directory required")?;
@@ -104,6 +244,15 @@ fn main() {
                 Runtime::load(dir)?
             };
             app.manage(Arc::new(Mutex::new(runtime)));
+            let update_dir = if smoke {
+                std::env::var_os("TOKRATE_SMOKE_DIR")
+                    .ok_or("Smoke directory required")?
+                    .into()
+            } else {
+                app.path().app_local_data_dir()?
+            };
+            let updates = UpdateState::load(update_dir, smoke).map_err(std::io::Error::other)?;
+            app.manage(Arc::new(Mutex::new(updates)));
             let dashboard =
                 MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?;
             let speed = MenuItem::with_id(

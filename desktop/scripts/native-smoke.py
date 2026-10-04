@@ -165,5 +165,10 @@ with tempfile.TemporaryDirectory(prefix="tokrate-native-smoke-") as temporary:
         )
         raise
     result = json.loads((root / "smoke-result.json").read_text())
-    assert result == {"nativeWebview": True, "parsedFixture": True, "sharingOff": True}, result
+    assert result == {
+        "nativeWebview": True,
+        "parsedFixture": True,
+        "sharingOff": True,
+        "updatesOff": True,
+    }, result
     print(json.dumps(result))

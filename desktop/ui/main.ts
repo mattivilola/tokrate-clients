@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   DAY,
   cohort,
@@ -41,6 +41,24 @@ interface Snapshot {
   recordsChanged: boolean;
   smoke?: boolean;
 }
+interface UpdatePreferences {
+  automaticChecks: boolean;
+  mode: "native" | "manual" | "unavailable";
+  settingsWarning: string | null;
+  currentVersion: string;
+}
+interface UpdateSummary {
+  version: string;
+  body: string | null;
+}
+interface UpdateCheckResult {
+  started: boolean;
+  update: UpdateSummary | null;
+}
+type UpdateDownloadEvent =
+  | { event: "Started"; data: { contentLength?: number | null } }
+  | { event: "Progress"; data: { chunkLength: number } }
+  | { event: "Finished"; data?: undefined };
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const native = isTauri();
 let state: Snapshot = {
@@ -66,10 +84,19 @@ let chartMetric: "throughput" | "ttft" = "throughput",
   error = "",
   busy = false,
   settingsOpen = false,
+  updatesOpen = false,
   historyOpen = false,
   sort = "recent";
 const filters = { client: "all", provider: "all" };
 const gate = new AsyncGate();
+let updatePreferences: UpdatePreferences | null = null,
+  updatePreferencesLoaded = false,
+  updateCheckInFlight = false,
+  updateInstallInFlight = false,
+  availableUpdate: UpdateSummary | null = null,
+  updateStatus = "Loading update preferences…",
+  updateProgress = { downloaded: 0, total: 0 };
+const AUTOMATIC_UPDATE_REVISIT_MS = 60 * 60 * 1000;
 const e = (v: unknown) =>
   String(v ?? "").replace(
     /[&<>"']/g,
@@ -199,6 +226,7 @@ function render() {
     : signal(selected, now, "ttft");
   app.innerHTML = `<main>
     <header><div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M8 22a10 10 0 1 1 16 0M16 17l6-7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="17" r="2" fill="currentColor"/></svg>Tokrate</div><nav><button id="website" title="Open tokrate.dev in your browser">Global stats ↗</button><button id="settings-button" aria-label="Open settings">⚙</button></nav></header>
+    ${native ? updateBanner() : ""}
     ${!native ? '<p class="notice">Development preview · synthetic local data · no network sharing</p>' : ""}${error ? `<p role="alert" class="error">${e(error)}</p>` : ""}
     <div class="toolbar">
       <label><span>Coding tool</span><select id="client-filter"><option value="all" ${filters.client === "all" ? "selected" : ""}>All tools</option><option value="codex" ${filters.client === "codex" ? "selected" : ""}>Codex</option><option value="claude-code" ${filters.client === "claude-code" ? "selected" : ""}>Claude Code</option><option value="grok-build" ${filters.client === "grok-build" ? "selected" : ""}>Grok Build</option></select></label>
@@ -216,10 +244,36 @@ function render() {
       <div><p class="path"><strong>Claude Code projects:</strong> ${e(state.settings.claudeRoot || "Default Claude Code projects folder")}</p><button data-folder="claude-code">Choose folder…</button></div>
       <div><p class="path"><strong>Grok Build sessions:</strong> ${e(state.settings.grokRoot || "Default Grok Build sessions folder")}</p><button data-folder="grok-build">Choose folder…</button></div>
       <p class="muted">Pausing monitoring does not stop queued uploads. Turn sharing off to stop all community requests. Previously received reports cannot be recalled by the switch.</p><button id="quit">Quit Tokrate</button></div></details>
+    ${native ? updatePanel() : ""}
     <details class="panel history" ${historyOpen ? "open" : ""}><summary>Turn history (${Math.min(500, historyRows.length)} shown)</summary><div class="table-scroll"><table><thead><tr><th>Completed</th><th>Coding tool / model</th><th>Tokens</th><th>Throughput</th><th>Codex TTFT</th></tr></thead><tbody>${historyRows.slice(0, 500).map((m) => `<tr><td>${e(time(m.completedAt))}</td><td>${e(clientLabel(m))} · ${e(m.model ?? "Unknown")}<br>${e(m.reasoningEffort ?? "unknown")} effort · ${e(m.provider ?? "unknown")} provider</td><td>${m.outputTokens}</td><td>${n(m.turnThroughputTPS)} t/s<br><small>${e(measurementLabel(m))}</small></td><td>${n(m.codexTTFTSeconds)}</td></tr>`).join("")}</tbody></table></div></details>
     <footer>Local history: 7 days. Community data refreshes at most every 30 seconds while sharing is on. Measurements use source-specific definitions and do not rate answer quality or verify provider outages. <button id="privacy">Privacy & methodology</button></footer>
   </main>`;
   bind();
+}
+function updatePanel() {
+  const prefs = updatePreferences;
+  const mode = prefs?.mode ?? "unavailable";
+  const progress = updateProgress.total > 0
+    ? Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))
+    : null;
+  const updateAvailableMarkup = availableUpdate
+    ? `<p><strong>Tokrate ${e(availableUpdate.version)} is available.</strong>${availableUpdate.body ? ` ${e(availableUpdate.body.slice(0, 400))}` : ""}</p><button id="install-update" ${updateInstallInFlight ? "disabled" : ""}>${updateInstallInFlight ? "Installing update…" : "Download and install"}</button>`
+    : "";
+  const modeMessage = mode === "manual"
+    ? "This Debian package uses manual updates. Download the signed package and install it with your package manager."
+    : mode === "unavailable"
+      ? "Automatic updates are available in the signed Windows installer and Linux AppImage."
+      : "Update checks use Tokrate’s fixed alpha feed. Checks never install an update by themselves.";
+  const progressMarkup = updateInstallInFlight
+    ? progress === null
+      ? '<progress aria-label="Update download progress"></progress><small>Downloading the signed update…</small>'
+      : `<progress aria-label="Update download progress" max="100" value="${progress}">${progress}%</progress><small>${progress}% downloaded</small>`
+    : "";
+  return `<details class="panel settings updates" id="updates-panel" ${updatesOpen ? "open" : ""}><summary>Application updates</summary><div class="settings-content"><p>Installed version ${e(prefs?.currentVersion ?? "unknown")}. ${e(updateStatus)}</p>${availableUpdate ? `<p role="status" class="notice"><strong>Tokrate ${e(availableUpdate.version)} is available.</strong> Install it from Application updates below.</p>` : ""}${prefs?.settingsWarning ? `<p role="alert" class="error">${e(prefs.settingsWarning)}</p>` : ""}${mode === "native" && !state.smoke ? `<label class="switch"><input id="automatic-updates" type="checkbox" ${prefs?.automaticChecks ? "checked" : ""}>Automatically check on launch and at most once every 24 hours</label>` : ""}${updateCheckInFlight ? "<p>Checking for updates…</p>" : ""}${progressMarkup}${updateAvailableMarkup}<p class="muted">${e(modeMessage)}</p>${mode === "native" && !state.smoke ? `<button id="check-updates" ${updateCheckInFlight || updateInstallInFlight ? "disabled" : ""}>Check for updates</button>` : ""}${mode !== "native" && !state.smoke ? `<button id="desktop-downloads">Open desktop downloads ↗</button>` : ""}</div></details>`;
+}
+function updateBanner() {
+  if (!availableUpdate) return "";
+  return `<section class="notice update-banner" role="status"><div><strong>Tokrate ${e(availableUpdate.version)} is available.</strong><br><small>Install when you’re ready. Updates never install automatically.</small></div><button id="install-update-banner" ${updateInstallInFlight ? "disabled" : ""}>${updateInstallInFlight ? "Installing…" : "Install update"}</button><button id="update-details">Details</button></section>`;
 }
 async function action(fn: () => Promise<Snapshot | void>) {
   const epoch = gate.beginMutation();
@@ -279,6 +333,26 @@ function bind() {
         "change",
         (ev) => void patch({ [key]: (ev.target as HTMLInputElement).checked }),
       );
+  document.getElementById("automatic-updates")?.addEventListener("change", (ev) => {
+    void setAutomaticUpdateChecks((ev.target as HTMLInputElement).checked);
+  });
+  document.getElementById("check-updates")?.addEventListener("click", () => {
+    void checkForUpdates(false);
+  });
+  document.getElementById("install-update")?.addEventListener("click", () => {
+    void installAvailableUpdate();
+  });
+  document.getElementById("install-update-banner")?.addEventListener("click", () => {
+    void installAvailableUpdate();
+  });
+  document.getElementById("update-details")?.addEventListener("click", () => {
+    updatesOpen = true;
+    render();
+    document.getElementById("updates-panel")?.scrollIntoView({ behavior: "smooth" });
+  });
+  document.getElementById("desktop-downloads")?.addEventListener("click", () => {
+    if (native) void invoke("open_website", { page: "desktop-downloads" });
+  });
   document
     .querySelectorAll<HTMLButtonElement>("[data-days]")
     .forEach(
@@ -298,6 +372,9 @@ function bind() {
   );
   document.querySelector(".settings")?.addEventListener("toggle", (ev) => {
     settingsOpen = (ev.target as HTMLDetailsElement).open;
+  });
+  document.getElementById("updates-panel")?.addEventListener("toggle", (ev) => {
+    updatesOpen = (ev.target as HTMLDetailsElement).open;
   });
   document.querySelector(".history")?.addEventListener("toggle", (ev) => {
     historyOpen = (ev.target as HTMLDetailsElement).open;
@@ -342,6 +419,109 @@ function bind() {
     if (native) void invoke("quit");
   });
 }
+async function loadUpdatePreferences() {
+  if (!native || updatePreferencesLoaded) return;
+  updatePreferencesLoaded = true;
+  try {
+    updatePreferences = await invoke<UpdatePreferences>("update_preferences");
+    if (state.smoke) {
+      updateStatus = "Updater networking is disabled in native smoke runs.";
+    } else if (updatePreferences.mode === "manual") {
+      updateStatus = "Debian package updates are installed manually.";
+    } else if (updatePreferences.mode === "unavailable") {
+      updateStatus = "This installation does not support in-app updates.";
+    } else {
+      updateStatus = updatePreferences.automaticChecks
+        ? "Automatic checks are on. Updates require your click to install."
+        : "Automatic checks are off. You can still check manually.";
+    }
+    render();
+    if (!state.smoke && updatePreferences.mode === "native" && updatePreferences.automaticChecks)
+      void checkForUpdates(true);
+  } catch {
+    updateStatus = "Update preferences could not be loaded.";
+    render();
+  }
+}
+async function setAutomaticUpdateChecks(enabled: boolean) {
+  if (!native || !updatePreferences) return;
+  try {
+    updatePreferences = await invoke<UpdatePreferences>("set_automatic_update_checks", { enabled });
+    updateStatus = enabled
+      ? "Automatic checks are on. Updates require your click to install."
+      : "Automatic checks are off. You can still check manually.";
+    render();
+    if (enabled) void checkForUpdates(true);
+  } catch {
+    updateStatus = "Update preference could not be saved.";
+    render();
+  }
+}
+async function checkForUpdates(automatic: boolean) {
+  if (!native || state.smoke || !updatePreferences || updateCheckInFlight || updateInstallInFlight)
+    return;
+  if (updatePreferences.mode !== "native") return;
+  updateCheckInFlight = true;
+  updateStatus = "Checking Tokrate’s signed update feed…";
+  render();
+  try {
+    const result = await invoke<UpdateCheckResult>(
+      automatic ? "check_update_automatically" : "check_update",
+    );
+    if (!result.started) {
+      updateStatus = automatic
+        ? "The automatic check is throttled. You can check manually."
+        : "An update check is already in progress.";
+      return;
+    }
+    const update = result.update;
+    availableUpdate = update;
+    updateStatus = update
+      ? `Version ${update.version} is ready if you choose to install it.`
+      : `Tokrate ${updatePreferences.currentVersion} is up to date.`;
+  } catch {
+    updateStatus = "Could not check for updates. Check your connection and try again.";
+  } finally {
+    updateCheckInFlight = false;
+    render();
+  }
+}
+async function installAvailableUpdate() {
+  const update = availableUpdate;
+  if (!native || state.smoke || !update || updateInstallInFlight || updateCheckInFlight)
+    return;
+  updateInstallInFlight = true;
+  updateProgress = { downloaded: 0, total: 0 };
+  updateStatus = "Downloading and verifying the signed update…";
+  render();
+  try {
+    const onEvent = new Channel<UpdateDownloadEvent>();
+    onEvent.onmessage = (event) => {
+      if (event.event === "Started") {
+        updateProgress = { downloaded: 0, total: event.data.contentLength ?? 0 };
+      } else if (event.event === "Progress") {
+        updateProgress.downloaded += event.data.chunkLength;
+      }
+      render();
+    };
+    await invoke("install_update", { onEvent });
+    availableUpdate = null;
+    updateStatus = "Update installed. Restarting Tokrate…";
+    render();
+  } catch {
+    updateStatus = "The signed update could not be verified or installed. Your current version remains active.";
+    updateInstallInFlight = false;
+    render();
+    return;
+  }
+  try {
+    await invoke("restart_after_update");
+  } catch {
+    updateStatus = "The update is installed. Quit and reopen Tokrate to finish applying it.";
+    updateInstallInFlight = false;
+    render();
+  }
+}
 async function refresh() {
   if (busy || document.hidden || document.activeElement?.tagName === "SELECT")
     return;
@@ -362,6 +542,7 @@ async function refresh() {
         records: next.recordsChanged ? next.records : state.records,
       };
       render();
+      if (!updatePreferencesLoaded) void loadUpdatePreferences();
       if (state.smoke) {
         const codex = state.records.find(
           (m) => client(m) === "codex" && m.model === "fixture-model",
@@ -418,6 +599,10 @@ if (!native) {
 render();
 void refresh();
 setInterval(() => void refresh(), 5000);
+setInterval(() => {
+  if (!state.smoke && updatePreferences?.mode === "native" && updatePreferences.automaticChecks)
+    void checkForUpdates(true);
+}, AUTOMATIC_UPDATE_REVISIT_MS);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refresh();
 });

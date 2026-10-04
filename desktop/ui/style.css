@@ -228,6 +228,15 @@ select {
   margin-top: 12px;
   font-size: 13px;
 }
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.update-banner > div {
+  flex: 1;
+}
 .share-row {
   display: flex;
   align-items: center;
@@ -247,6 +256,11 @@ select {
 }
 .settings {
   margin-top: 16px;
+}
+.updates progress {
+  width: 100%;
+  height: 12px;
+  accent-color: #077f99;
 }
 summary {
   cursor: pointer;
@@ -346,6 +360,10 @@ a {
   }
   header nav button {
     padding: 8px;
+  }
+  .update-banner {
+    align-items: stretch;
+    flex-wrap: wrap;
   }
   .brand {
     font-size: 21px;

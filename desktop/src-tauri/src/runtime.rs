@@ -177,7 +177,7 @@ impl Runtime {
         }
         std::fs::write(
             self.dir.join("smoke-result.json"),
-            b"{\"nativeWebview\":true,\"parsedFixture\":true,\"sharingOff\":true}",
+            b"{\"nativeWebview\":true,\"parsedFixture\":true,\"sharingOff\":true,\"updatesOff\":true}",
         )
         .map_err(|_| "Cannot write smoke result".into())
     }

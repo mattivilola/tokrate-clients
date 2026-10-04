@@ -1,6 +1,6 @@
 # Tokrate clients
 
-Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; Mac 0.1.9 is stable, and [Windows/Linux alpha installers](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) are available with automated native checks and manual desktop testing still pending. Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. Sharing OFF stops contribution and community requests. From version 0.1.10, automatic software update checks have their own switch, on by default. The app does not retain prompt or response text.
+Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; Mac 0.1.10 is stable, and [Windows/Linux alpha installers](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) are available with automated native checks and manual desktop testing still pending. Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. Sharing OFF stops contribution and community requests. From version 0.1.10, automatic software update checks have their own switch, on by default. The app does not retain prompt or response text.
 
 Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, an easy model/cohort selector, rolling 24-hour / 7-day trends, median/min/max metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. The dashboard separates coding tool, inference provider, model, reasoning effort and measurement definition. Codex uses completed-turn throughput; Claude Code uses transcript-observed turn throughput; Grok Build uses work-turn throughput including nested agent output. TTFT is currently available only when Codex reports it. These are not streaming generation rates or answer-quality scores.
 
@@ -37,7 +37,7 @@ swift build
 swift test
 ```
 
-To stage and launch the menu bar app as a macOS bundle, run `./macos/script/build_and_run.sh`. The script builds `macos/dist/Tokrate.app` first. The command-line client is available with `swift run tokrate inspect <session.jsonl>`.
+To stage and launch the menu bar app as a macOS bundle, run `./macos/script/build_and_run.sh`. The script builds `macos/dist/0.1.10-debug/Tokrate.app` first. The command-line client is available with `swift run tokrate inspect <session.jsonl>`.
 
 ## Local data
 
@@ -59,7 +59,7 @@ Offline retries use a memory-only queue capped at 1,000 samples and 24 hours; qu
 ./macos/script/package_app.sh release
 ```
 
-This builds a native-architecture `macos/dist/Tokrate.app` (macOS 14+, bundle ID `dev.tokrate.mac`, version 0.1.9). It does not sign, notarize, publish, or launch. Release ownership must separately sign with Developer ID and hardened runtime, verify, submit and staple notarization, then archive the final bundle. `./macos/script/build_and_run.sh --verify` stages a debug bundle and checks the launched process. Building again replaces bundle contents; sign only after the final build. The Mac app embeds Sparkle for signed software updates; the metric core has no third-party dependencies.
+This builds a native-architecture `macos/dist/0.1.10/Tokrate.app` (macOS 14+, bundle ID `dev.tokrate.mac`, version 0.1.10). It does not sign, notarize, publish, or launch. Release ownership must separately sign with Developer ID and hardened runtime, verify, submit and staple notarization, then archive the final bundle. `./macos/script/build_and_run.sh --verify` stages a debug bundle and checks the launched process. Debug packaging refreshes its generated bundle; release packaging refuses to overwrite an existing release bundle or archive. Sign only after the final build. The Mac app embeds Sparkle for signed software updates; the metric core has no third-party dependencies.
 
 Validation: `swift test --build-system native -j 2` exercises parser timing, cumulative counts, malformed input, incremental file reading, retention, no requests/identity while sharing is off, default-on preferences, persisted-off preferences, allowlisted signed bytes, five-minute buckets, no historical backfill, stable retries, polling rate limits, bounded queue expiry, and opt-out during a suspended upload. Tests use mocks and do not contact production.
 
