@@ -1,8 +1,8 @@
 # Tokrate for Windows
 
-The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. An [unsigned alpha with installable packages](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) is available. Automated native checks passed; manual desktop acceptance is pending. No stable Windows release is published yet.
+The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. An [alpha with installable packages and signed updates](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.10-desktop-alpha.1) is available. Automated native checks passed; manual desktop acceptance is pending. No stable Windows release is published yet.
 
-Target: Windows 11 x64 with Microsoft Edge WebView2. CI builds a per-user NSIS installer and runs the actual executable with isolated fixture logs and sharing disabled. Test artifacts are explicitly unsigned. A trusted public release requires Windows Authenticode signing; the Mac certificate cannot sign Windows programs.
+Target: Windows 11 x64 with Microsoft Edge WebView2. CI builds a per-user NSIS installer and runs the actual executable with isolated fixture logs and sharing disabled. Updater-enabled release artifacts carry a Tauri update signature. The installer is not Authenticode-signed and may show Windows first-install warnings; the Mac certificate cannot sign Windows programs.
 
 Codex sessions default to `%USERPROFILE%\.codex\sessions`, or `$CODEX_HOME/sessions` when configured. For Codex inside WSL, choose the corresponding distribution's sessions folder using **Settings → Choose session folder**. WSL permissions/path behavior still needs desktop acceptance testing.
 
@@ -12,3 +12,7 @@ The signing key is stored in Windows Credential Manager. Sharing is ON for a new
 
 
 The 0.1.9 source also monitors Claude Code (`CLAUDE_CONFIG_DIR/projects`, default `.claude/projects` in your home directory) and Grok Build (`GROK_HOME/sessions`, default `.grok/sessions`). The dashboard distinguishes coding tool from inference provider and labels each measurement definition. Source-specific folder settings support nonstandard installations. See [the shared contract](../docs/metrics-contract.md); native CI evidence does not establish interactive acceptance on every desktop configuration.
+
+## Software updates
+
+Version 0.1.10 checks the separate desktop alpha channel automatically, independently of community sharing. You choose when to install; automatic checks can be disabled in Settings. NSIS installations verify the package signature before installing. Earlier versions need one manual installation of 0.1.10. Native CI passed; a real desktop upgrade from one updater-enabled release to the next has not yet been validated.
