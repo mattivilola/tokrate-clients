@@ -837,6 +837,18 @@ time,
 .models .section-head {
   padding: 0 0 4px 2px;
 }
+.model-group + .model-group {
+  margin-top: 12px;
+}
+.group-head {
+  margin: 0 0 4px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+.compare .group-head {
+  margin: 10px 0 4px;
+}
 .model-list {
   overflow: hidden;
   background: var(--surface);

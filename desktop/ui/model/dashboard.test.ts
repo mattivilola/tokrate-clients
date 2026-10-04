@@ -4,7 +4,8 @@ import { buildDashboard, communityLine } from "./dashboard";
 import { folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
 import { niceCeil } from "../components/TrendChart";
-import { gaugeMax } from "../components/Gauge";
+import { GAUGE } from "../components/Gauge";
+import { niceScaleMax } from "../metrics";
 import type { Snapshot } from "../store/types";
 
 const NOW = Date.parse("2026-10-04T12:00:00Z");
@@ -77,11 +78,57 @@ describe("dashboard model", () => {
   });
 });
 
+describe("gauge", () => {
+  it("never lets the needle or hub reach the readout at any value", () => {
+    for (const fraction of [0, 0.02, 0.25, 0.5, 0.75, 1]) {
+      const angle = ((150 + fraction * 240) * Math.PI) / 180;
+      const tipY = GAUGE.cy + GAUGE.needleLength * Math.sin(angle);
+      expect(tipY + 2).toBeLessThan(GAUGE.readoutTop);
+    }
+    expect(GAUGE.cy + GAUGE.hubRadius).toBeLessThan(GAUGE.readoutTop);
+    expect(GAUGE.needleLength).toBe(GAUGE.radius - 14);
+  });
+  it("scales the hero by its own measurement group only", () => {
+    const sub = turn("s", 5, 400, { client: "claude-code", parserVersion: "claude-transcript-v2", metricVersion: "claude-observed-subagent-turn-v1", sourceKind: "subagent", codexTTFTSeconds: null });
+    const codex = [turn("1", 5, 60), turn("2", 60, 80), turn("3", 120, 40)];
+    const d = buildDashboard(input([...codex, sub]));
+    // Latest codex value 60, group median 60 -> 1.25 x 60 = 75.
+    expect(d.latest?.client ?? "codex").toBe("codex");
+    expect(d.gaugeMax).toBe(75);
+    const only = buildDashboard(input([sub], { selection: "latest" }));
+    expect(only.gaugeMax).toBe(500);
+  });
+  it("groups models by measurement group, most recent group first", () => {
+    const sub = turn("s", 1, 30, { client: "claude-code", parserVersion: "claude-transcript-v2", metricVersion: "claude-observed-subagent-turn-v1", sourceKind: "subagent", codexTTFTSeconds: null });
+    const claude = turn("c", 2, 70, { client: "claude-code", parserVersion: "claude-transcript-v2", metricVersion: "claude-observed-turn-v1", sourceKind: "primary", codexTTFTSeconds: null });
+    const codexA = turn("a", 3, 20);
+    const codexB = turn("b", 4, 90, { model: "model-b" });
+    const d = buildDashboard(input([sub, claude, codexA, codexB], { sort: "throughput" }));
+    expect(d.groups.map((g) => g.title)).toEqual([
+      "Claude Code · Subagent turn speed",
+      "Claude Code · Turn speed",
+      "Codex · Turn speed",
+    ]);
+    const codex = d.compareGroups.find((g) => g.title === "Codex · Turn speed")!;
+    expect(codex.rows.map((r) => r.sample.id)).toEqual(["b", "a"]);
+    expect(codex.max).toBe(150);
+    expect(d.groups[0].max).toBe(50);
+    expect(codex.definition).toMatch("Completed Codex turn");
+  });
+});
+
 describe("formatting and scales", () => {
   it("scales the gauge and chart axes", () => {
-    expect(gaugeMax(null)).toBe(100);
-    expect(gaugeMax(100)).toBe(100);
-    expect(gaugeMax(101)).toBe(150);
+    expect(niceScaleMax(null)).toBe(20);
+    expect(niceScaleMax(0)).toBe(20);
+    expect(niceScaleMax(16)).toBe(20);
+    expect(niceScaleMax(17)).toBe(25);
+    expect(niceScaleMax(40)).toBe(50);
+    expect(niceScaleMax(65.2)).toBe(100);
+    expect(niceScaleMax(80)).toBe(100);
+    expect(niceScaleMax(81)).toBe(150);
+    expect(niceScaleMax(800)).toBe(1000);
+    expect(niceScaleMax(900)).toBe(1250);
     expect(niceCeil(87)).toBe(100);
     expect(niceCeil(41)).toBe(50);
     expect(niceCeil(7.2)).toBe(10);

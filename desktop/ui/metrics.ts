@@ -43,14 +43,6 @@ export const clientLabel = (m: Metric) =>
     client(m)
   ] ?? "Coding tool";
 const SUBAGENT_METRIC_VERSION = "claude-observed-subagent-turn-v1";
-export const measurementLabel = (m: Metric) =>
-  metricVersion(m) === SUBAGENT_METRIC_VERSION
-    ? "Subagent turn speed"
-    : client(m) === "claude-code"
-      ? "Transcript-observed turn throughput"
-      : client(m) === "grok-build"
-        ? "Work-turn throughput · includes nested agent output"
-        : "Completed-turn throughput";
 export type MeasurementKind = "turn" | "subagent" | "workTurn";
 export const isSubagent = (m: Metric) =>
   metricVersion(m) === SUBAGENT_METRIC_VERSION || m.sourceKind === "subagent";
@@ -81,10 +73,33 @@ export const measurementDefinition = (m: Metric | undefined) =>
     workTurn:
       "Whole work turn, including nested subagent output, tools and waiting.",
   })[m ? measurementKind(m) : "turn"];
+/** Vocabulary name of the measurement ("Turn speed"); precise definitions live in the explanation. */
+export const measurementLabel = measurementTitle;
+/** Precise definition for the ⓘ explanation and group header tooltips. */
 export const measurementExplanation = (m: Metric) =>
-  metricVersion(m) === SUBAGENT_METRIC_VERSION
-    ? "Subagent task prompt to final answer, including tools and waiting."
-    : null;
+  ({
+    turn:
+      client(m) === "claude-code"
+        ? "Human prompt through the terminal response in the primary transcript, including tools and waiting."
+        : "Completed Codex turn: output tokens divided by the whole turn, including tools, reasoning and waiting.",
+    subagent:
+      "Subagent task prompt to final answer, including tools and waiting.",
+    workTurn:
+      "Matched Grok Build work turn, including nested agent output, tools and waiting.",
+  })[measurementKind(m)];
+/** Same coding tool, metric version and source kind: the only values that may share a scale. */
+export const measurementGroupKey = (m: Metric) =>
+  JSON.stringify([client(m), metricVersion(m), m.sourceKind ?? null]);
+/** "Codex · Turn speed", "Claude Code · Subagent turn speed", ... */
+export const measurementGroupTitle = (m: Metric) =>
+  `${clientLabel(m)} · ${measurementTitle(m)}`;
+const SCALE_STEPS = [20, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000];
+/** The "nice" ceiling of 1.25 x the largest value, from the shared steps; minimum 20. */
+export function niceScaleMax(largest: number | null | undefined): number {
+  const target = 1.25 * (typeof largest === "number" && Number.isFinite(largest) ? Math.max(0, largest) : 0);
+  const step = SCALE_STEPS.find((s) => s >= target - 1e-9);
+  return step ?? Math.ceil(target / 250) * 250;
+}
 export const label = (m: Metric) =>
   `${m.model ?? "Unknown model"} · ${m.reasoningEffort ?? "unknown"} effort · ${clientLabel(m)} ${m.clientVersion ?? "version unknown"}`;
 export const communityId = (m: Metric) =>
@@ -296,6 +311,35 @@ export function cohortRows(
     }
   }
   return rows;
+}
+export interface CohortGroup {
+  key: string;
+  title: string;
+  definition: string;
+  rows: CohortRow[];
+  /** Shared scale of the group's mini bars. */
+  max: number;
+  latestAt: number;
+}
+/** Rows grouped by measurement group, most recently active group first, sorted inside each group. */
+export function groupCohortRows(rows: CohortRow[], sort: SortKey): CohortGroup[] {
+  const groups = new Map<string, CohortRow[]>();
+  for (const row of rows) {
+    const key = measurementGroupKey(row.sample);
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  return [...groups]
+    .map(([key, list]) => ({
+      key,
+      title: measurementGroupTitle(list[0].sample),
+      definition: measurementExplanation(list[0].sample),
+      rows: sortCohortRows(list, sort),
+      max: niceScaleMax(
+        list.reduce((m, r) => Math.max(m, r.stats.throughput.median ?? 0), 0),
+      ),
+      latestAt: list.reduce((m, r) => Math.max(m, r.latestAt), 0),
+    }))
+    .sort((a, b) => b.latestAt - a.latestAt);
 }
 export type SortKey = "recent" | "throughput" | "ttft";
 /** Never ranks different measurement definitions against each other. */

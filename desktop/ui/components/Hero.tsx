@@ -24,6 +24,7 @@ export function Hero({ dashboard }: { dashboard: Dashboard }) {
     <section className="hero" aria-label="Latest turn speed">
       <Gauge
         value={value}
+        max={dashboard.gaugeMax}
         label={label}
         caption={value === null ? "Waiting for a completed turn" : undefined}
       />

@@ -7,11 +7,13 @@ import {
   cohortRows,
   communityId,
   deltaVsMedian,
+  groupCohortRows,
+  measurementGroupKey,
+  niceScaleMax,
   period,
   relativeTime,
   select,
   signal,
-  sortCohortRows,
   summarize,
   type CohortRow,
   type Metric,
@@ -61,7 +63,15 @@ export function buildDashboard(input: DashboardInput) {
   const last24h = summarize(period(selected, now - DAY, now + 1));
   const previous24h = summarize(period(selected, now - 2 * DAY, now - DAY));
   const delta = deltaVsMedian(latest?.turnThroughputTPS, last24h.throughput);
-  const sorted = sortCohortRows(cohorts, sort);
+  // Hero scale: the latest value or the group's largest 24 h median, never other measurement groups.
+  const latestGroup = latest ? measurementGroupKey(latest) : null;
+  const groupMedian24h = latestGroup
+    ? cohortRows(
+        filtered.filter((m) => measurementGroupKey(m) === latestGroup),
+        now - DAY,
+        now + 1,
+      ).reduce((max, row) => Math.max(max, row.stats.throughput.median ?? 0), 0)
+    : 0;
   const tools = CLIENT_ORDER.filter((id) =>
     retained.some((m) => client(m) === id),
   );
@@ -70,7 +80,9 @@ export function buildDashboard(input: DashboardInput) {
     days,
     filtered,
     cohorts,
-    sortedCohorts: sorted,
+    groups: groupCohortRows(cohorts, "recent"),
+    compareGroups: groupCohortRows(cohorts, sort),
+    gaugeMax: niceScaleMax(Math.max(latest?.turnThroughputTPS ?? 0, groupMedian24h)),
     isAll,
     selection,
     selected,

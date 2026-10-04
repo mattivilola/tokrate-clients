@@ -121,8 +121,9 @@ it("keeps each source/parser/metric cohort separate and uses the backend communi
     "high",
     "claude-code",
   ]);
-  expect(measurementLabel(claude)).toBe("Transcript-observed turn throughput");
-  expect(measurementLabel(grok)).toMatch("includes nested agent output");
+  expect(measurementLabel(claude)).toBe("Turn speed");
+  expect(measurementLabel(grok)).toBe("Work-turn speed");
+  expect(measurementExplanation(grok)).toMatch("nested agent output");
   expect(summarize([claude]).ttft.count).toBe(0);
   expect(metricDefinition(claude)).not.toBe(metricDefinition(grok));
 });
@@ -144,8 +145,8 @@ it("labels subagent turns and keeps their cohorts separate from primary Claude t
   expect(measurementExplanation(subagent)).toBe(
     "Subagent task prompt to final answer, including tools and waiting.",
   );
-  expect(measurementLabel(claude)).toBe("Transcript-observed turn throughput");
-  expect(measurementExplanation(claude)).toBeNull();
+  expect(measurementLabel(claude)).toBe("Turn speed");
+  expect(measurementExplanation(claude)).toMatch("Human prompt through the terminal response");
   expect(cohort(subagent)).not.toBe(cohort(claude));
   expect(metricDefinition(subagent)).not.toBe(metricDefinition(claude));
   expect(communityId(subagent)).not.toBe(communityId(claude));

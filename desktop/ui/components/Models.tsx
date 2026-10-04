@@ -2,17 +2,16 @@ import { ArrowLeft, Columns2 } from "lucide-react";
 import {
   clientLabel,
   communityId,
-  measurementChip,
   measurementTitle,
-  metricDefinition,
   parserVersion,
   metricVersion,
+  type CohortGroup,
   type CohortRow,
   type SortKey,
 } from "../metrics";
 import type { Board } from "../store/types";
 import type { Dashboard } from "../model/dashboard";
-import { cohortSubtitle, effortChip, modelName, num } from "../model/format";
+import { effortChip, modelName, num } from "../model/format";
 import { useStore } from "../store/store";
 import { Chip, useAppStore } from "./primitives";
 
@@ -33,8 +32,7 @@ function ModelRow({
 }) {
   const { sample, stats, qualifier } = row;
   const median = stats.throughput.median;
-  const chip = measurementChip(sample);
-  const fill = median !== null && max > 0 ? Math.max(4, (median / max) * 100) : 0;
+  const fill = median !== null && max > 0 ? Math.min(100, Math.max(4, (median / max) * 100)) : 0;
   const title = [
     `${modelName(sample)} · ${clientLabel(sample)} ${sample.clientVersion ?? "version unknown"}`,
     `${measurementTitle(sample)} · ${parserVersion(sample)} / ${metricVersion(sample)}`,
@@ -55,14 +53,13 @@ function ModelRow({
             <Chip tone={effortChip(sample) === "effort unknown" ? "neutral" : "accent"}>
               {effortChip(sample)}
             </Chip>
-            {chip && <Chip>{chip}</Chip>}
           </span>
           <span className="model-sub">
-            {cohortSubtitle(sample, qualifier)}
+            {[qualifier, `${stats.throughput.count} ${stats.throughput.count === 1 ? "turn" : "turns"}`]
+              .filter(Boolean)
+              .join(" · ")}
             {detailed && (
               <>
-                {" · "}
-                {stats.throughput.count} {stats.throughput.count === 1 ? "turn" : "turns"}
                 {stats.ttft.median !== null && <> · {num(stats.ttft.median)} s first token</>}
                 {community !== null && <> · community {num(community, 0)} tok/s</>}
               </>
@@ -83,16 +80,6 @@ function ModelRow({
   );
 }
 
-/** Bars compare only turns measured the same way. */
-function maxByDefinition(rows: CohortRow[]) {
-  const max = new Map<string, number>();
-  for (const row of rows) {
-    const key = metricDefinition(row.sample);
-    max.set(key, Math.max(max.get(key) ?? 0, row.stats.throughput.median ?? 0));
-  }
-  return max;
-}
-
 function communityMedians(board: Board | null) {
   const map = new Map<string, number>();
   for (const c of board?.cohorts ?? [])
@@ -101,10 +88,17 @@ function communityMedians(board: Board | null) {
   return map;
 }
 
+function GroupHead({ group }: { group: CohortGroup }) {
+  return (
+    <h3 className="group-head" title={group.definition}>
+      {group.title}
+    </h3>
+  );
+}
+
 export function YourModels({ dashboard }: { dashboard: Dashboard }) {
   const store = useAppStore();
   const selection = useStore(store, (s) => s.snapshot.settings.selection);
-  const max = maxByDefinition(dashboard.cohorts);
   if (!dashboard.cohorts.length) return null;
   return (
     <section className="models" aria-labelledby="your-models">
@@ -119,19 +113,24 @@ export function YourModels({ dashboard }: { dashboard: Dashboard }) {
           Compare all
         </button>
       </div>
-      <ul className="model-list">
-        {dashboard.cohorts.map((row) => (
-          <ModelRow
-            key={row.key}
-            row={row}
-            selected={selection !== "all" && dashboard.selectedKey === row.key}
-            max={max.get(metricDefinition(row.sample)) ?? 0}
-            detailed={false}
-            community={null}
-            onSelect={() => void store.selectCohort(row.key)}
-          />
-        ))}
-      </ul>
+      {dashboard.groups.map((group) => (
+        <div className="model-group" key={group.key}>
+          <GroupHead group={group} />
+          <ul className="model-list">
+            {group.rows.map((row) => (
+              <ModelRow
+                key={row.key}
+                row={row}
+                selected={selection !== "all" && dashboard.selectedKey === row.key}
+                max={group.max}
+                detailed={false}
+                community={null}
+                onSelect={() => void store.selectCohort(row.key)}
+              />
+            ))}
+          </ul>
+        </div>
+      ))}
     </section>
   );
 }
@@ -152,8 +151,7 @@ export function CompareAll({
 }) {
   const store = useAppStore();
   const sort = useStore(store, (s) => s.ui.sort);
-  const rows = dashboard.sortedCohorts;
-  const max = maxByDefinition(rows);
+  const groups = dashboard.compareGroups;
   const community = communityMedians(board);
   const dayLabel = dashboard.days === 1 ? "24 h" : "7 d";
   return (
@@ -172,20 +170,25 @@ export function CompareAll({
         </label>
       </div>
       <p className="muted-line">Median turn speed over the last {dayLabel}.</p>
-      {rows.length ? (
-        <ul className="model-list model-list-flush">
-          {rows.map((row) => (
-            <ModelRow
-              key={row.key}
-              row={row}
-              selected={false}
-              max={max.get(metricDefinition(row.sample)) ?? 0}
-              detailed
-              community={community.get(communityId(row.sample)) ?? null}
-              onSelect={() => void store.selectCohort(row.key)}
-            />
-          ))}
-        </ul>
+      {groups.length ? (
+        groups.map((group) => (
+          <div className="model-group" key={group.key}>
+            <GroupHead group={group} />
+            <ul className="model-list model-list-flush">
+              {group.rows.map((row) => (
+                <ModelRow
+                  key={row.key}
+                  row={row}
+                  selected={false}
+                  max={group.max}
+                  detailed
+                  community={community.get(communityId(row.sample)) ?? null}
+                  onSelect={() => void store.selectCohort(row.key)}
+                />
+              ))}
+            </ul>
+          </div>
+        ))
       ) : (
         <p className="empty">Complete a supported coding-tool turn to compare models.</p>
       )}
