@@ -49,6 +49,7 @@ cp "$BIN_DIR/TokrateApp" "$BUNDLE/Contents/MacOS/Tokrate"
 chmod +x "$BUNDLE/Contents/MacOS/Tokrate"
 ditto "$SPARKLE_SOURCE" "$BUNDLE/Contents/Frameworks/Sparkle.framework"
 cp "$SPARKLE_LICENSE" "$BUNDLE/Contents/Resources/Sparkle-LICENSE.txt"
+"$ROOT_DIR/macos/script/make_app_icon.sh" "$BUNDLE/Contents/Resources/AppIcon.icns"
 
 BINARY="$BUNDLE/Contents/MacOS/Tokrate"
 if ! /usr/bin/otool -l "$BINARY" | grep -Fq 'path @executable_path/../Frameworks'; then
@@ -74,6 +75,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>Tokrate</string>
 <key>CFBundleIdentifier</key><string>dev.tokrate.mac</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleName</key><string>Tokrate</string>
 <key>CFBundleDisplayName</key><string>Tokrate</string>
 <key>CFBundlePackageType</key><string>APPL</string>

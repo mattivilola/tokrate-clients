@@ -59,8 +59,8 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 - 240° sweep starting at 150° (lower-left) to 30° (lower-right).
 - Track: `line` color, round caps. Active arc: `arc-start → arc-end` gradient up to the value.
 - Needle: `needle` color, round cap, hub dot in `needle`; drawn only when a value exists.
-- Readout centred below the hub: large tabular number + unit `tok/s` on the next line in `muted`.
-- Scale: `max(100, ceil(max visible value / 50) * 50)`; label only 0 and max.
+- Readout sits in the open lower segment of the arc, fully below the hub: large tabular number + unit `tok/s` on the next line in `muted`. The needle (length ≈ radius − 14) and hub never overlap the readout.
+- Scale: the "nice" ceiling of 1.25 × the largest median within the selected value's measurement group (same coding tool, metric version and source kind), using steps 20, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000; minimum 20. Label only 0 and max. Values from other measurement definitions never stretch the scale.
 - Empty state: track only, readout "—", caption "Waiting for a completed turn".
 - One eased transition (≈400 ms) when the value changes; none under `prefers-reduced-motion`.
 
@@ -76,6 +76,7 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 | Use | Instead of |
 |---|---|
 | **Turn speed** · `tok/s` | whole-turn throughput, t/s, tokens / whole-turn second |
+| Measurement group names: **Codex · Turn speed**, **Claude Code · Turn speed**, **Claude Code · Subagent turn speed**, **Grok Build · Work-turn speed** | "Whole-turn throughput", "Transcript-observed turn throughput" (the precise definition lives in the ⓘ explanation) |
 | **First token** · `s` | TTFT, reported first-token wait |
 | **Turns** | eligible turns, samples |
 | **Contributors** | reporting installations, reporting keys (public); admin may say "reporting installations" |

@@ -8,66 +8,37 @@ struct SharingView: View {
     var compact = true
     var showToggle = true
     var showConsentDisclosure = true
+    /// Draw the card chrome; turn off when placed inside another card or form.
+    var framed = true
     var checkForUpdates: (() -> Void)?
     private var sharing: SharingSession { preferences.session }
 
     var body: some View {
-        Group {
-            if showConsentDisclosure && preferences.isConsentDisclosureVisible {
-                consentDisclosure
-            } else {
-                sharingStatus
-            }
-        }
-        .dashboardCard(padding: 12)
-    }
-
-    private var consentDisclosure: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield").font(.system(size: 19)).foregroundStyle(.teal)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Choose whether to contribute").font(.system(size: 12, weight: .semibold))
-                    Text("Local monitoring and history work either way.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
-            Text("Tokrate sends eligible completed-turn measurements to its community service: a rounded 5-minute time, client and app/parser/metric versions, model, provider, reasoning effort, source kind, token counts, turn duration, and TTFT when available.")
-                .font(.system(size: 10)).fixedSize(horizontal: false, vertical: true)
-            Text("Uploads contain no names, prompts, responses, code, or local session IDs. Each sample has a random ID and uploads use a stable public-key pseudonym, so records can be linked over time.")
-                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("Early community data may include aggregates based on a single install.")
-                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("You can turn sharing off any time. Tokrate stops new contributions and cancels unsent samples; local monitoring continues, and measurements already sent may remain in community data.")
-                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 12) {
-                Button("Yes, let's contribute") { preferences.consentToShare() }
-                    .buttonStyle(.borderedProminent).tint(.teal)
-                Button("Only for local use") { preferences.chooseLocalOnly() }
-                    .buttonStyle(.bordered)
-                Spacer(minLength: 0)
-                consentLinks
-            }
+        if framed {
+            content.dashboardCard(padding: 14)
+        } else {
+            content
         }
     }
 
-    private var consentLinks: some View {
-        HStack(spacing: 10) {
-            Link("Privacy", destination: URL(string: "https://tokrate.dev/privacy")!)
-            Link("Terms", destination: URL(string: "https://tokrate.dev/terms")!)
+    @ViewBuilder
+    private var content: some View {
+        if showConsentDisclosure && preferences.isConsentDisclosureVisible {
+            ConsentDisclosureView(preferences: preferences, spacious: !compact)
+        } else {
+            sharingStatus.foregroundStyle(DashboardStyle.ink)
         }
-        .font(.system(size: 9))
     }
 
     private var sharingStatus: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(systemName: preferences.isSharingRequested ? "globe.americas.fill" : "lock.shield")
-                    .font(.system(size: 20)).foregroundStyle(.teal)
+                    .font(.system(size: 20)).foregroundStyle(DashboardStyle.accent)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Share with community").font(.system(size: 12, weight: .semibold))
+                    Text("Share with community").font(DashboardStyle.Typography.bodyEmphasis).foregroundStyle(DashboardStyle.ink)
                     Text(preferences.isSharingRequested ? (sharing.isEnabled ? "On · new turn measurements only" : "On · sharing needs attention") : "Off · your measurements stay local")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                 }
                 Spacer(minLength: 4)
                 if showToggle && !preferences.isConsentDisclosureVisible {
@@ -75,20 +46,20 @@ struct SharingView: View {
                         get: { preferences.isSharingRequested },
                         set: { preferences.setSharingEnabled($0) }
                     ))
-                    .toggleStyle(.switch).labelsHidden().tint(.teal)
+                    .toggleStyle(.switch).labelsHidden().tint(DashboardStyle.accent)
                     .accessibilityHint("Turning on opens the sharing notice. Turning off stops future contributions and cancels unsent samples; local monitoring continues.")
                 }
             }
             if preferences.isSharingRequested {
                 VStack(alignment: .leading, spacing: 7) {
                     Text(sharing.status + (sharing.pendingCount > 0 ? " · \(sharing.pendingCount) pending" : ""))
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                     if sharing.requiresUpdate {
                         Button("Check for Updates…") { checkForUpdates?() }
-                            .buttonStyle(.link).font(.caption)
+                            .buttonStyle(.link).font(DashboardStyle.Typography.footnote).tint(DashboardStyle.accent)
                             .disabled(checkForUpdates == nil)
                     } else if !sharing.isEnabled {
-                        Button("Retry sharing") { preferences.retry() }.buttonStyle(.link).font(.caption)
+                        Button("Retry sharing") { preferences.retry() }.buttonStyle(.link).font(DashboardStyle.Typography.footnote).tint(DashboardStyle.accent)
                     } else if let board = sharing.board {
                         boardContent(board)
                     }
@@ -96,9 +67,9 @@ struct SharingView: View {
             }
             HStack(alignment: .firstTextBaseline) {
                 Text(preferences.isSharingRequested ? "New eligible measurements only. Turn off any time." : "Off · local monitoring continues.")
-                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                 Spacer(minLength: 4)
-                consentLinks
+                ConsentLinks()
             }
         }
     }
@@ -106,30 +77,30 @@ struct SharingView: View {
     @ViewBuilder
     private func boardContent(_ board: GlobalBoard) -> some View {
         if !board.collectionEnabled {
-            Label("Community collection is paused", systemImage: "pause.circle").font(.caption)
+            Label("Community collection is paused", systemImage: "pause.circle").font(DashboardStyle.Typography.footnote)
         } else {
             HStack(spacing: 6) {
                 Text("Community publication · \(windowLabel(board.window))")
                 if board.state == "stale" {
-                    statusTag("Older data · signals may be outdated", color: .orange)
+                    statusTag("Older data · signals may be outdated", color: DashboardStyle.warn)
                 } else {
-                    statusTag("State: \(publicationStateLabel(board.state))", color: .secondary)
+                    statusTag("State: \(publicationStateLabel(board.state))", color: DashboardStyle.muted)
                 }
                 if board.state == "insufficient_data" || board.publicationMode == "early_data" {
-                    statusTag("Early data", color: .secondary)
+                    statusTag("Early data", color: DashboardStyle.muted)
                 }
                 Spacer(minLength: 0)
             }
-            .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+            .font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(DashboardStyle.muted)
             if let dataTime = timeLabel(board.dataAsOf ?? board.generatedAt) {
                 Text("Data as of \(dataTime)")
-                    .font(.system(size: 8)).foregroundStyle(.secondary)
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
             }
 
             if selection.isAllModels {
                 if board.cohorts.isEmpty {
                     Text("Community comparison is gathering data.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                 } else {
                     ForEach(board.cohorts) { cohort in communityRow(cohort, isStale: board.state == "stale") }
                     alertStatusAndRows(in: board, cohorts: board.cohorts)
@@ -138,7 +109,7 @@ struct SharingView: View {
                 let matches = board.cohorts.filter { exactlyMatches($0, target: target) }
                 if matches.isEmpty {
                 Text("Community data for this exact client, parser, metric, model, provider, version, and reasoning effort is not available yet.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
                     ForEach(matches) { cohort in communityRow(cohort, isStale: board.state == "stale") }
@@ -146,17 +117,17 @@ struct SharingView: View {
                 }
             } else {
                 Text("Choose a reported model and client version to see its community comparison.")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
             }
 
             if let methodology = board.methodology?.statistics ?? board.methodology?.source {
                 Text("Method: \(methodology)")
-                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).lineLimit(2)
             }
             Text("Geographic coverage unknown · answer quality not measured · streaming speed unavailable. No alert is not a health status.")
-                .font(.system(size: 9)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("Community rows use reported primary-client samples. Effort is shown when reported; speed tier and workload are uncontrolled.")
-                .font(.system(size: 9)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -177,13 +148,13 @@ struct SharingView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Text(cohort.model).lineLimit(1)
-                Text("· \(cohort.provider)").foregroundStyle(.secondary).lineLimit(1)
+                Text("· \(cohort.provider)").foregroundStyle(DashboardStyle.muted).lineLimit(1)
                 Spacer(minLength: 4)
                 Text(cohort.medianThroughput.map { String(format: "%.1f t/s", $0) } ?? "—")
                     .monospacedDigit().fontWeight(.medium)
             }
             Text("\(cohort.client ?? "client unknown") · client \(cohort.clientVersion ?? "version unknown") · reasoning effort \(cohort.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown")")
-                .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).lineLimit(1).truncationMode(.middle)
             HStack(spacing: 4) {
                 Spacer(minLength: 4)
                 if let minimum = cohort.minThroughput, let maximum = cohort.maxThroughput {
@@ -193,8 +164,8 @@ struct SharingView: View {
                 Text("· \(throughputCountLabel(cohort))")
                     .monospacedDigit()
             }
-            .foregroundStyle(.secondary)
-            .font(.system(size: 9))
+            .foregroundStyle(DashboardStyle.muted)
+            .font(DashboardStyle.Typography.caption)
             if let median = cohort.medianTtftMs {
                 HStack(spacing: 4) {
                     Text("TTFT median \(String(format: "%.0f", median)) ms")
@@ -203,7 +174,7 @@ struct SharingView: View {
                     }
                     Text("· \(ttftCountLabel(cohort))")
                 }
-                .font(.system(size: 9)).foregroundStyle(.secondary).monospacedDigit()
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).monospacedDigit()
             }
             if let comparison = cohort.comparison {
                 communityComparison(comparison, isStale: isStale)
@@ -213,7 +184,7 @@ struct SharingView: View {
                 if let signal = signals.ttft { signalRow("TTFT trend", signal: signal, unit: "ms", isStale: isStale) }
             }
         }
-        .font(.system(size: 10))
+        .font(DashboardStyle.Typography.caption)
         .padding(.vertical, 3)
     }
 
@@ -227,7 +198,7 @@ struct SharingView: View {
         let alerts = matchingAlerts(in: board, cohorts: cohorts)
         if alerts.isEmpty {
             Text(board.state == "stale" ? "No active alert in this older snapshot. This does not confirm provider health." : "No active published alert. This does not confirm provider health.")
-                .font(.system(size: 9)).foregroundStyle(.secondary)
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
         } else {
             ForEach(alerts) { alert in alertRow(alert) }
         }
@@ -236,7 +207,7 @@ struct SharingView: View {
     private func communityComparison(_ comparison: GlobalBoard.Comparison, isStale: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(isStale ? "Community · older snapshot · current vs previous period" : "Community · current vs previous period")
-                .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+                .font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(DashboardStyle.muted)
             if let throughput = comparison.throughput {
                 comparisonLine("Throughput", metric: throughput, unit: "t/s", digits: 1)
             }
@@ -250,27 +221,27 @@ struct SharingView: View {
     private func comparisonLine(_ title: String, metric: GlobalBoard.ComparisonMetric, unit: String, digits: Int) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("\(title): \(periodValue(metric.current, unit: unit, digits: digits)) vs \(periodValue(metric.previous, unit: unit, digits: digits)) · \(percent(metric.changePercent))")
-                .font(.system(size: 9, weight: .medium)).monospacedDigit().fixedSize(horizontal: false, vertical: true)
+                .font(DashboardStyle.Typography.captionEmphasis).monospacedDigit().fixedSize(horizontal: false, vertical: true)
             Text("Current \(coverage(metric.current)) · previous \(coverage(metric.previous)) · \(availability(metric.availability))")
-                .font(.system(size: 8)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func signalRow(_ title: String, signal: GlobalBoard.Signal, unit: String, isStale: Bool) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("\(title): \(isStale ? "older snapshot · " : "")\(signalStateLabel(signal.state))")
-                .font(.system(size: 9, weight: .medium))
+                .font(DashboardStyle.Typography.captionEmphasis)
             Text("\(isStale ? "Latest 5-min bucket in this older snapshot" : "Latest 5-min bucket") · \(countLabel(signal.recentTurns, noun: "turns")) · \(countLabel(signal.recentContributors, noun: "contributors") )")
-                .font(.system(size: 8)).monospacedDigit().foregroundStyle(.secondary)
+                .font(DashboardStyle.Typography.caption).monospacedDigit().foregroundStyle(DashboardStyle.muted)
             Text("Baseline · \(countLabel(signal.baselineBuckets, noun: "buckets")) · \(countLabel(signal.baselineDays, noun: "days")) · \(signal.baselineHours.map { String(format: "%.0f hours", $0) } ?? "hours unavailable")")
-                .font(.system(size: 8)).monospacedDigit().foregroundStyle(.secondary)
+                .font(DashboardStyle.Typography.caption).monospacedDigit().foregroundStyle(DashboardStyle.muted)
             HStack(spacing: 3) {
                 if let change = signal.changePercent { Text("\(String(format: "%+.1f%%", change)) vs baseline") }
                 if let median = signal.baselineMedian { Text("· baseline median \(String(format: "%.1f", median)) \(unit)") }
             }
-            .font(.system(size: 8)).monospacedDigit().foregroundStyle(.secondary)
+            .font(DashboardStyle.Typography.caption).monospacedDigit().foregroundStyle(DashboardStyle.muted)
             if let reason = signal.reason {
-                Text(signalReasonLabel(reason)).font(.system(size: 8)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(signalReasonLabel(reason)).font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.top, 3)
@@ -349,7 +320,7 @@ struct SharingView: View {
 
     private func alertRow(_ alert: GlobalBoard.Alert) -> some View {
         Label(alert.message ?? "\(alert.model ?? "Community") · \(alert.metric == "ttft" ? "TTFT" : "turn throughput"): \((alert.state ?? "change detected").replacingOccurrences(of: "_", with: " "))", systemImage: "exclamationmark.circle")
-            .font(.system(size: 10)).foregroundStyle(.orange)
+            .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.warn)
     }
 
     private func windowLabel(_ window: String) -> String {
@@ -373,7 +344,7 @@ struct SharingView: View {
     }
 
     private func statusTag(_ title: String, color: Color) -> some View {
-        Text(title).font(.system(size: 8, weight: .semibold)).foregroundStyle(color)
+        Text(title).font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(color)
             .padding(.horizontal, 5).padding(.vertical, 2)
             .background(color.opacity(0.1), in: Capsule())
     }

@@ -1,99 +1,117 @@
 import SwiftUI
 
+/// Median/min/max cards, local period comparison and the personal speed signal.
 struct SummaryView: View {
     let snapshot: DashboardSnapshot
+    /// Compact content sits on insets inside another surface (popover details).
+    var compact = false
+
+    private var speedTitle: String { snapshot.selectedCohort?.measurement.title ?? "Turn speed" }
 
     var body: some View {
         VStack(spacing: 8) {
-            if snapshot.range == .week {
-                HStack(spacing: 8) {
-                    metric(
-                        title: "7 days \(snapshot.throughputLabel) median",
-                        stats: snapshot.throughput,
-                        unit: "t/s",
-                        digits: 1,
-                        countLabel: "eligible turns"
-                    )
-                    metric(
-                        title: "7 days TTFT median",
-                        stats: snapshot.ttft,
-                        unit: "s",
-                        digits: 2,
-                        countLabel: "available values"
-                    )
-                }
+            HStack(spacing: 8) {
+                metric(
+                    title: "\(snapshot.range.title) · \(speedTitle) median",
+                    stats: snapshot.throughput,
+                    unit: "tok/s",
+                    digits: 1,
+                    countLabel: "turns",
+                    help: "Median and observed range for completed turns with at least 20 output tokens. Whole-turn time includes tool work, waiting, and reasoning."
+                )
+                metric(
+                    title: "\(snapshot.range.title) · First token median",
+                    stats: snapshot.ttft,
+                    unit: "s",
+                    digits: 2,
+                    countLabel: "values",
+                    help: "Median and observed range of source-reported first-token wait; first-visible-text semantics are unverified."
+                )
             }
             if let comparison = snapshot.localPeriodComparison {
-                localComparison(comparison, throughputLabel: snapshot.throughputLabel)
+                localComparison(comparison)
             }
         }
     }
 
-    private func metric(title: String, stats: MetricStats, unit: String, digits: Int, countLabel: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(format(stats.median, digits: digits))
-                    .font(.system(size: 19, weight: .semibold, design: .rounded)).monospacedDigit()
-                Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            Text("min \(format(stats.minimum, digits: digits)) · max \(format(stats.maximum, digits: digits)) · n=\(stats.count)")
-                .font(.system(size: 9)).monospacedDigit().foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
-            Text(countLabel).font(.system(size: 8)).foregroundStyle(.tertiary).lineLimit(1)
+    @ViewBuilder
+    private func container<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if compact {
+            content().dashboardInset(padding: 10)
+        } else {
+            content().dashboardCard(padding: 14)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func metric(title: String, stats: MetricStats, unit: String, digits: Int, countLabel: String, help: String) -> some View {
+        container {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(DashboardStyle.muted)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text(format(stats.median, digits: digits))
+                        .font(DashboardStyle.Typography.value(size: 22)).monospacedDigit().foregroundStyle(DashboardStyle.ink)
+                    Text(unit).font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
+                }
+                Text("min \(format(stats.minimum, digits: digits)) · max \(format(stats.maximum, digits: digits)) · n=\(stats.count) \(countLabel)")
+                    .font(DashboardStyle.Typography.caption.monospacedDigit()).foregroundStyle(DashboardStyle.muted)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
         .accessibilityElement(children: .combine)
-        .help(title.localizedCaseInsensitiveContains("TTFT") ? "Median and observed range of source-reported TTFT values; first-visible-text semantics are unverified." : "Median and observed range for completed turns with at least 20 output tokens. Whole-turn time includes tool work, waiting, and reasoning.")
+        .help(help)
     }
 
     private func format(_ value: Double?, digits: Int) -> String {
         value.map { String(format: "%.*f", digits, $0) } ?? "—"
     }
 
-    private func localComparison(_ comparison: LocalPeriodComparison, throughputLabel: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Selected model · local medians")
-                .font(.system(size: 10, weight: .semibold))
-            HStack(spacing: 4) {
-                Text("Period").frame(maxWidth: .infinity, alignment: .leading)
-                Text(throughputLabel).lineLimit(1).minimumScaleFactor(0.7).frame(width: 142, alignment: .trailing)
-                Text("TTFT").frame(width: 94, alignment: .trailing)
+    private func localComparison(_ comparison: LocalPeriodComparison) -> some View {
+        container {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Selected model · local medians")
+                    .font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.ink)
+                HStack(spacing: 4) {
+                    Text("Period").frame(maxWidth: .infinity, alignment: .leading)
+                    Text(speedTitle).lineLimit(1).minimumScaleFactor(0.7).frame(width: 118, alignment: .trailing)
+                    Text("First token").frame(width: 84, alignment: .trailing)
+                }
+                .font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(DashboardStyle.muted)
+                comparisonRow("Recent 15 min", stats: comparison.recent15Minutes)
+                comparisonRow("Last 24 hours", stats: comparison.last24Hours)
+                comparisonRow("Previous 24 hours", stats: comparison.previous24Hours)
+                Text("24 h change vs previous 24 h: \(speedTitle) \(change(comparison.throughputChangePercent)) · first token \(change(comparison.ttftChangePercent))")
+                    .font(DashboardStyle.Typography.footnoteEmphasis.monospacedDigit()).foregroundStyle(DashboardStyle.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Each metric has its own turn count. Change needs at least 5 values per period and a non-zero previous median.")
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
+                if !compact, let trend = snapshot.personalTrend {
+                    Label(personalSignalTitle(trend.status), systemImage: trend.status == .slower ? "exclamationmark.circle.fill" : "chart.line.uptrend.xyaxis")
+                        .font(DashboardStyle.Typography.footnoteEmphasis)
+                        .foregroundStyle(trend.status == .slower ? DashboardStyle.warn : DashboardStyle.muted)
+                        .help("A personal whole-turn speed trend only; it does not measure answer quality or confirm provider health.")
+                }
+                if comparison.previousRange == nil {
+                    Text("Previous 7 days unavailable · local history retains 7 days.")
+                        .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
+                }
             }
-            .font(.system(size: 8, weight: .medium)).foregroundStyle(.tertiary)
-            comparisonRow("Recent 15 min", stats: comparison.recent15Minutes)
-            comparisonRow("Last 24 hours", stats: comparison.last24Hours)
-            comparisonRow("Previous 24 hours", stats: comparison.previous24Hours)
-            Text("24 h change vs previous 24 h: \(throughputLabel) \(change(comparison.throughputChangePercent)) · TTFT \(change(comparison.ttftChangePercent))")
-                .font(.system(size: 9, weight: .medium)).monospacedDigit()
-            Text("Each metric has its own turn count. Change needs at least 5 values per period and a non-zero previous median.")
-                .font(.system(size: 8)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if let trend = snapshot.personalTrend {
-                Label(personalSignalTitle(trend.status), systemImage: trend.status == .slower ? "exclamationmark.circle.fill" : "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(trend.status == .slower ? .orange : .secondary)
-                    .help("A personal whole-turn speed trend only; it does not measure answer quality or confirm provider health.")
-            }
-            if comparison.previousRange == nil {
-                Text("Previous 7 days unavailable · local history retains 7 days.")
-                    .font(.system(size: 8)).foregroundStyle(.secondary)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(9)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func comparisonRow(_ title: String, stats: PeriodMetricStats) -> some View {
         HStack(spacing: 4) {
-            Text(title).frame(maxWidth: .infinity, alignment: .leading)
-            Text("\(format(stats.throughput.median, digits: 1)) t/s · n=\(stats.throughput.count)")
-                .frame(width: 142, alignment: .trailing)
+            Text(title).foregroundStyle(DashboardStyle.ink).frame(maxWidth: .infinity, alignment: .leading)
+            Text("\(format(stats.throughput.median, digits: 1)) tok/s · n=\(stats.throughput.count)")
+                .frame(width: 118, alignment: .trailing)
             Text("\(format(stats.ttft.median, digits: 2)) s · n=\(stats.ttft.count)")
-                .frame(width: 94, alignment: .trailing)
+                .frame(width: 84, alignment: .trailing)
         }
-        .font(.system(size: 8)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.75)
+        .font(DashboardStyle.Typography.caption).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
+        .foregroundStyle(DashboardStyle.muted)
         .accessibilityElement(children: .combine)
     }
 

@@ -55,12 +55,12 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
 
     public static func throughputLabel(client: String, parserVersion: String, metricVersion: String) -> String {
         guard isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion) else {
-            return "Turn throughput"
+            return "Turn speed"
         }
         return switch metricVersion {
-        case "grok-observed-work-turn-v1": "Work-turn throughput · includes subagent output"
+        case "grok-observed-work-turn-v1": "Work-turn speed"
         case "claude-observed-subagent-turn-v1": "Subagent turn speed"
-        default: "Turn throughput"
+        default: "Turn speed"
         }
     }
 

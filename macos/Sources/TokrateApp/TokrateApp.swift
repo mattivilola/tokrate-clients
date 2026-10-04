@@ -4,39 +4,50 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let historyStore = HistoryStore()
     let updates = AppUpdates()
-    private var initialConsentWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep the menu-bar utility quiet except when consent needs a visible first-run surface.
         NSApp.setActivationPolicy(.accessory)
         historyStore.startAutomatically()
-        presentConsentDashboardIfNeeded()
+        presentOnboardingIfNeeded()
     }
 
+    /// Reopens onboarding while the sharing choice is still pending. Returns false when it is not,
+    /// so callers fall through to their normal destination.
     func showInitialConsentDashboard() -> Bool {
-        guard let initialConsentWindow else { return false }
-        initialConsentWindow.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        guard historyStore.sharingPreferences.isConsentDisclosureVisible else { return false }
+        presentOnboarding()
         return true
     }
 
-    private func presentConsentDashboardIfNeeded() {
+    private func presentOnboardingIfNeeded() {
         guard historyStore.sharingPreferences.isConsentDisclosureVisible else { return }
+        presentOnboarding()
+    }
+
+    private func presentOnboarding() {
+        if let onboardingWindow {
+            onboardingWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 940, height: 780),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(origin: .zero, size: NSSize(width: OnboardingView.size.width, height: OnboardingView.size.height)),
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        window.title = "Tokrate"
-        window.minSize = NSSize(width: 820, height: 680)
+        window.title = "Welcome to Tokrate"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(
-            rootView: HistoryView(store: historyStore, updates: updates)
-                .frame(minWidth: 820, minHeight: 680)
+            rootView: OnboardingView(store: historyStore, onFinish: { [weak window] in window?.close() })
         )
         window.center()
-        initialConsentWindow = window
+        onboardingWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -57,7 +68,7 @@ struct TokrateApp: App {
             )
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "speedometer")
+                Image(nsImage: MenuBarIcon.image)
                 if showMenuBarSpeed {
                     Text(historyStore.menuBarTitle).monospacedDigit()
                 }
@@ -81,7 +92,7 @@ struct TokrateApp: App {
         }
 
         Settings {
-            UpdateSettingsView(updates: appDelegate.updates)
+            SettingsView(store: historyStore, updates: appDelegate.updates)
         }
     }
 }

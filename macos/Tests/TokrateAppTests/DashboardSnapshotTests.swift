@@ -146,7 +146,7 @@ final class DashboardSnapshotTests: XCTestCase {
 
         let openAIOnly = DashboardSnapshot(records: records, range: .day, selection: .all, now: now, providerFilter: "openai")
         XCTAssertEqual(openAIOnly.cohortSummaries.map(\.cohort.client), ["codex"])
-        XCTAssertEqual(ModelCohort(records[2]).throughputLabel, "Work-turn throughput · includes subagent output")
+        XCTAssertEqual(ModelCohort(records[2]).throughputLabel, "Work-turn speed")
         XCTAssertNil(records[2].ttftSeconds)
 
         for sort in [CohortComparisonSort.higherThroughput, .lowerTTFT] {
@@ -155,6 +155,25 @@ final class DashboardSnapshotTests: XCTestCase {
                 "claude-observed-turn-v1", "grok-observed-work-turn-v1", "turn-v1"
             ])
         }
+    }
+
+    func testClaudeSubagentCohortsStaySeparateSelectableAndLabeled() {
+        let records = [
+            metric("primary", secondsAgo: 10, model: "claude-sonnet-5-5", provider: "unknown", clientVersion: nil, rate: 20, client: "claude-code", parserVersion: "claude-transcript-v2", metricVersion: "claude-observed-turn-v1"),
+            metric("subagent", secondsAgo: 9, model: "claude-sonnet-5-5", provider: "unknown", clientVersion: nil, rate: 40, client: "claude-code", parserVersion: "claude-transcript-v2", metricVersion: "claude-observed-subagent-turn-v1")
+        ]
+        let all = DashboardSnapshot(records: records, range: .day, selection: .all, now: now)
+        XCTAssertEqual(all.cohortSummaries.count, 2)
+        XCTAssertEqual(Set(all.cohortSummaries.map(\.cohort.id)).count, 2)
+        XCTAssertEqual(Set(all.cohortSummaries.map(\.cohort.throughputLabel)), ["Turn speed", "Subagent turn speed"])
+        XCTAssertEqual(Set(all.cohortSummaries.compactMap(\.cohort.communityBoardID)).count, 2)
+
+        let subagent = ModelCohort(records[1])
+        let scoped = DashboardSnapshot(records: records, range: .day, selection: .cohort(subagent), now: now)
+        XCTAssertEqual(scoped.throughputLabel, "Subagent turn speed")
+        XCTAssertEqual(scoped.latest?.id, "subagent")
+        XCTAssertEqual(subagent.throughputExplanation, "Subagent task prompt to final answer, including tools and waiting.")
+        XCTAssertEqual(DashboardSelection.restored(from: DashboardSelection.cohort(subagent).persistenceValue), .cohort(subagent))
     }
 
     func testLocalPeriodComparisonKeepsMetricCountsIndependentAndRequiresFiveValues() {

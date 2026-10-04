@@ -2,6 +2,25 @@ import Foundation
 import Observation
 import TokrateCore
 
+/// One supported coding tool and whether its session folder was found.
+struct SourceStatus: Identifiable, Equatable, Sendable {
+    enum Availability: Equatable, Sendable {
+        case found
+        case notFound
+    }
+
+    let client: String
+    let availability: Availability
+    /// Human-readable detail such as "12 session files"; nil when nothing more is known.
+    let detail: String?
+    /// The folder Tokrate reads, with the home directory abbreviated.
+    let path: String
+
+    var id: String { client }
+    var title: String { ModelCohort.clientTitle(client) }
+    var isFound: Bool { availability == .found }
+}
+
 @MainActor
 @Observable
 final class HistoryStore {
@@ -13,23 +32,25 @@ final class HistoryStore {
         let records: [TurnMetric]
     }
 
-    let sharingPreferences = SharingPreferences(session: SharingSession(identity: KeychainIdentity()))
+    let sharingPreferences: SharingPreferences
     var sharing: SharingSession { sharingPreferences.session }
     private(set) var history: MetricHistory
     private(set) var isMonitoring = false
     private(set) var errorMessage: String?
     private(set) var hasCustomFolder = false
     private(set) var sourceStatus = "Waiting for session folders"
+    private(set) var sourceStatuses: [SourceStatus] = []
     var dashboardSelection: DashboardSelection {
-        didSet { UserDefaults.standard.set(dashboardSelection.persistenceValue, forKey: Self.selectionDefaultsKey) }
+        didSet { defaults.set(dashboardSelection.persistenceValue, forKey: Self.selectionDefaultsKey) }
     }
     var clientFilter: String? {
-        didSet { Self.persistFilter(clientFilter, key: Self.clientFilterDefaultsKey) }
+        didSet { Self.persistFilter(clientFilter, key: Self.clientFilterDefaultsKey, defaults: defaults) }
     }
     var providerFilter: String? {
-        didSet { Self.persistFilter(providerFilter, key: Self.providerFilterDefaultsKey) }
+        didSet { Self.persistFilter(providerFilter, key: Self.providerFilterDefaultsKey, defaults: defaults) }
     }
 
+    @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let persistenceURL: URL
     @ObservationIgnored private var monitor: CodexSessionMonitor?
     @ObservationIgnored private var claudeMonitor: ClaudeSessionMonitor?
@@ -64,7 +85,7 @@ final class HistoryStore {
         filteredRecords.max { $0.completedAt < $1.completedAt }.map(ModelCohort.init)
     }
     var menuBarTitle: String {
-        guard isMonitoring else { return "— t/s" }
+        guard isMonitoring else { return "— tok/s" }
         if dashboardSelection.isAllModels { return "Compare" }
         let selectedCohort: ModelCohort?
         switch dashboardSelection {
@@ -74,44 +95,60 @@ final class HistoryStore {
         }
         guard let selectedCohort,
               let latest = filteredRecords.first(where: { ModelCohort($0) == selectedCohort && $0.outputTokens >= 20 && $0.turnThroughputTPS.isFinite && $0.turnThroughputTPS >= 0 }) else {
-            return "— t/s"
+            return "— tok/s"
         }
         let age = Date.now.timeIntervalSince(latest.completedAt)
-        guard age >= 0, age <= 900, latest.turnThroughputTPS.isFinite, latest.turnThroughputTPS >= 0 else { return "— t/s" }
-        return String(format: "%.1f t/s", latest.turnThroughputTPS)
+        guard age >= 0, age <= 900, latest.turnThroughputTPS.isFinite, latest.turnThroughputTPS >= 0 else { return "— tok/s" }
+        return String(format: "%.1f tok/s", latest.turnThroughputTPS)
     }
     var folderDescription: String { sourceStatus }
 
-    init() {
-        dashboardSelection = DashboardSelection.restored(from: UserDefaults.standard.string(forKey: Self.selectionDefaultsKey))
-        clientFilter = UserDefaults.standard.string(forKey: Self.clientFilterDefaultsKey)
-        providerFilter = UserDefaults.standard.string(forKey: Self.providerFilterDefaultsKey)
+    /// The defaults read the user's real preferences, history and session folders. Every parameter
+    /// is a seam for tests and offscreen previews, which supply synthetic data and empty folders.
+    init(
+        persistenceURL: URL? = nil,
+        codexFolder: URL? = nil,
+        claudeProjectsFolder: URL? = nil,
+        grokSessionsFolder: URL? = nil,
+        sharingPreferences: SharingPreferences? = nil,
+        defaults: UserDefaults = .standard,
+        initialRecords: [TurnMetric]? = nil
+    ) {
+        self.defaults = defaults
+        self.sharingPreferences = sharingPreferences
+            ?? SharingPreferences(session: SharingSession(identity: KeychainIdentity()))
+        dashboardSelection = DashboardSelection.restored(from: defaults.string(forKey: Self.selectionDefaultsKey))
+        clientFilter = defaults.string(forKey: Self.clientFilterDefaultsKey)
+        providerFilter = defaults.string(forKey: Self.providerFilterDefaultsKey)
         let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tokrate", isDirectory: true)
-        persistenceURL = supportDirectory.appendingPathComponent("history-v1.json")
-        selectedFolder = FileManager.default.homeDirectoryForCurrentUser
+        self.persistenceURL = persistenceURL ?? supportDirectory.appendingPathComponent("history-v1.json")
+        selectedFolder = codexFolder ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/sessions", isDirectory: true)
         let environment = ProcessInfo.processInfo.environment
         let claudeConfig = Self.configuredDirectory(
             override: environment["CLAUDE_CONFIG_DIR"],
             fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
         )
-        claudeProjectsFolder = claudeConfig.appendingPathComponent("projects", isDirectory: true)
+        self.claudeProjectsFolder = claudeProjectsFolder ?? claudeConfig.appendingPathComponent("projects", isDirectory: true)
         let grokHome = Self.configuredDirectory(
             override: environment["GROK_HOME"],
             fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok", isDirectory: true)
         )
-        grokSessionsFolder = grokHome.appendingPathComponent("sessions", isDirectory: true)
+        self.grokSessionsFolder = grokSessionsFolder ?? grokHome.appendingPathComponent("sessions", isDirectory: true)
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let data = try? Data(contentsOf: persistenceURL),
+        if let initialRecords {
+            history = MetricHistory(records: initialRecords)
+        } else if let data = try? Data(contentsOf: self.persistenceURL),
            let persisted = try? decoder.decode(PersistedHistory.self, from: data),
            persisted.schemaVersion == 1 {
             history = MetricHistory(records: persisted.records)
         } else {
             history = MetricHistory()
         }
+        updateSourceStatus(claude: nil, grok: nil)
     }
 
     func startAutomatically() {
@@ -127,6 +164,7 @@ final class HistoryStore {
         securityScopedFolder = didStartAccess ? url : nil
         hasCustomFolder = true
         errorMessage = nil
+        updateSourceStatus(claude: nil, grok: nil)
     }
 
     func startMonitoring() {
@@ -223,6 +261,33 @@ final class HistoryStore {
         let grokText = grok.map { $0.rootAvailable ? "Grok Build \($0.sessions) sessions" : "Grok Build folder not found" }
             ?? (FileManager.default.fileExists(atPath: grokSessionsFolder.path) ? "Grok Build available" : "Grok Build folder not found")
         sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText)"
+
+        let claudeFound = claude?.rootAvailable ?? FileManager.default.fileExists(atPath: claudeProjectsFolder.path)
+        let grokFound = grok?.rootAvailable ?? FileManager.default.fileExists(atPath: grokSessionsFolder.path)
+        sourceStatuses = [
+            SourceStatus(
+                client: TurnMetric.codexClient,
+                availability: codexAvailable ? .found : .notFound,
+                detail: hasCustomFolder ? "Custom folder" : nil,
+                path: Self.displayPath(selectedFolder)
+            ),
+            SourceStatus(
+                client: "claude-code",
+                availability: claudeFound ? .found : .notFound,
+                detail: claude.flatMap { $0.rootAvailable ? "\($0.files) session files" : nil },
+                path: Self.displayPath(claudeProjectsFolder)
+            ),
+            SourceStatus(
+                client: "grok-build",
+                availability: grokFound ? .found : .notFound,
+                detail: grok.flatMap { $0.rootAvailable ? "\($0.sessions) sessions" : nil },
+                path: Self.displayPath(grokSessionsFolder)
+            )
+        ]
+    }
+
+    private static func displayPath(_ url: URL) -> String {
+        (url.path as NSString).abbreviatingWithTildeInPath
     }
 
     private static func configuredDirectory(override: String?, fallback: URL) -> URL {
@@ -231,8 +296,8 @@ final class HistoryStore {
         return url.standardizedFileURL
     }
 
-    private static func persistFilter(_ value: String?, key: String) {
-        if let value { UserDefaults.standard.set(value, forKey: key) }
-        else { UserDefaults.standard.removeObject(forKey: key) }
+    private static func persistFilter(_ value: String?, key: String, defaults: UserDefaults) {
+        if let value { defaults.set(value, forKey: key) }
+        else { defaults.removeObject(forKey: key) }
     }
 }

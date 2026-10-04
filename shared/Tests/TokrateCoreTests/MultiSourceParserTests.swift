@@ -99,7 +99,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(metric.outputTokens, 160)
         XCTAssertEqual(metric.durationSeconds, 5, accuracy: 0.001)
         XCTAssertEqual(metric.turnThroughputTPS, 32, accuracy: 0.001)
-        XCTAssertEqual(metric.throughputLabel, "Work-turn throughput · includes subagent output")
+        XCTAssertEqual(metric.throughputLabel, "Work-turn speed")
         XCTAssertEqual(metric.provider, "unknown")
         XCTAssertNil(metric.clientVersion)
         XCTAssertNil(metric.ttftSeconds)

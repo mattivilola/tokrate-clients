@@ -5,6 +5,9 @@ enum DashboardRange: String, CaseIterable, Identifiable {
     case day, week
     var id: String { rawValue }
     var title: String { self == .day ? "24 hours" : "7 days" }
+    var shortTitle: String { self == .day ? "24 h" : "7 d" }
+    /// Number of chart buckets across the range.
+    var bucketCount: Int { self == .day ? 48 : 56 }
     var duration: TimeInterval { self == .day ? 86_400 : MetricHistory.retention }
 }
 
@@ -14,15 +17,15 @@ enum CohortComparisonSort: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .recent: "Most recent"
-        case .higherThroughput: "Higher throughput"
-        case .lowerTTFT: "Lower TTFT"
+        case .higherThroughput: "Faster turn speed"
+        case .lowerTTFT: "Faster first token"
         }
     }
     var shortTitle: String {
         switch self {
         case .recent: "Recent"
-        case .higherThroughput: "Throughput"
-        case .lowerTTFT: "TTFT"
+        case .higherThroughput: "Turn speed"
+        case .lowerTTFT: "First token"
         }
     }
 }
@@ -138,20 +141,15 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     }
 
     private var isSupportedTuple: Bool {
-        switch (client, parserVersion, metricVersion) {
-        case ("codex", "codex-rollout-v1", "turn-v1"),
-             ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),
-             ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"):
-            true
-        default:
-            false
-        }
+        TurnMetric.isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
     }
 
     var throughputLabel: String {
-        isSupportedTuple && metricVersion == "grok-observed-work-turn-v1"
-            ? "Work-turn throughput · includes subagent output"
-            : "Turn throughput"
+        TurnMetric.throughputLabel(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
+    }
+
+    var throughputExplanation: String {
+        TurnMetric.throughputExplanation(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
     }
 }
 
@@ -298,6 +296,11 @@ struct DashboardSnapshot {
     let selectedCohort: ModelCohort?
     let throughputLabel: String
     let latest: TurnMetric?
+    /// The selected cohort's latest eligible turn within local retention, independent of the range control.
+    let heroMetric: TurnMetric?
+    /// Largest 24 h median among cohorts sharing the hero turn's coding tool, metric version and
+    /// source kind. Sets the gauge scale; other measurement definitions never stretch it.
+    let gaugeGroupMedian: Double?
     let points: [Bucket]
     let turnCount: Int
     let throughput: MetricStats
@@ -338,7 +341,7 @@ struct DashboardSnapshot {
             resolvedCohort = nil
         }
         selectedCohort = resolvedCohort
-        throughputLabel = resolvedCohort?.throughputLabel ?? "Turn throughput"
+        throughputLabel = resolvedCohort?.throughputLabel ?? "Turn speed"
 
         let selectedRetained = resolvedCohort.map { cohort in
             retained.filter { ModelCohort($0) == cohort }
@@ -362,6 +365,8 @@ struct DashboardSnapshot {
             medianRate = nil
             medianTTFT = nil
             latest = nil
+            heroMetric = nil
+            gaugeGroupMedian = nil
             points = []
             personalTrend = nil
             return
@@ -382,8 +387,11 @@ struct DashboardSnapshot {
         medianRate = throughput.median
         medianTTFT = ttft.median
         latest = eligible.max { $0.completedAt < $1.completedAt }
+        let hero = selectedRetained.filter(Self.isThroughputEligible).max { $0.completedAt < $1.completedAt }
+        heroMetric = hero
+        gaugeGroupMedian = hero.flatMap { Self.groupMedianMaximum(for: $0, in: records, now: now) }
 
-        let maximumBuckets = range == .day ? 48 : 56
+        let maximumBuckets = range.bucketCount
         let bucketWidth = max(1, range.duration / Double(maximumBuckets))
         var buckets: [Int: [Double]] = [:]
         for record in eligible {
@@ -405,6 +413,25 @@ struct DashboardSnapshot {
         personalTrend = hasKnownModelAndProvider
             ? Self.personalTrend(in: scopedRetained, now: now, calendar: calendar)
             : nil
+    }
+
+    /// The latest turn compared with the selected cohort's own 24 h median.
+    var speedDelta: SpeedDelta? {
+        SpeedDelta(latest: heroMetric?.turnThroughputTPS, median: localPeriodComparison?.last24Hours.throughput ?? MetricStats(values: []))
+    }
+
+    /// The largest 24 h median of any cohort in `hero`'s measurement group (same client, metric
+    /// version and source kind), over all supplied records regardless of the dashboard filters.
+    static func groupMedianMaximum(for hero: TurnMetric, in records: [TurnMetric], now: Date) -> Double? {
+        let start = now.addingTimeInterval(-86_400)
+        let group = records.filter {
+            $0.completedAt >= start && $0.completedAt <= now && isThroughputEligible($0)
+                && $0.client == hero.client && $0.metricVersion == hero.metricVersion && $0.sourceKind == hero.sourceKind
+        }
+        return Dictionary(grouping: group, by: ModelCohort.init)
+            .values
+            .compactMap { MetricStats(values: $0.map(\.turnThroughputTPS)).median }
+            .max()
     }
 
     static func median(_ values: [Double]) -> Double? { MetricStats(values: values).median }

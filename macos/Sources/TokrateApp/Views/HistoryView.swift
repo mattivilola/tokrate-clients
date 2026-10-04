@@ -1,111 +1,125 @@
 import Charts
 import SwiftUI
 import TokrateCore
-import UniformTypeIdentifiers
 
+/// The full history window: filters, a large gauge, the trend chart, summaries and the latest 500 turns.
 struct HistoryView: View {
     @Bindable var store: HistoryStore
     @ObservedObject var updates: AppUpdates
-    @State private var isChoosingFolder = false
     @State private var range: DashboardRange = .week
 
     var body: some View {
+        let now = Date.now
         let snapshot = DashboardSnapshot(
             records: store.records,
             range: range,
             selection: store.dashboardSelection,
+            now: now,
             clientFilter: store.clientFilter,
             providerFilter: store.providerFilter
         )
         ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            if store.sharingPreferences.isConsentDisclosureVisible {
-                SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, compact: false, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
-            }
-            ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
-            CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
-            if snapshot.selection.isAllModels {
-                CohortComparisonView(snapshot: snapshot, range: $range, compact: false)
-            } else {
-                HStack(alignment: .top, spacing: 18) {
-                    ThroughputGaugeView(metric: snapshot.latest, compact: false).frame(width: 340)
-                    VStack(spacing: 12) {
-                        TrendChartView(snapshot: snapshot, range: $range, compact: false)
-                        SummaryView(snapshot: snapshot)
-                        PersonalTrendView(trend: snapshot.personalTrend, reasoningEffort: snapshot.selectedCohort?.reasoningEffort)
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                if store.sharingPreferences.isConsentDisclosureVisible {
+                    SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, compact: false, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
+                }
+                HStack(alignment: .center, spacing: 10) {
+                    CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
+                    ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
+                        .fixedSize()
+                }
+                if snapshot.selection.isAllModels {
+                    CohortComparisonView(snapshot: snapshot, range: $range, compact: false) { cohort in
+                        store.dashboardSelection = .cohort(cohort)
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 18) {
+                        ThroughputGaugeView(
+                            metric: snapshot.heroMetric,
+                            compact: false,
+                            delta: snapshot.speedDelta,
+                            slowerThanUsual: snapshot.personalTrend?.status == .slower,
+                            groupMedian: snapshot.gaugeGroupMedian,
+                            now: now
+                        )
+                        .frame(width: 360)
+                        VStack(spacing: 14) {
+                            TrendChartView(snapshot: snapshot, range: $range, compact: false)
+                            SummaryView(snapshot: snapshot)
+                            PersonalTrendView(trend: snapshot.personalTrend, reasoningEffort: snapshot.selectedCohort?.reasoningEffort)
+                        }
                     }
                 }
-            }
-            SharingView(
-                preferences: store.sharingPreferences,
-                selection: store.dashboardSelection,
-                latestCohort: store.latestCohort,
-                compact: false,
-                showToggle: !store.sharingPreferences.isConsentDisclosureVisible,
-                showConsentDisclosure: false,
-                checkForUpdates: { updates.checkForUpdates() }
-            )
-            if let error = store.errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-            }
-            if snapshot.records.isEmpty {
-                ContentUnavailableView {
-                    Label(store.records.isEmpty ? "No turn history yet" : "No turns in this range", systemImage: "chart.xyaxis.line")
-                } description: {
-                    Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed turns from Codex, Claude Code, and Grok Build. Large histories may take a moment." : "Choose Start monitoring to read local session files. Prompts and responses are never retained.") : "Choose 7 days or select another client, provider, or model cohort to view its local turns.")
-                } actions: {
-                    Button("Start monitoring") { store.startMonitoring() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.isMonitoring)
+                SharingView(
+                    preferences: store.sharingPreferences,
+                    selection: store.dashboardSelection,
+                    latestCohort: store.latestCohort,
+                    compact: false,
+                    showToggle: !store.sharingPreferences.isConsentDisclosureVisible,
+                    showConsentDisclosure: false,
+                    checkForUpdates: { updates.checkForUpdates() }
+                )
+                if let error = store.errorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(DashboardStyle.Typography.body)
+                        .foregroundStyle(DashboardStyle.danger)
                 }
-                .frame(maxWidth: .infinity, minHeight: 180)
-            } else {
-                HStack {
-                    Text("Recent turns").font(.headline)
-                    Spacer()
-                    Text("Latest \(min(500, snapshot.records.count)) of \(snapshot.records.count.formatted()) · \(range.title.lowercased())")
-                        .font(.caption).foregroundStyle(.secondary)
+                if snapshot.records.isEmpty {
+                    ContentUnavailableView {
+                        Label(store.records.isEmpty ? "No turn history yet" : "No turns in this range", systemImage: "chart.xyaxis.line")
+                            .foregroundStyle(DashboardStyle.ink)
+                    } description: {
+                        Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed turns from Codex, Claude Code, and Grok Build. Large histories may take a moment." : "Choose Start monitoring to read local session files. Prompts and responses are never retained.") : "Choose 7 days or select another client, provider, or model cohort to view its local turns.")
+                            .foregroundStyle(DashboardStyle.muted)
+                    } actions: {
+                        Button("Start monitoring") { store.startMonitoring() }
+                            .buttonStyle(PrimaryButtonStyle())
+                            .disabled(store.isMonitoring)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                } else {
+                    HStack {
+                        Text("Recent turns").font(DashboardStyle.Typography.title).foregroundStyle(DashboardStyle.ink)
+                        Spacer()
+                        Text("Latest \(min(500, snapshot.records.count)) of \(snapshot.records.count.formatted()) · \(range.title.lowercased())")
+                            .font(DashboardStyle.Typography.footnote).foregroundStyle(DashboardStyle.muted)
+                    }
+                    metricsTable(records: snapshot.records)
                 }
-                metricsTable(records: snapshot.records)
+                footer
             }
-            footer
+            .padding(24)
         }
-        .padding(22)
-        }
-        .fileImporter(
-            isPresented: $isChoosingFolder,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first { store.selectFolder(url) }
-            case .failure:
-                break
-            }
-        }
+        .background(DashboardStyle.bg)
+        .tint(DashboardStyle.accent)
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .center, spacing: 12) {
+            BrandMarkView(size: 40)
+            VStack(alignment: .leading, spacing: 3) {
                 Text("Tokrate")
-                    .font(.largeTitle.weight(.semibold))
-                Text("Completed-turn throughput · output tokens per whole-turn second")
-                    .foregroundStyle(.secondary)
+                    .font(DashboardStyle.Typography.largeTitle).tracking(-0.4)
+                    .foregroundStyle(DashboardStyle.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Turn speed · output tokens per whole-turn second")
+                    .font(DashboardStyle.Typography.footnote)
+                    .foregroundStyle(DashboardStyle.muted)
             }
             Spacer()
-            Button("Check for Updates…") { updates.checkForUpdates() }
-                .disabled(!updates.canCheckForUpdates)
-            WebsiteLinkView()
-            Button(store.isMonitoring ? "Pause" : "Start monitoring") {
-                if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
+            HStack(spacing: 8) {
+                Button("Check for Updates…") { updates.checkForUpdates() }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .disabled(!updates.canCheckForUpdates)
+                WebsiteLinkView()
+                Button(store.isMonitoring ? "Pause" : "Start monitoring") {
+                    if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                CodexFolderButton(store: store)
+                    .buttonStyle(SecondaryButtonStyle())
             }
-            .buttonStyle(.borderedProminent)
-            Button("Choose folder…") { isChoosingFolder = true }
-                .disabled(store.isMonitoring)
         }
     }
 
@@ -113,14 +127,18 @@ struct HistoryView: View {
         Table(Array(records.prefix(500))) {
             TableColumn("Completed") { record in
                 Text(record.completedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    .font(DashboardStyle.Typography.footnote)
             }
             .width(min: 130)
             TableColumn("Model") { record in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(record.model ?? "Unknown")
-                        .foregroundStyle(record.model == nil ? .secondary : .primary)
+                    HStack(spacing: 6) {
+                        Text(record.model ?? "Unknown")
+                            .foregroundStyle(record.model == nil ? DashboardStyle.muted : DashboardStyle.ink)
+                        if record.isSubagentTurn { ChipView(text: "Subagent", tone: .accent).fixedSize() }
+                    }
                     Text(ModelCohort(record).detailLabel)
-                        .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                        .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted).lineLimit(1)
                 }
             }
             .width(min: 190)
@@ -134,34 +152,40 @@ struct HistoryView: View {
                     .monospacedDigit()
             }
             .width(min: 90)
-            TableColumn("TTFT") { record in
+            TableColumn("First token") { record in
                 Text(record.ttftSeconds.map { String(format: "%.2f s", $0) } ?? "—")
                     .monospacedDigit()
-                    .help("Source-reported TTFT when available; first-visible-text semantics are unverified.")
+                    .help("Source-reported first-token wait when available; first-visible-text semantics are unverified.")
             }
             .width(min: 100)
-            TableColumn("Throughput") { record in
-                Text("\(record.turnThroughputTPS, specifier: "%.1f") t/s")
+            TableColumn("Turn speed") { record in
+                Text("\(record.turnThroughputTPS, specifier: "%.1f") tok/s")
                     .monospacedDigit()
-                    .help(record.throughputLabel)
+                    .help(ModelCohort(record).measurement.title)
             }
             .width(min: 120)
         }
-        .frame(height: 210)
+        .frame(height: 320)
+        .clipShape(RoundedRectangle(cornerRadius: DashboardStyle.Radius.control, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: DashboardStyle.Radius.control, style: .continuous).strokeBorder(DashboardStyle.line, lineWidth: 1)
+        }
     }
 
     private var footer: some View {
-        HStack {
-            Label(store.isMonitoring ? "Monitoring" : "Paused", systemImage: store.isMonitoring ? "record.circle" : "pause.circle")
-                .foregroundStyle(store.isMonitoring ? .green : .secondary)
+        HStack(spacing: 6) {
+            Circle().fill(store.isMonitoring ? DashboardStyle.good : DashboardStyle.muted).frame(width: 8, height: 8)
+            Text(store.isMonitoring ? "Monitoring" : "Paused")
+                .font(DashboardStyle.Typography.footnoteEmphasis)
+                .foregroundStyle(DashboardStyle.ink)
             Text("· \(store.folderDescription)")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(DashboardStyle.muted)
                 .lineLimit(1)
                 .help(store.folderDescription)
             Spacer()
-            Text("Streaming speed unavailable · TTFT semantics unverified")
-                .foregroundStyle(.secondary)
+            Text("Streaming speed unavailable · first-token semantics unverified")
+                .foregroundStyle(DashboardStyle.muted)
         }
-        .font(.caption)
+        .font(DashboardStyle.Typography.footnote)
     }
 }
