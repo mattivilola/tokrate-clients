@@ -9,6 +9,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
+use std::fs::FileTimes;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, SystemTime};
@@ -620,7 +621,7 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
 }
 
 #[test]
-fn grok_matches_completed_event_to_usage_snapshot_and_replaces_updated_turn() {
+fn grok_emits_completed_turn_once_even_if_usage_snapshot_later_changes() {
     let temp = TestDir::new();
     let root = temp.path();
     write_grok_session(
@@ -664,16 +665,68 @@ fn grok_matches_completed_event_to_usage_snapshot_and_replaces_updated_turn() {
     )
     .unwrap();
     let updated = monitor.poll(now + Duration::seconds(1)).unwrap();
-    assert_eq!(updated.len(), 1);
-    assert_eq!(updated[0].id, first.id);
-    assert_eq!(updated[0].output_tokens, 90);
+    assert!(updated.is_empty(), "an accepted turn is immutable");
     history.merge(&updated, now + Duration::seconds(1));
     assert_eq!(
         history.records().len(),
         1,
-        "usage snapshots replace the same turn"
+        "a later snapshot cannot emit a duplicate contribution"
     );
-    assert_eq!(history.records()[0].output_tokens, 90);
+    assert_eq!(history.records()[0].output_tokens, 50);
+}
+
+#[test]
+fn grok_detects_same_size_incomplete_to_complete_rewrite_with_unchanged_mtime() {
+    let temp = TestDir::new();
+    let root = temp.path();
+    let usage_path = write_grok_session(
+        root,
+        "same-metadata",
+        &grok_turn_events("same-metadata", 7, "completed"),
+        &{
+            let mut usage = grok_usage("same-metadata", 7, 50);
+            usage["turns"][0]["usageIsIncomplete"] = json!(true);
+            usage
+        },
+    )
+    .join("usage.json");
+    let original = fs::metadata(&usage_path).unwrap();
+    let original_len = original.len();
+    let original_modified = original.modified().unwrap();
+    let now = time("2026-10-03T10:00:06Z");
+    let mut monitor = GrokMonitor::new(root.to_path_buf());
+    for _ in 0..3 {
+        assert!(monitor.poll(now).unwrap().is_empty());
+    }
+
+    // Keep the JSON byte length identical while changing the completion flag.
+    // The reasoning token digit compensates for `true`/`false` differing by one
+    // byte. Restore the original mtime to model coarse filesystem timestamps.
+    let mut usage = grok_usage("same-metadata", 7, 50);
+    usage["turns"][0]["reasoningTokens"] = json!(9);
+    let complete = serde_json::to_vec(&usage).unwrap();
+    assert_eq!(complete.len() as u64, original_len);
+    fs::write(&usage_path, complete).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&usage_path)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(original_modified))
+        .unwrap();
+    let rewritten = fs::metadata(&usage_path).unwrap();
+    assert_eq!(rewritten.len(), original_len);
+    assert_eq!(rewritten.modified().unwrap(), original_modified);
+
+    let mut emitted = Vec::new();
+    for _ in 0..3 {
+        emitted.extend(monitor.poll(now + Duration::seconds(1)).unwrap());
+        if !emitted.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].output_tokens, 50);
+    assert_eq!(emitted[0].reasoning_output_tokens, Some(9));
 }
 
 #[test]

@@ -362,16 +362,31 @@ async function refresh() {
         records: next.recordsChanged ? next.records : state.records,
       };
       render();
-      if (state.smoke && state.records.length) {
-        const sample = state.records.find((m) => m.model === "fixture-model");
-        if (
-          !sample ||
-          sample.turnThroughputTPS !== 20 ||
-          !document.querySelector(".gauge") ||
-          state.settings.sharing
-        )
-          throw new Error("Smoke assertion");
-        await invoke("smoke_complete");
+      if (state.smoke) {
+        const codex = state.records.find(
+          (m) => client(m) === "codex" && m.model === "fixture-model",
+        );
+        const claude = state.records.find(
+          (m) => client(m) === "claude-code" && m.model === "claude-fixture-model",
+        );
+        const grok = state.records.find(
+          (m) => client(m) === "grok-build" && m.model === "grok-fixture-model",
+        );
+        const approximately = (actual: number, expected: number) =>
+          Math.abs(actual - expected) < 0.000001;
+        if (codex && claude && grok) {
+          if (
+            !approximately(codex.turnThroughputTPS, 20) ||
+            !approximately(claude.turnThroughputTPS, 30) ||
+            !approximately(grok.turnThroughputTPS, 24) ||
+            claude.codexTTFTSeconds !== null ||
+            grok.codexTTFTSeconds !== null ||
+            !document.querySelector(".gauge") ||
+            state.settings.sharing
+          )
+            throw new Error("Smoke source metrics assertion");
+          await invoke("smoke_complete");
+        }
       }
     }
   } catch {

@@ -148,6 +148,11 @@ impl Runtime {
         let mut settings = Settings::default();
         settings.sharing = false;
         settings.root = dir.join("sessions").to_string_lossy().into();
+        settings.claude_root = dir.join("claude-projects").to_string_lossy().into();
+        settings.grok_root = dir.join("grok-sessions").to_string_lossy().into();
+        for root in [&settings.root, &settings.claude_root, &settings.grok_root] {
+            std::fs::create_dir_all(root)?;
+        }
         std::fs::write(dir.join("settings.json"), serde_json::to_vec(&settings)?)?;
         let mut result = Self::load(dir)?;
         result.smoke = true;
@@ -160,7 +165,13 @@ impl Runtime {
         if self.settings.sharing
             || self.sharing_active
             || self.board.is_some()
-            || self.history.records().is_empty()
+            || ["codex", "claude-code", "grok-build"].iter().any(|client| {
+                !self
+                    .history
+                    .records()
+                    .iter()
+                    .any(|record| &record.client == client)
+            })
         {
             return Err("Smoke state invalid".into());
         }
@@ -287,7 +298,13 @@ impl Runtime {
             self.monitor_status="Monitoring in memory. Saved history is unreadable and preserved; back it up and repair it before restarting.".into();
         }
         if self.smoke {
-            let evidence = serde_json::json!({"records": self.history.records().len(), "sharing": self.settings.sharing, "monitorStatus": self.monitor_status});
+            let sources: std::collections::HashSet<&str> = self
+                .history
+                .records()
+                .iter()
+                .map(|record| record.client.as_str())
+                .collect();
+            let evidence = serde_json::json!({"records": self.history.records().len(), "sources": sources, "sharing": self.settings.sharing, "monitorStatus": self.monitor_status});
             let _ = std::fs::write(self.dir.join("smoke-state.json"), evidence.to_string());
         }
         self.tray_text()
@@ -576,6 +593,31 @@ mod tests {
         let patch = serde_json::from_value(serde_json::json!({"sharing":true})).unwrap();
         assert!(runtime.update(patch).is_err());
         assert!(!runtime.settings.sharing);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn smoke_mode_uses_only_temporary_source_roots_and_stays_local() {
+        let dir = temporary();
+        let runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let roots = [
+            PathBuf::from(&runtime.settings.root),
+            PathBuf::from(&runtime.settings.claude_root),
+            PathBuf::from(&runtime.settings.grok_root),
+        ];
+        assert_eq!(
+            roots,
+            [
+                dir.join("sessions"),
+                dir.join("claude-projects"),
+                dir.join("grok-sessions")
+            ]
+        );
+        assert!(roots
+            .iter()
+            .all(|root| root.is_dir() && root.starts_with(&dir)));
+        assert!(!runtime.settings.sharing);
+        assert!(!runtime.sharing_active);
+        assert_eq!(runtime.queue.len(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

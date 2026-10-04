@@ -337,6 +337,8 @@ struct UsageReader {
     observed_len: Option<u64>,
     observed_modified: Option<std::time::SystemTime>,
     pending: Vec<u8>,
+    refreshing: bool,
+    snapshot_hash: Option<[u8; 32]>,
     snapshot: Option<UsageSnapshot>,
     bytes_read_last_poll: usize,
 }
@@ -349,6 +351,8 @@ impl UsageReader {
             observed_len: None,
             observed_modified: None,
             pending: Vec::new(),
+            refreshing: false,
+            snapshot_hash: None,
             snapshot: None,
             bytes_read_last_poll: 0,
         }
@@ -363,6 +367,10 @@ impl UsageReader {
         let metadata = file.metadata()?;
         if metadata.len() > MAX_USAGE_BYTES {
             self.pending.clear();
+            self.refreshing = false;
+            self.snapshot_hash = None;
+            self.snapshot = None;
+            self.identity = file_identity(&metadata);
             self.observed_len = Some(metadata.len());
             self.observed_modified = metadata.modified().ok();
             return Ok(());
@@ -374,12 +382,16 @@ impl UsageReader {
             || self.observed_modified != modified;
         if changed {
             self.pending.clear();
-            self.snapshot = None;
-            self.identity = identity;
+            self.refreshing = false;
+            self.identity = identity.clone();
             self.observed_len = Some(metadata.len());
             self.observed_modified = modified;
-        } else if self.snapshot.is_some() {
-            return Ok(());
+        } else if self.pending.is_empty() {
+            // File timestamps are coarse on some supported filesystems and can
+            // remain unchanged when Grok rewrites usage.json in place. Once a
+            // snapshot exists, rescan it incrementally under the same per-file
+            // budget and compare its digest instead of trusting metadata alone.
+            self.refreshing = self.snapshot.is_some();
         }
         let remaining = metadata.len().saturating_sub(self.pending.len() as u64);
         if remaining == 0 {
@@ -400,14 +412,33 @@ impl UsageReader {
         self.pending.extend_from_slice(&bytes);
         self.bytes_read_last_poll = total;
         if self.pending.len() as u64 == metadata.len() {
-            self.snapshot = UsageSnapshot::parse(&self.pending);
-            if self.snapshot.is_none() {
-                // An update racing this read may have exposed a partial JSON file.
-                // Retry from offset zero on the next bounded poll.
+            // Avoid accepting a mixed read if the writer changed the file while
+            // it was being scanned. Metadata remains useful here even though it
+            // cannot be the sole freshness signal.
+            let after = file.metadata()?;
+            if after.len() != metadata.len()
+                || file_identity(&after) != identity
+                || after.modified().ok() != modified
+            {
                 self.pending.clear();
-            } else {
-                self.pending.clear();
+                self.refreshing = false;
+                self.identity = file_identity(&after);
+                self.observed_len = Some(after.len());
+                self.observed_modified = after.modified().ok();
+                return Ok(());
             }
+
+            let digest: [u8; 32] = Sha256::digest(&self.pending).into();
+            if !self.refreshing || self.snapshot_hash != Some(digest) {
+                if let Some(snapshot) = UsageSnapshot::parse(&self.pending) {
+                    self.snapshot = Some(snapshot);
+                    self.snapshot_hash = Some(digest);
+                }
+            }
+            // If parsing failed during a concurrent/incomplete write, retain the
+            // last valid snapshot and try another bounded scan on the next poll.
+            self.pending.clear();
+            self.refreshing = false;
         }
         Ok(())
     }
@@ -495,7 +526,10 @@ impl GrokSession {
                 GROK_PARSER_VERSION,
                 GROK_METRIC_VERSION,
             );
-            if self.last_emitted.get(&id) != Some(&metric) {
+            // A turn becomes immutable when first accepted. A later usage.json
+            // rewrite must not create a second contribution with the same ID;
+            // this matches the Swift monitor and backend's first-write dedupe.
+            if !self.last_emitted.contains_key(&id) {
                 self.last_emitted.insert(id, metric.clone());
                 records.push(metric);
             }
