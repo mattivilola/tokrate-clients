@@ -1,6 +1,6 @@
 # Tokrate clients
 
-Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; published binaries may lag the source (see Releases). Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. It makes no network requests while sharing is off and does not retain prompt or response text.
+Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; Mac 0.1.9 is stable, and [Windows/Linux alpha installers](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) are available with automated native checks and manual desktop testing still pending. Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. It makes no network requests while sharing is off and does not retain prompt or response text.
 
 Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, an easy model/cohort selector, rolling 24-hour / 7-day trends, median/min/max metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. The dashboard separates coding tool, inference provider, model, reasoning effort and measurement definition. Codex uses completed-turn throughput; Claude Code uses transcript-observed turn throughput; Grok Build uses work-turn throughput including nested agent output. TTFT is currently available only when Codex reports it. These are not streaming generation rates or answer-quality scores.
 
@@ -18,7 +18,7 @@ The public board normally requires 10 contributors and 50 eligible turns. During
 
 - `macos/`: shipping SwiftUI app, UI tests, packaging and signing scripts.
 - `windows/` and `linux/`: platform guidance for the new Tauri tray clients; no stable releases yet.
-- `desktop/`: Windows/Linux Rust core, shared dashboard, native host and CI packaging (0.1.9 development). See [desktop setup and release gates](desktop/README.md).
+- `desktop/`: Windows/Linux Rust core, shared dashboard, native host and CI packaging (0.1.9 public alpha). See [desktop setup and release gates](desktop/README.md).
 - `shared/`: current Swift metric core, contribution logic, CLI and core tests. Portability beyond macOS is not yet verified.
 - Root `Package.swift`, `docs/`, and `LICENSE`: package assembly, cross-client contract and MIT license.
 

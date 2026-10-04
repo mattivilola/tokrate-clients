@@ -1,6 +1,6 @@
 # Tokrate for Windows
 
-The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. It is under development; no stable Windows release is published yet.
+The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. An [unsigned alpha with installable packages](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.9-desktop-alpha.1) is available. Automated native checks passed; manual desktop acceptance is pending. No stable Windows release is published yet.
 
 Target: Windows 11 x64 with Microsoft Edge WebView2. CI builds a per-user NSIS installer and runs the actual executable with isolated fixture logs and sharing disabled. Test artifacts are explicitly unsigned. A trusted public release requires Windows Authenticode signing; the Mac certificate cannot sign Windows programs.
 
