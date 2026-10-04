@@ -197,6 +197,7 @@ function community(selected: Metric[]) {
     )}<p class="muted" style="margin-top:14px">Missing alerts do not establish provider health. Geography, Fast mode and answer quality are not measured.</p></section>`;
 }
 function render() {
+  const previousConsentFocus = document.activeElement?.closest(".consent-card") ? document.activeElement.id : null;
   const now = Date.now();
   const all = state.records.filter(
     (m) =>
@@ -254,8 +255,20 @@ function render() {
     ${native && (state.consentPromptRequired || consentDialogOpen) ? sharingConsentDialog() : ""}
   </main>`;
   bind();
-  if (native && (state.consentPromptRequired || consentDialogOpen))
-    document.getElementById("accept-sharing")?.focus({ preventScroll: true });
+  const dialog = document.querySelector<HTMLElement>(".consent-card");
+  if (dialog) {
+    // Polling must not move keyboard focus back to the affirmative action.
+    const previous = previousConsentFocus ? document.getElementById(previousConsentFocus) : null;
+    (previous && dialog.contains(previous) ? previous : document.getElementById("consent-title"))?.focus({ preventScroll: true });
+    document.querySelectorAll<HTMLElement>("main > :not(.consent-backdrop)").forEach(el => { el.inert = true; });
+    dialog.addEventListener("keydown", event => {
+      if (event.key !== "Tab") return;
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>("a, button:not(:disabled)"));
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement?.id === "consent-title")) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    });
+  }
 }
 function updatePanel() {
   const prefs = updatePreferences;
@@ -283,7 +296,7 @@ function updateBanner() {
   return `<section class="notice update-banner" role="status"><div><strong>Tokrate ${e(availableUpdate.version)} is available.</strong><br><small>Install when you’re ready. Updates never install automatically.</small></div><button id="install-update-banner" ${updateInstallInFlight ? "disabled" : ""}>${updateInstallInFlight ? "Installing…" : "Install update"}</button><button id="update-details">Details</button></section>`;
 }
 function sharingConsentDialog() {
-  return `<div class="consent-backdrop"><section class="consent-card" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-description"><h2 id="consent-title">Contribute performance measurements?</h2><p id="consent-description">Tokrate works locally without sharing. If you choose to contribute, these fields are sent for eligible completed turns: coding tool and its version, Tokrate/parser/measurement versions, model, provider route, reasoning effort, source type, output and reasoning token counts, turn duration, and Codex-reported first-token wait when available. The observation time is rounded to five minutes.</p><p>A persistent pseudonymous signing key identifies this installation across reports. Its private key stays in your operating system’s secure credential store. Tokrate creates or reads that key only after you accept. No prompts, responses, code, or local file paths are uploaded.</p><p>Accepting starts community requests for new measurements and community results. While data is early, published aggregates may be based on one contributing installation. Turning sharing off stops future community requests and clears queued reports; it does not remove reports already received. Automatic software update checks use their separate setting.</p><p class="consent-links"><a id="consent-privacy" href="https://tokrate.dev/privacy">Privacy notice</a><a id="consent-terms" href="https://tokrate.dev/terms">Terms</a></p>${error ? `<p role="alert" class="error">${e(error)}</p>` : ""}<div class="consent-actions"><button id="accept-sharing" class="primary">Yes, let's contribute</button><button id="decline-sharing" class="secondary">Only for local use</button></div></section></div>`;
+  return `<div class="consent-backdrop"><section class="consent-card" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-description"><h2 id="consent-title" tabindex="-1">Contribute performance measurements?</h2><p id="consent-description">Tokrate works locally without sharing. If you choose to contribute, these fields are sent for eligible completed turns: coding tool and its version, Tokrate/parser/measurement versions, model, provider route, reasoning effort, source type, output and reasoning token counts, turn duration, and Codex-reported first-token wait when available. The observation time is rounded to five minutes.</p><p>A persistent pseudonymous signing key identifies this installation across reports. Its private key stays in your operating system’s secure credential store. Tokrate creates or reads that key only after you accept. No prompts, responses, code, or local file paths are uploaded.</p><p>Accepting starts community requests for new measurements and community results. While data is early, published aggregates may be based on one contributing installation. Turning sharing off stops future community requests and clears queued reports; it does not remove reports already received. Automatic software update checks use their separate setting.</p><p class="consent-links"><a id="consent-privacy" href="https://tokrate.dev/privacy">Privacy notice</a><a id="consent-terms" href="https://tokrate.dev/terms">Terms</a></p>${error ? `<p role="alert" class="error">${e(error)}</p>` : ""}<div class="consent-actions"><button id="accept-sharing" class="primary">Yes, let's contribute</button><button id="decline-sharing" class="secondary">Only for local use</button></div></section></div>`;
 }
 async function action(fn: () => Promise<Snapshot | void>) {
   const epoch = gate.beginMutation();

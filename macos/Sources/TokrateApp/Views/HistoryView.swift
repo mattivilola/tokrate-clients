@@ -20,6 +20,9 @@ struct HistoryView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             header
+            if store.sharingPreferences.isConsentDisclosureVisible {
+                SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, compact: false, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
+            }
             ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
             CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
             if snapshot.selection.isAllModels {
@@ -34,7 +37,15 @@ struct HistoryView: View {
                     }
                 }
             }
-            SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, compact: false)
+            SharingView(
+                preferences: store.sharingPreferences,
+                selection: store.dashboardSelection,
+                latestCohort: store.latestCohort,
+                compact: false,
+                showToggle: !store.sharingPreferences.isConsentDisclosureVisible,
+                showConsentDisclosure: false,
+                checkForUpdates: { updates.checkForUpdates() }
+            )
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)

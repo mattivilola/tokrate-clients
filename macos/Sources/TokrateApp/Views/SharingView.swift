@@ -7,9 +7,59 @@ struct SharingView: View {
     let latestCohort: ModelCohort?
     var compact = true
     var showToggle = true
+    var showConsentDisclosure = true
+    var checkForUpdates: (() -> Void)?
     private var sharing: SharingSession { preferences.session }
 
     var body: some View {
+        Group {
+            if showConsentDisclosure && preferences.isConsentDisclosureVisible {
+                consentDisclosure
+            } else {
+                sharingStatus
+            }
+        }
+        .dashboardCard(padding: 12)
+    }
+
+    private var consentDisclosure: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield").font(.system(size: 19)).foregroundStyle(.teal)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Choose whether to contribute").font(.system(size: 12, weight: .semibold))
+                    Text("Local monitoring and history work either way.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            Text("Tokrate sends eligible completed-turn measurements to its community service: a rounded 5-minute time, client and app/parser/metric versions, model, provider, reasoning effort, source kind, token counts, turn duration, and TTFT when available.")
+                .font(.system(size: 10)).fixedSize(horizontal: false, vertical: true)
+            Text("Uploads contain no names, prompts, responses, code, or local session IDs. Each sample has a random ID and uploads use a stable public-key pseudonym, so records can be linked over time.")
+                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("Early community data may include aggregates based on a single install.")
+                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("You can turn sharing off any time. Tokrate stops new contributions and cancels unsent samples; local monitoring continues, and measurements already sent may remain in community data.")
+                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Button("Yes, let's contribute") { preferences.consentToShare() }
+                    .buttonStyle(.borderedProminent).tint(.teal)
+                Button("Only for local use") { preferences.chooseLocalOnly() }
+                    .buttonStyle(.bordered)
+                Spacer(minLength: 0)
+                consentLinks
+            }
+        }
+    }
+
+    private var consentLinks: some View {
+        HStack(spacing: 10) {
+            Link("Privacy", destination: URL(string: "https://tokrate.dev/privacy")!)
+            Link("Terms", destination: URL(string: "https://tokrate.dev/terms")!)
+        }
+        .font(.system(size: 9))
+    }
+
+    private var sharingStatus: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(systemName: preferences.isSharingRequested ? "globe.americas.fill" : "lock.shield")
@@ -20,20 +70,24 @@ struct SharingView: View {
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
-                if showToggle {
+                if showToggle && !preferences.isConsentDisclosureVisible {
                     Toggle("Share with community", isOn: Binding(
                         get: { preferences.isSharingRequested },
                         set: { preferences.setSharingEnabled($0) }
                     ))
                     .toggleStyle(.switch).labelsHidden().tint(.teal)
-                    .accessibilityHint("Remembers your choice. Turning off cancels community requests.")
+                    .accessibilityHint("Turning on opens the sharing notice. Turning off stops future contributions and cancels unsent samples; local monitoring continues.")
                 }
             }
             if preferences.isSharingRequested {
                 VStack(alignment: .leading, spacing: 7) {
                     Text(sharing.status + (sharing.pendingCount > 0 ? " · \(sharing.pendingCount) pending" : ""))
                         .font(.system(size: 10)).foregroundStyle(.secondary)
-                    if !sharing.isEnabled {
+                    if sharing.requiresUpdate {
+                        Button("Check for Updates…") { checkForUpdates?() }
+                            .buttonStyle(.link).font(.caption)
+                            .disabled(checkForUpdates == nil)
+                    } else if !sharing.isEnabled {
                         Button("Retry sharing") { preferences.retry() }.buttonStyle(.link).font(.caption)
                     } else if let board = sharing.board {
                         boardContent(board)
@@ -41,13 +95,12 @@ struct SharingView: View {
                 }
             }
             HStack(alignment: .firstTextBaseline) {
-                Text("No prompts or code. Your choice is remembered.")
+                Text(preferences.isSharingRequested ? "New eligible measurements only. Turn off any time." : "Off · local monitoring continues.")
                     .font(.system(size: 9)).foregroundStyle(.secondary)
                 Spacer(minLength: 4)
-                Link("Privacy", destination: URL(string: "https://tokrate.dev/privacy")!).font(.system(size: 9))
+                consentLinks
             }
         }
-        .dashboardCard(padding: 12)
     }
 
     @ViewBuilder

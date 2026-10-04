@@ -8,6 +8,7 @@ public final class SharingSession {
     public private(set) var board: GlobalBoard?
     public private(set) var status = "Local only"
     public private(set) var pendingCount = 0
+    public private(set) var requiresUpdate = false
     @ObservationIgnored private let identity: any SharingIdentity
     @ObservationIgnored private let transport: any SharingTransport
     @ObservationIgnored private let baseURL: URL
@@ -26,7 +27,7 @@ public final class SharingSession {
     }
 
     public func enable(now: Date = .now, startPolling: Bool = true) {
-        guard !isEnabled else { return }
+        guard !isEnabled, !requiresUpdate else { return }
         do { privateKey = try identity.loadOrCreate() }
         catch { status = "Sharing could not start. Check Keychain access and try again."; return }
         generation = UUID()
@@ -89,6 +90,9 @@ public final class SharingSession {
                     let rejected = Set(batch.map { $0.sample.sampleId })
                     queue.removeAll { rejected.contains($0.sample.sampleId) }
                     status = "Some samples were rejected. Local history is safe."
+                } else if code == 426 {
+                    stopForRequiredUpdate()
+                    return
                 } else { status = "Upload unavailable. Retrying while sharing is on." }
             } catch {
                 guard isEnabled, generation == currentGeneration, !Task.isCancelled else { return }
@@ -100,6 +104,10 @@ public final class SharingSession {
         do {
             let (data, code) = try await transport.send(URLRequest(url: baseURL.appendingPathComponent("board")))
             guard isEnabled, generation == currentGeneration, !Task.isCancelled else { return }
+            if code == 426 {
+                stopForRequiredUpdate()
+                return
+            }
             guard code == 200 else { throw URLError(.badServerResponse) }
             let decoded = try JSONDecoder().decode(GlobalBoard.self, from: data)
             guard decoded.schemaVersion == 1 else { throw URLError(.cannotParseResponse) }
@@ -110,6 +118,18 @@ public final class SharingSession {
             status = "Global data unavailable. Local monitoring continues."
         }
     }
+
+    private func stopForRequiredUpdate() {
+        requiresUpdate = true
+        isEnabled = false
+        generation = UUID()
+        loopTask?.cancel(); loopTask = nil
+        queue.removeAll(); seen.removeAll(); pendingCount = 0
+        board = nil; privateKey = nil; consentStartedAt = nil; lastRefresh = nil
+        isRefreshing = false
+        status = "This Tokrate version cannot share. Check for Updates."
+    }
+
     private func prune(now: Date) {
         queue.removeAll { now.timeIntervalSince($0.sample.observedAt) > 86_400 }
         pendingCount = queue.count

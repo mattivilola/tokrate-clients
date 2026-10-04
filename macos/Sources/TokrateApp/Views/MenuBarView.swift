@@ -4,6 +4,7 @@ import TokrateCore
 struct MenuBarView: View {
     @Bindable var store: HistoryStore
     @ObservedObject var updates: AppUpdates
+    var showInitialConsentDashboard: () -> Bool = { false }
     @State private var range: DashboardRange = .day
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @Environment(\.openWindow) private var openWindow
@@ -25,16 +26,18 @@ struct MenuBarView: View {
                 Spacer()
                 Label(store.isMonitoring ? "Monitoring" : "Paused", systemImage: store.isMonitoring ? "circle.fill" : "pause.fill")
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                HStack(spacing: 3) {
-                    Text("Share").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
-                    Toggle("Share with community", isOn: Binding(
-                        get: { store.sharingPreferences.isSharingRequested },
-                        set: { store.sharingPreferences.setSharingEnabled($0) }
-                    ))
-                    .toggleStyle(.switch).labelsHidden().controlSize(.mini).frame(width: 31)
-                    .accessibilityLabel("Share with community")
-                    .accessibilityHint("Remembers your choice. Turning off cancels community requests.")
-                    .help("Share new turn measurements with the community")
+                if !store.sharingPreferences.isConsentDisclosureVisible {
+                    HStack(spacing: 3) {
+                        Text("Share").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+                        Toggle("Share with community", isOn: Binding(
+                            get: { store.sharingPreferences.isSharingRequested },
+                            set: { store.sharingPreferences.setSharingEnabled($0) }
+                        ))
+                        .toggleStyle(.switch).labelsHidden().controlSize(.mini).frame(width: 31)
+                        .accessibilityLabel("Share with community")
+                        .accessibilityHint("Turning on opens the sharing notice. Turning off stops future contributions and cancels unsent samples; local monitoring continues.")
+                        .help("Share new turn measurements with the community")
+                    }
                 }
                 WebsiteLinkView(compact: true)
                 Menu {
@@ -42,7 +45,12 @@ struct MenuBarView: View {
                         .disabled(!updates.canCheckForUpdates)
                     Button("Update Settings…") { openSettings() }
                     Divider()
-                    Button("Full history…") { openWindow(id: "history"); NSApp.activate(ignoringOtherApps: true) }
+                    Button("Full history…") {
+                        if !showInitialConsentDashboard() {
+                            openWindow(id: "history")
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
+                    }
                     Button(store.isMonitoring ? "Pause monitoring" : "Resume monitoring") {
                         if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
                     }
@@ -58,6 +66,9 @@ struct MenuBarView: View {
                 .accessibilityLabel("Tokrate settings and full history")
             }
             .padding(.horizontal, 4).padding(.bottom, 2)
+            if store.sharingPreferences.isConsentDisclosureVisible {
+                SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
+            }
             ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
             CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
             if snapshot.selection.isAllModels {
@@ -68,7 +79,7 @@ struct MenuBarView: View {
                 TrendChartView(snapshot: snapshot, range: $range)
                 PersonalTrendView(trend: snapshot.personalTrend, reasoningEffort: snapshot.selectedCohort?.reasoningEffort)
             }
-            SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, showToggle: false)
+            SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, showToggle: false, showConsentDisclosure: false, checkForUpdates: { updates.checkForUpdates() })
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.orange).lineLimit(2).help(error)

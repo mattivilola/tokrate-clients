@@ -4,11 +4,41 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let historyStore = HistoryStore()
     let updates = AppUpdates()
+    private var initialConsentWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Intentional menu-bar utility: the dashboard opens on demand.
+        // Keep the menu-bar utility quiet except when consent needs a visible first-run surface.
         NSApp.setActivationPolicy(.accessory)
         historyStore.startAutomatically()
+        presentConsentDashboardIfNeeded()
+    }
+
+    func showInitialConsentDashboard() -> Bool {
+        guard let initialConsentWindow else { return false }
+        initialConsentWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        return true
+    }
+
+    private func presentConsentDashboardIfNeeded() {
+        guard historyStore.sharingPreferences.isConsentDisclosureVisible else { return }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 780),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Tokrate"
+        window.minSize = NSSize(width: 820, height: 680)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: HistoryView(store: historyStore, updates: updates)
+                .frame(minWidth: 820, minHeight: 680)
+        )
+        window.center()
+        initialConsentWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -20,7 +50,11 @@ struct TokrateApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(store: historyStore, updates: appDelegate.updates)
+            MenuBarView(
+                store: historyStore,
+                updates: appDelegate.updates,
+                showInitialConsentDashboard: { appDelegate.showInitialConsentDashboard() }
+            )
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "speedometer")

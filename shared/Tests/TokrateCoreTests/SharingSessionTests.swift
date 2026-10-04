@@ -13,14 +13,19 @@ private final class MemoryIdentity: SharingIdentity, @unchecked Sendable {
 private actor MockTransport: SharingTransport {
     var requests: [URLRequest] = []
     var uploadStatus = 200
+    var boardStatus = 200
     var pause = false
     var continuation: CheckedContinuation<Void, Never>?
-    func configure(uploadStatus: Int = 200, pause: Bool = false) { self.uploadStatus = uploadStatus; self.pause = pause }
+    func configure(uploadStatus: Int = 200, boardStatus: Int = 200, pause: Bool = false) {
+        self.uploadStatus = uploadStatus
+        self.boardStatus = boardStatus
+        self.pause = pause
+    }
     func send(_ request: URLRequest) async throws -> (Data, Int) {
         requests.append(request)
         if pause { await withCheckedContinuation { continuation = $0 } }
         if request.httpMethod == "POST" { return (Data(), uploadStatus) }
-        return (Data(#"{"schemaVersion":1,"generatedAt":"2026-10-03T10:00:00Z","dataAsOf":null,"collectionEnabled":true,"state":"insufficient_data","window":"15m","cohorts":[],"alerts":[],"unknownField":true}"#.utf8), 200)
+        return (Data(#"{"schemaVersion":1,"generatedAt":"2026-10-03T10:00:00Z","dataAsOf":null,"collectionEnabled":true,"state":"insufficient_data","window":"15m","cohorts":[],"alerts":[],"unknownField":true}"#.utf8), boardStatus)
     }
     func resume() { continuation?.resume(); continuation = nil; pause = false }
     func snapshot() -> [URLRequest] { requests }
@@ -46,6 +51,53 @@ final class SharingSessionTests: XCTestCase {
         XCTAssertNil(session.board)
     }
 
+    func testHTTP426DiscardsQueuedUploadsAndStopsFurtherRequests() async {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        await transport.configure(uploadStatus: 426)
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enable(now: now, startPolling: false)
+        session.enqueue([
+            metric(id: "first", date: now),
+            metric(id: "second", date: now.addingTimeInterval(1))
+        ], now: now.addingTimeInterval(1))
+        XCTAssertEqual(session.pendingCount, 2)
+
+        await session.refresh(now: now.addingTimeInterval(2))
+
+        XCTAssertTrue(session.requiresUpdate)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertEqual(session.pendingCount, 0)
+        XCTAssertNil(session.board)
+        XCTAssertTrue(session.status.contains("Check for Updates"))
+        let requests = await transport.snapshot()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.httpMethod, "POST")
+
+        session.enable(now: now.addingTimeInterval(30), startPolling: false)
+        session.enqueue([metric(id: "after-block", date: now.addingTimeInterval(31))], now: now.addingTimeInterval(31))
+        await session.refresh(now: now.addingTimeInterval(31))
+        XCTAssertEqual(identity.calls, 1)
+        XCTAssertEqual(session.pendingCount, 0)
+        let afterRetry = await transport.snapshot()
+        XCTAssertEqual(afterRetry.count, 1)
+    }
+
+    func testHTTP426FromBoardAlsoStopsSharing() async {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        await transport.configure(boardStatus: 426)
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enable(now: now, startPolling: false)
+
+        await session.refresh(now: now)
+
+        XCTAssertTrue(session.requiresUpdate)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertTrue(session.status.contains("Check for Updates"))
+        let requests = await transport.snapshot()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.httpMethod, "GET")
+    }
+
     func testFutureOnlySignedAllowlistAndFiveMinuteBuckets() async throws {
         let transport = MockTransport(), identity = MemoryIdentity()
         let session = SharingSession(identity: identity, transport: transport)
@@ -63,7 +115,7 @@ final class SharingSessionTests: XCTestCase {
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
         XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
-        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.10")
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.11")
         XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
@@ -79,7 +131,7 @@ final class SharingSessionTests: XCTestCase {
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
         let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
-        XCTAssertEqual(reported.appVersion, "0.1.10")
+        XCTAssertEqual(reported.appVersion, "0.1.11")
         XCTAssertEqual(reported.reasoningEffort, "ultra")
         let missing = try XCTUnwrap(SharedSample(metric()))
         XCTAssertEqual(missing.reasoningEffort, "unknown")

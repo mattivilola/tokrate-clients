@@ -6,7 +6,11 @@ import XCTest
 @MainActor
 private final class MemorySharingPreference: SharingPreferenceStore {
     var sharingEnabled: Bool?
-    init(_ value: Bool? = nil) { sharingEnabled = value }
+    var consentRecord: SharingConsentRecord?
+    init(_ value: Bool? = nil, consentRecord: SharingConsentRecord? = nil) {
+        sharingEnabled = value
+        self.consentRecord = consentRecord
+    }
 }
 
 private final class PreferenceIdentity: SharingIdentity, @unchecked Sendable {
@@ -43,26 +47,64 @@ final class SharingPreferencesTests: XCTestCase {
         TurnMetric(id: id, completedAt: date, model: "reported-model", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10)
     }
 
-    func testDefaultOnActivatesExactlyOnceAndNeverBackfillsHistory() async {
+    func testFirstLaunchStaysLocalUntilAffirmativeConsentAndNeverBackfillsHistory() async {
         let identity = PreferenceIdentity(), transport = PreferenceTransport()
         let session = SharingSession(identity: identity, transport: transport)
         let preference = MemorySharingPreference()
         let model = SharingPreferences(session: session, store: preference)
-        XCTAssertTrue(model.isSharingRequested)
+        XCTAssertFalse(model.isSharingRequested)
+        XCTAssertTrue(model.isConsentDisclosureVisible)
         XCTAssertFalse(session.isEnabled)
         XCTAssertEqual(identity.calls, 0)
         model.activate(now: now, startPolling: false)
         model.activate(now: now.addingTimeInterval(20), startPolling: false)
+        session.enqueue([metric("before-consent", at: now.addingTimeInterval(10))], now: now.addingTimeInterval(20))
+        model.retry(now: now.addingTimeInterval(20), startPolling: false)
+        await session.refresh(now: now.addingTimeInterval(20))
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertEqual(identity.calls, 0)
+        let beforeConsentRequests = await transport.count()
+        XCTAssertEqual(beforeConsentRequests, 0)
+
+        let acceptedAt = now.addingTimeInterval(30)
+        model.consentToShare(now: acceptedAt, startPolling: false)
+        XCTAssertFalse(model.isConsentDisclosureVisible)
+        XCTAssertTrue(model.isSharingRequested)
         XCTAssertTrue(session.isEnabled)
         XCTAssertEqual(identity.calls, 1)
+        XCTAssertEqual(preference.consentRecord, SharingConsentRecord(
+            noticeVersion: SharingPreferences.currentNoticeVersion,
+            decidedAt: acceptedAt,
+            action: .contribute
+        ))
         session.enqueue([
             metric("historical", at: now.addingTimeInterval(-1)),
-            metric("after-first-launch", at: now.addingTimeInterval(10))
-        ], now: now.addingTimeInterval(30))
+            metric("before-consent-2", at: now.addingTimeInterval(29)),
+            metric("after-consent", at: now.addingTimeInterval(31))
+        ], now: now.addingTimeInterval(40))
         XCTAssertEqual(session.pendingCount, 1, "Repeated activation must not move the original launch boundary")
-        await session.refresh(now: now.addingTimeInterval(30))
+        await session.refresh(now: now.addingTimeInterval(40))
         let count = await transport.count()
         XCTAssertEqual(count, 2)
+    }
+
+    func testLegacyDefaultOnWithoutConsentRequiresReconfirmation() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let session = SharingSession(identity: identity, transport: transport)
+        let preference = MemorySharingPreference(true)
+        let model = SharingPreferences(session: session, store: preference)
+
+        XCTAssertFalse(model.isSharingRequested)
+        XCTAssertTrue(model.isConsentDisclosureVisible)
+        model.activate(now: now, startPolling: false)
+        model.setSharingEnabled(true, now: now, startPolling: false)
+        XCTAssertTrue(model.isConsentDisclosureVisible)
+        XCTAssertTrue(preference.sharingEnabled == true, "Legacy preference is retained until the user makes a current choice")
+        XCTAssertNil(preference.consentRecord)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertEqual(identity.calls, 0)
+        let requests = await transport.count()
+        XCTAssertEqual(requests, 0)
     }
 
     func testPersistedOffSurvivesNewModelAndMakesNoRequestsOrIdentityAccess() async {
@@ -76,6 +118,7 @@ final class SharingPreferencesTests: XCTestCase {
             session.enqueue([metric("ignored", at: now)], now: now)
             await session.refresh(now: now)
             XCTAssertFalse(model.isSharingRequested)
+            XCTAssertFalse(model.isConsentDisclosureVisible)
             XCTAssertFalse(session.isEnabled)
             XCTAssertEqual(session.pendingCount, 0)
         }
@@ -85,15 +128,47 @@ final class SharingPreferencesTests: XCTestCase {
         XCTAssertEqual(preference.sharingEnabled, false)
     }
 
+    func testLocalOnlyDecisionPersistsAndLaterEnableRequiresConsent() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let preference = MemorySharingPreference()
+        let first = SharingPreferences(session: SharingSession(identity: identity, transport: transport), store: preference)
+        first.chooseLocalOnly(now: now)
+        XCTAssertEqual(preference.sharingEnabled, false)
+        XCTAssertEqual(preference.consentRecord?.noticeVersion, SharingPreferences.currentNoticeVersion)
+        XCTAssertEqual(preference.consentRecord?.action, .localOnly)
+        XCTAssertEqual(preference.consentRecord?.decidedAt, now)
+
+        let relaunchedSession = SharingSession(identity: identity, transport: transport)
+        let relaunched = SharingPreferences(session: relaunchedSession, store: preference)
+        relaunched.activate(now: now.addingTimeInterval(10), startPolling: false)
+        XCTAssertFalse(relaunched.isConsentDisclosureVisible)
+        XCTAssertFalse(relaunchedSession.isEnabled)
+        relaunched.setSharingEnabled(true, now: now.addingTimeInterval(20), startPolling: false)
+        XCTAssertTrue(relaunched.isConsentDisclosureVisible)
+        XCTAssertFalse(relaunched.isSharingRequested)
+        XCTAssertFalse(relaunchedSession.isEnabled)
+        XCTAssertEqual(preference.sharingEnabled, false)
+        XCTAssertEqual(identity.calls, 0)
+        let requests = await transport.count()
+        XCTAssertEqual(requests, 0)
+
+        relaunched.consentToShare(now: now.addingTimeInterval(30), startPolling: false)
+        XCTAssertTrue(relaunched.isSharingRequested)
+        XCTAssertTrue(relaunchedSession.isEnabled)
+        XCTAssertEqual(identity.calls, 1)
+    }
+
     func testSwitchOffPersistsAndReenableStartsANewEligibilityWindow() async {
         let identity = PreferenceIdentity(), transport = PreferenceTransport()
         let preference = MemorySharingPreference()
         let firstSession = SharingSession(identity: identity, transport: transport)
         let first = SharingPreferences(session: firstSession, store: preference)
         first.activate(now: now, startPolling: false)
+        first.consentToShare(now: now, startPolling: false)
         firstSession.enqueue([metric("pending", at: now)], now: now)
         first.setSharingEnabled(false)
         XCTAssertEqual(preference.sharingEnabled, false)
+        XCTAssertEqual(preference.consentRecord?.action, .localOnly)
         XCTAssertFalse(firstSession.isEnabled)
         XCTAssertEqual(firstSession.pendingCount, 0)
         XCTAssertNil(firstSession.board)
@@ -103,6 +178,9 @@ final class SharingPreferencesTests: XCTestCase {
         relaunched.activate(now: now.addingTimeInterval(20), startPolling: false)
         XCTAssertFalse(relaunchedSession.isEnabled)
         relaunched.setSharingEnabled(true, now: now.addingTimeInterval(30), startPolling: false)
+        XCTAssertEqual(preference.sharingEnabled, false, "Requesting enable must not change the saved choice")
+        XCTAssertTrue(relaunched.isConsentDisclosureVisible)
+        relaunched.consentToShare(now: now.addingTimeInterval(30), startPolling: false)
         XCTAssertEqual(preference.sharingEnabled, true)
         relaunchedSession.enqueue([
             metric("while-off", at: now.addingTimeInterval(25)),
@@ -123,10 +201,13 @@ final class SharingPreferencesTests: XCTestCase {
         let session = SharingSession(identity: identity, transport: transport)
         let model = SharingPreferences(session: session, store: preference)
         model.activate(now: now, startPolling: false)
+        XCTAssertTrue(model.isConsentDisclosureVisible)
+        model.consentToShare(now: now, startPolling: false)
         XCTAssertTrue(model.isSharingRequested)
         XCTAssertFalse(session.isEnabled)
         XCTAssertTrue(session.status.contains("Keychain"))
-        XCTAssertNil(preference.sharingEnabled, "A transient failure must not save an off preference")
+        XCTAssertEqual(preference.sharingEnabled, true)
+        XCTAssertEqual(preference.consentRecord?.action, .contribute)
         await session.refresh(now: now)
         let before = await transport.count()
         XCTAssertEqual(before, 0)
@@ -139,5 +220,43 @@ final class SharingPreferencesTests: XCTestCase {
             metric("after-retry", at: now.addingTimeInterval(31))
         ], now: now.addingTimeInterval(31))
         XCTAssertEqual(session.pendingCount, 1)
+    }
+
+    func testOutdatedContributionConsentRequiresCurrentNotice() async {
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let oldRecord = SharingConsentRecord(
+            noticeVersion: SharingPreferences.currentNoticeVersion - 1,
+            decidedAt: now.addingTimeInterval(-100),
+            action: .contribute
+        )
+        let preference = MemorySharingPreference(true, consentRecord: oldRecord)
+        let session = SharingSession(identity: identity, transport: transport)
+        let model = SharingPreferences(session: session, store: preference)
+
+        XCTAssertFalse(model.isSharingRequested)
+        XCTAssertTrue(model.isConsentDisclosureVisible)
+        model.activate(now: now, startPolling: false)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertEqual(identity.calls, 0)
+        let requests = await transport.count()
+        XCTAssertEqual(requests, 0)
+    }
+
+    func testUserDefaultsStorePersistsNoticeVersionTimeAndAction() {
+        let suiteName = "TokrateConsentTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = UserDefaultsSharingPreferenceStore(defaults: defaults)
+        let record = SharingConsentRecord(noticeVersion: 1, decidedAt: now, action: .contribute)
+
+        store.sharingEnabled = true
+        store.consentRecord = record
+
+        let restoredStore = UserDefaultsSharingPreferenceStore(defaults: defaults)
+        XCTAssertEqual(restoredStore.sharingEnabled, true)
+        XCTAssertEqual(restoredStore.consentRecord, record)
+        XCTAssertEqual(defaults.object(forKey: UserDefaultsSharingPreferenceStore.consentVersionKey) as? Int, 1)
+        XCTAssertEqual(defaults.string(forKey: UserDefaultsSharingPreferenceStore.consentActionKey), "contribute")
+        XCTAssertEqual(defaults.object(forKey: UserDefaultsSharingPreferenceStore.consentDateKey) as? Date, now)
     }
 }

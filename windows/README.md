@@ -1,6 +1,6 @@
 # Tokrate for Windows
 
-The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. An [alpha with installable packages and signed updates](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.10-desktop-alpha.1) is available. Automated native checks passed; manual desktop acceptance is pending. No stable Windows release is published yet.
+The Windows client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Linux. An [alpha with installable packages and signed updates](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.11-desktop-alpha.1) is available. Automated native checks passed; manual desktop acceptance is pending. No stable Windows release is published yet.
 
 Target: Windows 11 x64 with Microsoft Edge WebView2. CI builds a per-user NSIS installer and runs the actual executable with isolated fixture logs and sharing disabled. Updater-enabled release artifacts carry a Tauri update signature. The installer is not Authenticode-signed and may show Windows first-install warnings; the Mac certificate cannot sign Windows programs.
 
@@ -8,7 +8,7 @@ Codex sessions default to `%USERPROFILE%\.codex\sessions`, or `$CODEX_HOME/sessi
 
 Click the tray icon or **Open dashboard** to see the gauge, model/effort selector, 24h/7d charts, local comparisons and sharing toggle. Windows tray icons do not support adjacent text: optional speed appears in the tooltip and tray menu. Closing the dashboard hides it to the tray; **Quit Tokrate** stops the app. Launching again reopens the existing instance.
 
-The signing key is stored in Windows Credential Manager. Sharing is ON for a new installation and remembers OFF; while OFF the app performs no community requests. Read the root README/privacy information and desktop test/release gates before distributing.
+The signing key is stored in Windows Credential Manager. Sharing requires affirmative first-launch consent from 0.1.11 and remembers OFF; while OFF the app performs no community requests. Read the root README/privacy information and desktop test/release gates before distributing.
 
 
 The 0.1.9 source also monitors Claude Code (`CLAUDE_CONFIG_DIR/projects`, default `.claude/projects` in your home directory) and Grok Build (`GROK_HOME/sessions`, default `.grok/sessions`). The dashboard distinguishes coding tool from inference provider and labels each measurement definition. Source-specific folder settings support nonstandard installations. See [the shared contract](../docs/metrics-contract.md); native CI evidence does not establish interactive acceptance on every desktop configuration.
