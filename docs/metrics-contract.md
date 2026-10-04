@@ -72,8 +72,8 @@ Optional public cohort fields `recent`, `comparison`, and `signals` keep older c
 | Tool | Parser | Metric | Scope |
 | --- | --- | --- | --- |
 | Codex | codex-rollout-v1 | turn-v1 | Existing completed-turn accounting |
-| Claude Code | claude-transcript-v2 | claude-observed-turn-v1 | Human prompt through terminal response in the primary transcript; unique API message usage |
-| Claude Code subagent | claude-transcript-v2 | claude-observed-subagent-turn-v1 | Subagent task prompt through its terminal response; sourceKind `subagent` |
+| Claude Code | claude-transcript-v3 | claude-observed-turn-v1 | Human prompt through terminal response in the primary transcript; unique API message usage |
+| Claude Code subagent | claude-transcript-v3 | claude-observed-subagent-turn-v1 | Subagent task prompt through its terminal response; sourceKind `subagent` |
 | Grok Build | grok-session-v1 | grok-observed-work-turn-v1 | Matched completed work-turn events and usage; includes nested agent output |
 
 Claude/Grok TTFT and streaming rate are null. Reasoning token details are not added to output tokens. Exclude ambiguous/incomplete windows rather than fabricate timing. Claude tool-result records are not human turn starts; deduplicate repeated content blocks by API message ID. Primary turns exclude sidechains; subagent transcripts are measured separately (0.1.12, below). Grok usage timestamps record persistence after completion: require exact session/unique turn-number joins, usage time from one second before to 60 seconds after completion, and no later than the next known primary start. The 60-second cap is a conservative Tokrate bound; incomplete/colliding/ambiguous joins are excluded, repeated snapshots are deduplicated, and child sessions are not separately counted. Grok model attribution requires exactly one modelUsage entry: older missing breakdowns stay Unknown even if a selected/primary model is recorded.
@@ -84,9 +84,9 @@ Default roots are `~/.claude/projects` (or `CLAUDE_CONFIG_DIR/projects`) and `~/
 
 From 0.1.10, automatic software update checks are independently configurable and on by default. Sharing OFF still blocks contribution/board requests, not update requests. Updates use a fixed platform/channel feed, no contributor key or measurements, and embedded public-key signature verification. Sparkle system-profile reporting is disabled. Installation requires user action. UI, README and website must disclose the separate switch and ordinary infrastructure network metadata. Native fixture smoke must disable all updater network activity.
 
-## Claude Code transcript v2 and subagent turns (0.1.12)
+## Claude Code transcript v2 and subagent turns (0.1.12; current rules are v3 below)
 
-All Claude metrics emitted from 0.1.12 carry parser `claude-transcript-v2`. Records saved by earlier versions keep `claude-transcript-v1` and remain separate cohorts. The primary metric version stays `claude-observed-turn-v1`.
+Claude metrics emitted by 0.1.12 carry parser `claude-transcript-v2`; earlier versions emitted `claude-transcript-v1`. Both stay displayable locally as separate cohorts. From 0.1.13 new metrics carry `claude-transcript-v3` (next section) and `SharedSample` refuses to share v1 and v2 Claude records. The primary metric version stays `claude-observed-turn-v1`. The turn rules below still apply in v3, refined by the origin and synchronisation rules.
 
 A turn starts at a human text user record and ends at the first assistant message with `stop_reason` `end_turn` or `stop_sequence`. Output tokens are summed over unique API message IDs across the whole turn. The v2 rules are:
 
@@ -95,6 +95,48 @@ A turn starts at a human text user record and ends at the first assistant messag
 - **Synthetic messages.** An assistant message whose model is `<synthetic>` (client-generated placeholder or error text) invalidates the turn. When that turn reaches a terminal stop reason it emits nothing. Synthetic messages never make the model ambiguous.
 - **Meta records.** User records marked `isMeta` are ignored for turn starts and interjections.
 
-Subagent transcripts (`<session>/subagents/agent-<id>.jsonl`) are read with the same turn rules but accept records marked `isSidechain: true`, `userType: external` and a safe `agentId` instead of the primary predicate. Their `.meta.json` files are not read; the model comes from assistant records. A subagent turn runs from the task prompt (or a later follow-up prompt, which is a separate turn) to its terminal response and includes tools and waiting. Metrics use client `claude-code`, parser `claude-transcript-v2`, metric `claude-observed-subagent-turn-v1`, sourceKind `subagent`, provider `unknown` and no TTFT. The local digest hashes `sessionId|agentId|userTurnUUID`, so subagent identities never collide with primary turns. The UI labels this metric "Subagent turn speed": subagent task prompt to final answer, including tools and waiting.
+Subagent transcripts (`<session>/subagents/agent-<id>.jsonl`) are read with the same turn rules but accept records marked `isSidechain: true`, `userType: external` and a safe `agentId` instead of the primary predicate. Their `.meta.json` files are not read; the model comes from assistant records. A subagent turn runs from the task prompt (or a later follow-up prompt, which is a separate turn) to its terminal response and includes tools and waiting. Metrics use client `claude-code`, parser `claude-transcript-v2` (v3 from 0.1.13), metric `claude-observed-subagent-turn-v1`, sourceKind `subagent`, provider `unknown` (attributed from 0.1.13, see below) and no TTFT. The local digest hashes `sessionId|agentId|userTurnUUID`, so subagent identities never collide with primary turns. The UI labels this metric "Subagent turn speed": subagent task prompt to final answer, including tools and waiting.
 
 Subagent and primary turns are separate local cohorts (metric version and source differ) and are never pooled or ranked against each other. Subagent samples are shared exactly like primary ones, through the same allowlist with `sourceKind` `subagent`. The Mac app watches primary and subagent transcript files with two independent monitors under the same root, each with the existing live-tail/archive fairness, byte budgets and 2,000-file limit, so subagent files cannot starve primary monitoring.
+
+## Claude Code transcript v3: origin-aware prompts and mid-file start (0.1.13)
+
+Claude metrics from 0.1.13 carry parser `claude-transcript-v3`; metric versions are unchanged and cohorts of different parser versions stay separate. The v3 tuples `(claude-code, claude-transcript-v3, claude-observed-turn-v1)` and `(…, claude-observed-subagent-turn-v1)` are the only Claude tuples that are shared. v1 and v2 tuples remain supported for local display only.
+
+**Origin-aware prompts.** Current Claude Code writes `origin: {kind: …}` on user records. For a user record that is not a tool result and has a parseable timestamp:
+
+- If `origin` is an object, only these kinds are prompts: `human` in a primary transcript; `human` or `coordinator` in a subagent transcript. Any other kind (for example `task-notification`, a background event delivered as a non-meta user string record) is activity only: it extends the turn's last-activity time like a tool result and never starts a turn, continues one as an interjection or discards one. An object without a `kind` is not a prompt.
+- If `origin` is absent (older Claude Code versions), the v2 rules apply unchanged.
+- A subagent follow-up prompt (SendMessage to a running subagent) arrives in the subagent file as a user record with `origin.kind` `coordinator` and `isMeta: true`. In subagent scope it is a prompt despite `isMeta`: it continues an active turn within 30 minutes, otherwise it starts a new turn (the v2 rules). Every other `isMeta` record stays ignored. The subagent's first task prompt has no origin and no `isMeta`.
+- Interruption detection is unchanged.
+
+**Mid-file start synchronisation.** The live reader starts at a recent tail offset, so it can see the end of a turn whose start it never saw. A Claude parser whose reader started mid-file (a recent-tail reader with offset greater than 0) begins unsynchronised: it ignores prompts, so it starts no turns, until it has seen either an assistant record with stop reason `end_turn` or `stop_sequence`, or a user prompt whose `parentUuid` key is present and JSON null (an absent key does not synchronise). From then on the normal rules apply. Archive readers and tail readers whose offset clamps to 0 read from the start and are always synchronised. The archive reader measures the turns the tail reader skipped; the existing local ID deduplication removes the overlap.
+
+**Codex start requirement.** The Codex parser emits a turn only if that parser instance observed the turn's `task_started` event, unconditionally. A completion without an observed start emits nothing. This removes model-less Codex turns measured when the app launches in the middle of a turn, whose `turn_context` was never read.
+
+## Claude Code provider attribution and model ids (0.1.13)
+
+Provider is attributed from explicit evidence only and never from the model name.
+
+Each consumed non-synthetic assistant record (primary and subagent scope) yields at most one provider from its `message.id` and top-level `requestId`:
+
+| Evidence | Provider |
+| --- | --- |
+| `message.id` matches `^msg_bdrk_[A-Za-z0-9]{8,64}$` | `amazon-bedrock` |
+| `message.id` matches `^msg_vrtx_[A-Za-z0-9]{8,64}$` | `google-vertex` |
+| `message.id` matches `^msg_01[A-Za-z0-9]{22}$` and `requestId` matches `^req_[A-Za-z0-9]{20,40}$` | `anthropic` |
+| anything else | no evidence for that record |
+
+The turn provider is that provider when every counted assistant record in the turn produced the same evidence. If any record lacks evidence or two records differ, the provider is `unknown`. Rationale: the Anthropic API returns `msg_01…` message IDs with `req_…` request IDs, AWS documents Bedrock Claude message IDs of the form `msg_bdrk_01…`, and Google documents Vertex Claude IDs of the form `msg_vrtx_01…`.
+
+Claude model IDs are normalised before the safe-identifier check, and the normalised value is used for the turn's model-consistency comparison:
+
+- Bedrock `^(?:[a-z]{2,6}(?:-[a-z]+)?\.)?anthropic\.(claude-[a-z0-9.-]+?)(?:-v[0-9]+(?::[0-9]+)?)?$` yields the captured model: `us.anthropic.claude-sonnet-4-5-20250929-v1:0` becomes `claude-sonnet-4-5-20250929`, `anthropic.claude-3-haiku-20240307-v1:0` becomes `claude-3-haiku-20240307`, `global.anthropic.claude-opus-4-6-v1` becomes `claude-opus-4-6`.
+- Vertex `^(claude-[a-z0-9.-]+)@([0-9]{8})$` becomes `\1-\2`: `claude-sonnet-4-5@20250929` becomes `claude-sonnet-4-5-20250929`.
+- Anything else containing `:`, `/` or other unsafe characters after normalisation (for example Bedrock ARNs and application inference profiles) leaves the model unknown. `<synthetic>` handling is unchanged.
+
+Sharing accepts the providers `openai`, `anthropic`, `xai` and `unknown` for every client, and `amazon-bedrock` and `google-vertex` only for client `claude-code`; other clients carrying them are not shared. The local cohort identity and the community board ID use the same provider allowlist.
+
+Limitation: subagent measurement requires Claude Code versions that write `<session>/subagents/agent-*.jsonl`. Older 2.0.x layouts place `agent-*.jsonl` directly in the project folder; their subagent turns are not measured, while primary turns are.
+
+On the Mac, the default roots can be overridden in Settings > Sources (Codex session folder, Claude Code projects folder, Grok Build sessions folder), because Finder-launched apps do not inherit `CLAUDE_CONFIG_DIR` or `GROK_HOME`. Environment variables remain the defaults when set. A chosen folder is persisted in user defaults as a path plus a security-scoped bookmark, applies only while monitoring is paused, and **Reset to default** removes it.

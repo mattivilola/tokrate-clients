@@ -42,6 +42,22 @@ export const clientLabel = (m: Metric) =>
   ({ codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build" })[
     client(m)
   ] ?? "Coding tool";
+/** Inference provider ids a Tokrate client can attribute from explicit evidence. */
+export const PROVIDER_LABELS: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  "amazon-bedrock": "Amazon Bedrock",
+  "google-vertex": "Google Vertex AI",
+  xai: "xAI",
+};
+/** Display name of a provider; missing, "unknown" and unrecognised ids are an unknown route. */
+export const providerLabel = (provider: string | null | undefined) =>
+  (provider && PROVIDER_LABELS[provider]) || "Unknown route";
+/** "Amazon Bedrock route" / "Unknown route". */
+export const providerRoute = (provider: string | null | undefined) =>
+  provider && PROVIDER_LABELS[provider]
+    ? `${PROVIDER_LABELS[provider]} route`
+    : "Unknown route";
 const SUBAGENT_METRIC_VERSION = "claude-observed-subagent-turn-v1";
 export type MeasurementKind = "turn" | "subagent" | "workTurn";
 export const isSubagent = (m: Metric) =>
@@ -305,7 +321,12 @@ export function cohortRows(
         parts.push(
           row.sample.clientVersion ? `v${row.sample.clientVersion}` : "version unknown",
         );
-      if (providers.size > 1) parts.push(row.sample.provider ?? "provider unknown");
+      if (providers.size > 1)
+        parts.push(
+          row.sample.provider && PROVIDER_LABELS[row.sample.provider]
+            ? PROVIDER_LABELS[row.sample.provider]
+            : "provider unknown",
+        );
       if (!parts.length) parts.push(`parser ${parserVersion(row.sample)}`);
       row.qualifier = parts.join(" · ");
     }

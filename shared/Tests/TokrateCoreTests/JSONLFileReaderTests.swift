@@ -8,7 +8,8 @@ final class JSONLFileReaderTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let usage = #"{"type":"token_usage_record","payload":{"turn_id":"t","turn_token_usage":{"output_tokens":12}}}"#
         let complete = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t","started_at":"2026-10-03T10:00:00Z","completed_at":"2026-10-03T10:00:02Z","duration_ms":2000}}"#
-        try Data((usage + "\n{broken}\n" + complete.prefix(40)).utf8).write(to: file)
+        let started = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t"}}"#
+        try Data((started + "\n" + usage + "\n{broken}\n" + complete.prefix(40)).utf8).write(to: file)
 
         var reader = JSONLFileReader(url: file)
         XCTAssertTrue(try reader.poll().isEmpty)

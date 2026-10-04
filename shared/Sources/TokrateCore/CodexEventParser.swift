@@ -7,6 +7,8 @@ import Foundation
 public struct CodexEventParser: Sendable {
     private struct TurnState: Sendable {
         var startedAt: Date?
+        /// True once this parser instance saw the turn's `task_started` event.
+        var startObserved = false
         var outputTokens: Int?
         var reasoningOutputTokens: Int?
         var durationMilliseconds: Double?
@@ -99,6 +101,7 @@ public struct CodexEventParser: Sendable {
         let eventDate = parseDate(event["timestamp"])
         if subtype == "task_started" {
             var state = turns[turnID, default: TurnState()]
+            state.startObserved = true
             if state.startedAt == nil { state.startedAt = parseDate(payload["started_at"]) ?? eventDate }
             turns[turnID] = state
             return nil
@@ -115,7 +118,10 @@ public struct CodexEventParser: Sendable {
         let completedAt = parseDate(payload["completed_at"]) ?? eventDate
         let duration = state.durationMilliseconds.map { $0 / 1_000 }
             ?? state.startedAt.flatMap { start in completedAt.map { $0.timeIntervalSince(start) } }
+        // A completion whose start was never observed (the reader began mid-turn) may carry no
+        // turn_context, so its model and effort would be wrong; it emits nothing.
         guard !isAgentSession,
+              state.startObserved,
               !emittedTurnIDs.contains(turnID),
               let outputTokens = state.outputTokens,
               let completedAt,

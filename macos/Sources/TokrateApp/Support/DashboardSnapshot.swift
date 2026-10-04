@@ -83,8 +83,20 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         default: client
         }
     }
+    /// Display name for an inference provider value; unknown values are shown as recorded.
+    static func providerTitle(_ provider: String?) -> String {
+        switch provider {
+        case nil, "unknown": "Unknown"
+        case "openai": "OpenAI"
+        case "anthropic": "Anthropic"
+        case "xai": "xAI"
+        case "amazon-bedrock": "Amazon Bedrock"
+        case "google-vertex": "Google Vertex AI"
+        case let other?: other
+        }
+    }
     var detailLabel: String {
-        [clientLabel, "parser \(parserVersion)", "metric \(metricVersion)", provider.map { "provider \($0)" } ?? "provider unknown", clientVersion.map { "version \($0)" } ?? "version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
+        [clientLabel, "parser \(parserVersion)", "metric \(metricVersion)", "provider \(Self.providerTitle(provider))", clientVersion.map { "version \($0)" } ?? "version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
             .joined(separator: " · ")
     }
     var selectionLabel: String { "\(displayModel) · \(detailLabel)" }
@@ -92,8 +104,8 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     /// Matches the public board's stable seven-dimension JSON identity.
     var communityBoardID: String? {
         guard let model, isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
-              ["openai", "anthropic", "xai", "unknown"].contains(provider ?? "unknown"),
               ["codex", "claude-code", "grok-build"].contains(client),
+              SharedSample.isAllowedProvider(provider, client: client),
               isSupportedTuple else { return nil }
         let version = clientVersion.flatMap { isSafe($0, pattern: "^[a-zA-Z0-9.+_-]{1,40}$") ? $0 : nil } ?? "unknown"
         guard isSafe(parserVersion, pattern: "^[a-zA-Z0-9._-]{1,40}$"),

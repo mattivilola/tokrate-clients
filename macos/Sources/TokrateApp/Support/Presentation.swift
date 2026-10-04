@@ -177,7 +177,7 @@ enum CohortLabeler {
             let providers = Set(siblings.map { $0.provider ?? "" })
             var parts: [String] = []
             if versions.count > 1 { parts.append(cohort.clientVersion.map { "v\($0)" } ?? "version unknown") }
-            if providers.count > 1 { parts.append(cohort.provider ?? "provider unknown") }
+            if providers.count > 1 { parts.append(cohort.provider.map(ModelCohort.providerTitle) ?? "Provider unknown") }
             if parts.isEmpty {
                 // Siblings differ only by parser or metric internals; keep entries distinguishable.
                 parts.append("parser \(cohort.parserVersion)")

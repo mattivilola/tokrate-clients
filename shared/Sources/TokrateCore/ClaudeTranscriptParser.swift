@@ -17,7 +17,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         case subagent
     }
 
-    static let parserVersion = "claude-transcript-v2"
+    static let parserVersion = "claude-transcript-v3"
     static let primaryMetricVersion = "claude-observed-turn-v1"
     static let subagentMetricVersion = "claude-observed-subagent-turn-v1"
     static let maximumInterjectionGap: TimeInterval = 30 * 60
@@ -40,6 +40,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         var hasSyntheticMessage = false
         var model: String?
         var modelIsAmbiguous = false
+        /// Distinct provider evidence across the turn's counted assistant records.
+        var providers: Set<String> = []
+        var hasRecordWithoutProviderEvidence = false
         var clientVersion: String?
         var versionIsAmbiguous = false
         var reasoningEffort: String?
@@ -50,6 +53,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     private var sourceIdentity: String
     private var turn: TurnState?
     private var emittedUserTurnIDs: Set<String> = []
+    /// False while a reader that started mid-file has not yet reached a reliable turn boundary.
+    private var isSynchronised = true
 
     init(sourceIdentity: String) { self.init(sourceIdentity: sourceIdentity, scope: .primary) }
 
@@ -61,7 +66,16 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     mutating func reset(sourceIdentity: String) {
         self.sourceIdentity = sourceIdentity
         turn = nil
+        isSynchronised = true
         emittedUserTurnIDs.removeAll(keepingCapacity: true)
+    }
+
+    /// A reader that starts mid-file can see the end of a turn whose start it never saw. Until the
+    /// first terminal assistant record or a conversation-root prompt (`parentUuid` null), prompts
+    /// are ignored so no partial turn is measured.
+    mutating func markStartedMidFile() {
+        turn = nil
+        isSynchronised = false
     }
 
     mutating func consume(line: Data) -> TurnMetric? {
@@ -84,17 +98,34 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     }
 
     private mutating func consumeUser(_ root: [String: Any]) {
-        guard root["isMeta"] as? Bool != true,
-              let content = (root["message"] as? [String: Any])?["content"],
+        guard let content = (root["message"] as? [String: Any])?["content"],
               let timestamp = parseDate(root["timestamp"])
         else { return }
+        let origin = root["origin"] as? [String: Any]
+        let originKind = origin?["kind"] as? String
+        // A subagent's follow-up task prompt (SendMessage to a running subagent) arrives as a meta
+        // record with origin `coordinator`; it is the only meta record that is a prompt.
+        let isCoordinatorFollowUp = scope == .subagent && originKind == "coordinator"
+        let promptKinds: Set<String> = scope == .subagent ? ["human", "coordinator"] : ["human"]
+        if root["isMeta"] as? Bool == true, !isCoordinatorFollowUp { return }
         if containsToolResult(content) {
+            noteActivity(at: timestamp)
+            return
+        }
+        // Current Claude Code marks prompts with `origin`. Any other kind (for example background
+        // task notifications) is activity, never a prompt. Records without `origin` come from older
+        // Claude Code versions and follow the v2 rules.
+        if origin != nil, !(originKind.map(promptKinds.contains) ?? false) {
             noteActivity(at: timestamp)
             return
         }
         if isInterruption(content) {
             turn = nil
             return
+        }
+        if !isSynchronised {
+            guard root["parentUuid"] is NSNull else { return }
+            isSynchronised = true
         }
         if var state = turn, timestamp.timeIntervalSince(state.lastActivityAt) <= Self.maximumInterjectionGap {
             state.lastActivityAt = max(state.lastActivityAt, timestamp)
@@ -118,6 +149,10 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     }
 
     private mutating func consumeAssistant(_ root: [String: Any]) -> TurnMetric? {
+        if !isSynchronised {
+            let stopReason = (root["message"] as? [String: Any])?["stop_reason"] as? String
+            if stopReason == "end_turn" || stopReason == "stop_sequence" { isSynchronised = true }
+        }
         guard var state = turn, let message = root["message"] as? [String: Any] else { return nil }
 
         if let timestamp = parseDate(root["timestamp"]) { state.lastActivityAt = max(state.lastActivityAt, timestamp) }
@@ -147,7 +182,14 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
                 turn = state
                 return nil
             }
-            if let model = safeIdentifier(message["model"] as? String, maximum: 80) {
+            if let provider = ClaudeProviderEvidence.provider(
+                messageID: message["id"] as? String, requestID: root["requestId"] as? String
+            ) {
+                state.providers.insert(provider)
+            } else {
+                state.hasRecordWithoutProviderEvidence = true
+            }
+            if let model = safeIdentifier(ClaudeModelID.normalized(message["model"] as? String), maximum: 80) {
                 if let existing = state.model, existing != model { state.modelIsAmbiguous = true }
                 else if state.model == nil { state.model = model }
             } else {
@@ -205,7 +247,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             parserVersion: Self.parserVersion,
             metricVersion: scope == .subagent ? Self.subagentMetricVersion : Self.primaryMetricVersion,
             sourceKind: scope == .subagent ? "subagent" : "primary",
-            provider: "unknown",
+            provider: state.hasRecordWithoutProviderEvidence || state.providers.count != 1
+                ? "unknown" : state.providers.first ?? "unknown",
             reasoningEffort: state.effortIsAmbiguous ? nil : state.reasoningEffort
         )
     }
@@ -290,6 +333,52 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     }
 }
 
+/// Explicit routing evidence in Claude Code transcripts. Provider is never inferred from the model
+/// name. The patterns use `\z` so a trailing newline cannot satisfy them (matching the Rust client).
+enum ClaudeProviderEvidence {
+    private static let bedrockMessage = try! NSRegularExpression(pattern: "^msg_bdrk_[A-Za-z0-9]{8,64}\\z")
+    private static let vertexMessage = try! NSRegularExpression(pattern: "^msg_vrtx_[A-Za-z0-9]{8,64}\\z")
+    private static let anthropicMessage = try! NSRegularExpression(pattern: "^msg_01[A-Za-z0-9]{22}\\z")
+    private static let anthropicRequest = try! NSRegularExpression(pattern: "^req_[A-Za-z0-9]{20,40}\\z")
+
+    /// The provider evidenced by one assistant record, or nil when the record carries none.
+    /// Anthropic's first-party API needs both the `msg_01…` message ID and a `req_…` request ID.
+    static func provider(messageID: String?, requestID: String?) -> String? {
+        guard let messageID else { return nil }
+        if matches(bedrockMessage, messageID) { return "amazon-bedrock" }
+        if matches(vertexMessage, messageID) { return "google-vertex" }
+        if matches(anthropicMessage, messageID), let requestID, matches(anthropicRequest, requestID) { return "anthropic" }
+        return nil
+    }
+
+    private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+        expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
+    }
+}
+
+/// Maps Bedrock (`us.anthropic.claude-…-v1:0`) and Vertex (`claude-…@20250929`) model identifiers to
+/// the canonical Claude model ID. Anything else is returned unchanged, so ARNs and other unsafe
+/// values still fail the later safe-identifier check and stay unknown.
+enum ClaudeModelID {
+    private static let bedrock = try! NSRegularExpression(
+        pattern: "^(?:[a-z]{2,6}(?:-[a-z]+)?\\.)?anthropic\\.(claude-[a-z0-9.-]+?)(?:-v[0-9]+(?::[0-9]+)?)?\\z"
+    )
+    private static let vertex = try! NSRegularExpression(pattern: "^(claude-[a-z0-9.-]+)@([0-9]{8})\\z")
+
+    static func normalized(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let range = NSRange(raw.startIndex..., in: raw)
+        if let match = bedrock.firstMatch(in: raw, range: range), let name = Range(match.range(at: 1), in: raw) {
+            return String(raw[name])
+        }
+        if let match = vertex.firstMatch(in: raw, range: range),
+           let name = Range(match.range(at: 1), in: raw), let date = Range(match.range(at: 2), in: raw) {
+            return "\(raw[name])-\(raw[date])"
+        }
+        return raw
+    }
+}
+
 /// Subagent transcripts use the same turn rules in `.subagent` scope.
 struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
     private var parser: ClaudeTranscriptParser
@@ -297,6 +386,7 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
     init(sourceIdentity: String) { parser = ClaudeTranscriptParser(sourceIdentity: sourceIdentity, scope: .subagent) }
     mutating func consume(line: Data) -> TurnMetric? { parser.consume(line: line) }
     mutating func reset(sourceIdentity: String) { parser.reset(sourceIdentity: sourceIdentity) }
+    mutating func markStartedMidFile() { parser.markStartedMidFile() }
 }
 
 /// Watches primary transcripts and `<session>/subagents/agent-*.jsonl` files under one root.

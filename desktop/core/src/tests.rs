@@ -277,6 +277,11 @@ fn parser_rejects_subagents_ambiguous_models_and_invalid_counters() {
 
     let mut ambiguous = crate::parser::CodexEventParser::new("file".into());
     ambiguous.consume(&event(
+        "event_msg",
+        json!({ "type": "task_started", "turn_id": "t", "started_at": now }),
+        now,
+    ));
+    ambiguous.consume(&event(
         "turn_context",
         json!({ "turn_id": "t", "model": "one", "effort": "high" }),
         now,
@@ -688,7 +693,7 @@ fn claude_interjection_continues_one_turn_from_its_original_start() {
     assert_eq!(result.model.as_deref(), Some("claude-model"));
     assert_eq!(result.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(result.client_version.as_deref(), Some("1.2.3"));
-    assert_eq!(result.parser_version, "claude-transcript-v2");
+    assert_eq!(result.parser_version, "claude-transcript-v3");
     assert_eq!(result.metric_version, CLAUDE_METRIC_VERSION);
     assert_eq!(result.source_kind.as_deref(), Some("primary"));
     // Identity comes from the original human turn, so an interjection never changes it.
@@ -916,7 +921,7 @@ fn claude_subagent_parser_emits_distinct_subagent_metrics_and_each_prompt_is_a_t
         .consume(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
         .unwrap();
     assert_eq!(first.client, CLAUDE_CLIENT);
-    assert_eq!(first.parser_version, "claude-transcript-v2");
+    assert_eq!(first.parser_version, "claude-transcript-v3");
     assert_eq!(first.metric_version, CLAUDE_SUBAGENT_METRIC_VERSION);
     assert_eq!(first.source_kind.as_deref(), Some("subagent"));
     assert_eq!(first.provider.as_deref(), Some("unknown"));
@@ -1140,9 +1145,9 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.12");
+    assert_eq!(sample.app_version, "0.1.13");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
-    assert_eq!(sample.parser_version, "claude-transcript-v2");
+    assert_eq!(sample.parser_version, "claude-transcript-v3");
     assert_eq!(sample.ttft_ms, None);
     let json = serde_json::to_value(&sample).unwrap();
     let mut keys: Vec<&str> = json
@@ -1508,12 +1513,17 @@ fn recent_monitor_waits_for_partial_lines_and_enforces_poll_budget() {
         json!({ "turn_id": "turn", "turn_token_usage": { "output_tokens": 42 } }),
         &started,
     );
+    let task_started = event(
+        "event_msg",
+        json!({ "type": "task_started", "turn_id": "turn", "started_at": started }),
+        &started,
+    );
     let completion = event(
         "event_msg",
         json!({ "type": "task_complete", "turn_id": "turn", "started_at": started, "completed_at": completed, "duration_ms": 1000 }),
         &completed,
     );
-    let mut contents = jsonl(&[header, usage]);
+    let mut contents = jsonl(&[header, task_started, usage]);
     contents.extend_from_slice(&completion);
     fs::write(&session, contents).unwrap();
 
@@ -1585,6 +1595,11 @@ fn monitor_rotates_caught_up_live_tails_so_older_open_sessions_are_serviced() {
     append
         .write_all(&jsonl(&[
             event(
+                "event_msg",
+                json!({ "type": "task_started", "turn_id": "late-turn", "started_at": start }),
+                &start,
+            ),
+            event(
                 "token_usage_record",
                 json!({ "turn_id": "late-turn", "turn_token_usage": { "output_tokens": 987 } }),
                 &start,
@@ -1639,6 +1654,7 @@ fn monitor_reads_recent_tail_while_historical_replay_is_bounded_and_resets_on_tr
     let done = (base - Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut append = fs::OpenOptions::new().append(true).open(&session).unwrap();
     append.write_all(&jsonl(&[
+        event("event_msg", json!({ "type": "task_started", "turn_id": "fresh", "started_at": start }), &start),
         event("token_usage_record", json!({ "turn_id": "fresh", "turn_token_usage": { "output_tokens": 120 } }), &start),
         event("event_msg", json!({ "type": "task_complete", "turn_id": "fresh", "started_at": start, "completed_at": done, "duration_ms": 1000 }), &done),
     ])).unwrap();
@@ -1662,6 +1678,11 @@ fn monitor_reads_recent_tail_while_historical_replay_is_bounded_and_resets_on_tr
             "session_meta",
             json!({ "id": "rotated", "source": "cli" }),
             &time_text,
+        ),
+        event(
+            "event_msg",
+            json!({ "type": "task_started", "turn_id": "after-truncate", "started_at": start }),
+            &start,
         ),
         event(
             "token_usage_record",
@@ -1707,6 +1728,7 @@ fn source_monitor_combines_all_adapters_under_one_poll_budget() {
         codex.join("codex.jsonl"),
         jsonl(&[
             event("session_meta", json!({"id":"codex-synthetic","source":"cli","model_provider":"openai"}), start),
+            event("event_msg", json!({"type":"task_started","turn_id":"codex-turn","started_at":start}), start),
             event("token_usage_record", json!({"turn_id":"codex-turn","turn_token_usage":{"output_tokens":50}}), start),
             event("event_msg", json!({"type":"task_complete","turn_id":"codex-turn","started_at":start,"completed_at":end,"duration_ms":5000}), end),
         ]),
@@ -1881,7 +1903,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.12");
+    assert_eq!(first[0].app_version, "0.1.13");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -1928,8 +1950,23 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         Some("1.2.3".into()),
         None,
         Some("primary".into()),
-        Some("unknown".into()),
+        Some("anthropic".into()),
         Some("high".into()),
+        CLAUDE_CLIENT,
+        CLAUDE_PARSER_VERSION,
+        CLAUDE_METRIC_VERSION,
+    );
+    let bedrock = TurnMetric::new_observed(
+        "local-bedrock-digest".into(),
+        completed,
+        Some("claude-sonnet-4-5-20250929".into()),
+        150,
+        5.0,
+        Some("1.2.3".into()),
+        None,
+        Some("primary".into()),
+        Some("amazon-bedrock".into()),
+        Some("medium".into()),
         CLAUDE_CLIENT,
         CLAUDE_PARSER_VERSION,
         CLAUDE_METRIC_VERSION,
@@ -1980,6 +2017,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
             Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
         )
         .unwrap(),
+        crate::SharedSample::from_metric(
+            &bedrock,
+            Uuid::parse_str("00000000-0000-4000-8000-000000000004").unwrap(),
+        )
+        .unwrap(),
     ];
     let now = time("2026-10-03T10:05:00Z");
     let key = [7_u8; 32];
@@ -1993,7 +2035,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.12-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.13-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2001,7 +2043,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.12-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.13-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2010,9 +2052,9 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     );
     assert_eq!(request.public_key, packet["publicKey"]);
     assert_eq!(request.signature, packet["signature"]);
-    assert_eq!(actual["samples"].as_array().unwrap().len(), 3);
+    assert_eq!(actual["samples"].as_array().unwrap().len(), 4);
     assert_eq!(actual["samples"][0]["client"], "claude-code");
-    assert_eq!(actual["samples"][0]["provider"], "unknown");
+    assert_eq!(actual["samples"][0]["provider"], "anthropic");
     assert_eq!(actual["samples"][0]["ttftMs"], Value::Null);
     assert_eq!(actual["samples"][1]["client"], "grok-build");
     assert_eq!(actual["samples"][1]["clientVersion"], "unknown");
@@ -2023,7 +2065,10 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.12");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.13");
+    assert_eq!(actual["samples"][3]["client"], "claude-code");
+    assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
+    assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2073,4 +2118,694 @@ fn samples_fail_closed_on_invalid_numbers_and_explicitly_null_missing_fields() {
     let json = serde_json::to_value(sample).unwrap();
     assert!(json.get("reasoningOutputTokens").unwrap().is_null());
     assert!(json.get("ttftMs").unwrap().is_null());
+}
+
+const ANTHROPIC_MESSAGE: &str = "msg_01ABCDEFGHJKLMNPQRSTUVwx";
+const ANTHROPIC_MESSAGE_2: &str = "msg_01ZYXWVUTSRQPNMLKJHGFEdc";
+const ANTHROPIC_REQUEST: &str = "req_011CPabcdefghijklmnopqrstuv";
+const BEDROCK_MESSAGE: &str = "msg_bdrk_01ABCDEFGHJKLMNPQRSTUVwx";
+const VERTEX_MESSAGE: &str = "msg_vrtx_01ABCDEFGHJKLMNPQRSTUVwx";
+
+fn with_request(line: Vec<u8>) -> Vec<u8> {
+    with_fields(line, json!({ "requestId": ANTHROPIC_REQUEST }))
+}
+
+/// Runs one primary turn of two assistant messages and returns the emitted provider.
+fn provider_of_turn(first: Vec<u8>, second: Vec<u8>) -> Option<String> {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "provider-turn",
+        json!("synthetic"),
+    ));
+    parser.consume(&first);
+    parser.consume(&second)?.provider
+}
+
+#[test]
+fn claude_provider_comes_only_from_explicit_message_and_request_identifiers() {
+    let direct = |at: &str, id: &str, stop: &str| with_request(assistant(at, id, stop, 5));
+    let bedrock = |at: &str, id: &str, stop: &str| assistant(at, id, stop, 5);
+
+    assert_eq!(
+        provider_of_turn(
+            direct("2026-10-03T10:00:05Z", ANTHROPIC_MESSAGE, "tool_use"),
+            direct("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE_2, "end_turn"),
+        )
+        .as_deref(),
+        Some("anthropic")
+    );
+    assert_eq!(
+        provider_of_turn(
+            bedrock("2026-10-03T10:00:05Z", BEDROCK_MESSAGE, "tool_use"),
+            bedrock("2026-10-03T10:00:10Z", "msg_bdrk_01ZYXWVUTSRQPNMLKJHGFEdc", "end_turn"),
+        )
+        .as_deref(),
+        Some("amazon-bedrock")
+    );
+    assert_eq!(
+        provider_of_turn(
+            bedrock("2026-10-03T10:00:05Z", VERTEX_MESSAGE, "tool_use"),
+            bedrock("2026-10-03T10:00:10Z", "msg_vrtx_01ZYXWVUTSRQPNMLKJHGFEdc", "end_turn"),
+        )
+        .as_deref(),
+        Some("google-vertex")
+    );
+    // A first-party-shaped id without its request id is not evidence (proxies copy the shape).
+    assert_eq!(
+        provider_of_turn(
+            assistant("2026-10-03T10:00:05Z", ANTHROPIC_MESSAGE, "tool_use", 5),
+            assistant("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE_2, "end_turn", 5),
+        )
+        .as_deref(),
+        Some("unknown")
+    );
+    // One message without evidence makes the whole turn unknown, in either position.
+    assert_eq!(
+        provider_of_turn(
+            direct("2026-10-03T10:00:05Z", ANTHROPIC_MESSAGE, "tool_use"),
+            assistant("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE_2, "end_turn", 5),
+        )
+        .as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        provider_of_turn(
+            assistant("2026-10-03T10:00:05Z", "plain-call-1", "tool_use", 5),
+            direct("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE, "end_turn"),
+        )
+        .as_deref(),
+        Some("unknown")
+    );
+    // Different providers within one turn never pick a winner.
+    assert_eq!(
+        provider_of_turn(
+            direct("2026-10-03T10:00:05Z", ANTHROPIC_MESSAGE, "tool_use"),
+            bedrock("2026-10-03T10:00:10Z", BEDROCK_MESSAGE, "end_turn"),
+        )
+        .as_deref(),
+        Some("unknown")
+    );
+}
+
+#[test]
+fn claude_provider_rejects_malformed_identifiers() {
+    use crate::claude_parser::provider_evidence;
+    let request = Some(ANTHROPIC_REQUEST);
+    assert_eq!(provider_evidence(ANTHROPIC_MESSAGE, request), Some("anthropic"));
+    // Wrong lengths and characters.
+    assert_eq!(provider_evidence("msg_01ABCDEFGHJKLMNPQRSTUV", request), None);
+    assert_eq!(provider_evidence("msg_01ABCDEFGHJKLMNPQRSTUVwxy", request), None);
+    assert_eq!(provider_evidence("msg_01ABCDEFGHJKLMNPQRSTU-wx", request), None);
+    assert_eq!(provider_evidence("msg_02ABCDEFGHJKLMNPQRSTUVwx", request), None);
+    assert_eq!(provider_evidence(ANTHROPIC_MESSAGE, Some("req_short")), None);
+    assert_eq!(
+        provider_evidence(ANTHROPIC_MESSAGE, Some("req_011CPabcdefghijklmnopqrstuv_")),
+        None
+    );
+    assert_eq!(
+        provider_evidence(ANTHROPIC_MESSAGE, Some("011CPabcdefghijklmnopqrstuv")),
+        None
+    );
+    assert_eq!(provider_evidence(ANTHROPIC_MESSAGE, None), None);
+    // Bedrock and Vertex need 8..=64 alphanumerics and no request id.
+    assert_eq!(provider_evidence("msg_bdrk_12345678", None), Some("amazon-bedrock"));
+    assert_eq!(provider_evidence("msg_bdrk_1234567", None), None);
+    assert_eq!(
+        provider_evidence(&format!("msg_bdrk_{}", "a".repeat(64)), None),
+        Some("amazon-bedrock")
+    );
+    assert_eq!(
+        provider_evidence(&format!("msg_bdrk_{}", "a".repeat(65)), None),
+        None
+    );
+    assert_eq!(provider_evidence("msg_bdrk_1234567_", None), None);
+    assert_eq!(provider_evidence("msg_vrtx_12345678", None), Some("google-vertex"));
+    assert_eq!(provider_evidence("msg_vrtx_1234567", None), None);
+    assert_eq!(provider_evidence("msg_xxxx_12345678", None), None);
+}
+
+#[test]
+fn claude_subagent_provider_uses_the_same_evidence() {
+    let session = "sub-session";
+    let agent = "sub-agent";
+    let user = |id: &str, at: &str| {
+        as_subagent(claude_user(at, id, json!("task")), session, agent)
+    };
+    let reply = |at: &str, id: &str, stop: &str, request: bool| {
+        let line = as_subagent(assistant(at, id, stop, 20), session, agent);
+        if request {
+            with_request(line)
+        } else {
+            line
+        }
+    };
+    let mut direct = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    direct.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    direct.consume(&reply("2026-10-03T10:00:04Z", ANTHROPIC_MESSAGE, "tool_use", true));
+    let found = direct
+        .consume(&reply("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE_2, "end_turn", true))
+        .unwrap();
+    assert_eq!(found.provider.as_deref(), Some("anthropic"));
+    assert_eq!(found.source_kind.as_deref(), Some("subagent"));
+
+    let mut bedrock = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    bedrock.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    let found = bedrock
+        .consume(&reply("2026-10-03T10:00:10Z", BEDROCK_MESSAGE, "end_turn", false))
+        .unwrap();
+    assert_eq!(found.provider.as_deref(), Some("amazon-bedrock"));
+
+    let mut missing = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    missing.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    let found = missing
+        .consume(&reply("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE, "end_turn", false))
+        .unwrap();
+    assert_eq!(found.provider.as_deref(), Some("unknown"));
+}
+
+#[test]
+fn claude_model_names_are_normalized_before_the_safe_identifier_check() {
+    use crate::claude_parser::normalize_claude_model as normalize;
+    let cases: &[(&str, Option<&str>)] = &[
+        // Plain first-party names are unchanged, including dots.
+        ("claude-sonnet-4-5-20250929", Some("claude-sonnet-4-5-20250929")),
+        ("claude-opus-4.5", Some("claude-opus-4.5")),
+        ("gpt-test", Some("gpt-test")),
+        // Bedrock: region prefixes and version suffixes are optional.
+        (
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            Some("claude-sonnet-4-5-20250929"),
+        ),
+        (
+            "anthropic.claude-3-haiku-20240307-v1:0",
+            Some("claude-3-haiku-20240307"),
+        ),
+        ("global.anthropic.claude-opus-4-6-v1", Some("claude-opus-4-6")),
+        ("us-gov.anthropic.claude-sonnet-4-5-v2", Some("claude-sonnet-4-5")),
+        ("eu.anthropic.claude-sonnet-4-5", Some("claude-sonnet-4-5")),
+        ("anthropic.claude-v1", Some("claude-v1")),
+        // Vertex.
+        (
+            "claude-sonnet-4-5@20250929",
+            Some("claude-sonnet-4-5-20250929"),
+        ),
+        ("claude-3-haiku@20240307", Some("claude-3-haiku-20240307")),
+        // Rejected: ARNs, malformed versions and anything else unsafe.
+        (
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-v1:0",
+            None,
+        ),
+        ("claude-sonnet-4-5@latest", None),
+        ("claude-sonnet-4-5@2025092", None),
+        ("claude-sonnet-4-5@202509299", None),
+        ("claude-sonnet-4-5@20250929@20250929", None),
+        ("claude-sonnet-4-5:0", None),
+        ("anthropic.claude-sonnet-4-5-v1:", None),
+        ("anthropic.claude-sonnet-4-5:0", None),
+        ("anthropic.gpt-4-v1:0", None),
+        ("Anthropic.claude-sonnet-4-5-v1:0", None),
+        ("us.anthropic.Claude-sonnet-4-5-v1:0", None),
+        ("toolong.anthropic.claude-sonnet-4-5-v1:0", None),
+        ("a.anthropic.claude-sonnet-4-5-v1:0", None),
+        ("", None),
+        ("claude sonnet", None),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(normalize(raw).as_deref(), *expected, "{raw}");
+    }
+    // The normalized value still obeys the 80-byte public limit.
+    let long = format!("anthropic.claude-{}-v1:0", "a".repeat(80));
+    assert_eq!(normalize(&long), None);
+}
+
+#[test]
+fn claude_model_consistency_compares_normalized_names_across_routes() {
+    let model_line = |at: &str, id: &str, stop: &str, model: &str| {
+        claude_message("assistant", "assistant", at, id, model, stop, 5, json!([]))
+    };
+    let mut same = claude_parser();
+    same.consume(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
+    same.consume(&model_line(
+        "2026-10-03T10:00:05Z",
+        "call-1",
+        "tool_use",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ));
+    let found = same
+        .consume(&model_line(
+            "2026-10-03T10:00:10Z",
+            "call-2",
+            "end_turn",
+            "claude-sonnet-4-5@20250929",
+        ))
+        .unwrap();
+    assert_eq!(found.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+
+    let mut different = claude_parser();
+    different.consume(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
+    different.consume(&model_line(
+        "2026-10-03T10:00:05Z",
+        "call-1",
+        "tool_use",
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ));
+    let found = different
+        .consume(&model_line(
+            "2026-10-03T10:00:10Z",
+            "call-2",
+            "end_turn",
+            "claude-opus-4-6",
+        ))
+        .unwrap();
+    assert_eq!(found.model, None);
+
+    // An ARN cannot be normalized, so the turn has no model rather than a raw value.
+    let mut arn = claude_parser();
+    arn.consume(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
+    let found = arn
+        .consume(&model_line(
+            "2026-10-03T10:00:10Z",
+            "call-1",
+            "end_turn",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/x",
+        ))
+        .unwrap();
+    assert_eq!(found.model, None);
+}
+
+#[test]
+fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
+    let completed = time("2026-10-03T10:03:47Z");
+    let build = |client: &str, parser: &str, metric_version: &str, provider: &str| {
+        TurnMetric::new_observed(
+            "local-digest".into(),
+            completed,
+            Some("claude-sonnet-4-5-20250929".into()),
+            90,
+            3.0,
+            Some("2.1.0".into()),
+            None,
+            Some("primary".into()),
+            Some(provider.into()),
+            Some("high".into()),
+            client,
+            parser,
+            metric_version,
+        )
+    };
+    let shared = |metric: &TurnMetric| {
+        crate::SharedSample::from_metric(metric, Uuid::new_v4())
+            .unwrap()
+            .provider
+    };
+    for provider in ["anthropic", "amazon-bedrock", "google-vertex", "unknown"] {
+        assert_eq!(
+            shared(&build(
+                CLAUDE_CLIENT,
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_METRIC_VERSION,
+                provider
+            )),
+            provider
+        );
+        assert_eq!(
+            shared(&build(
+                CLAUDE_CLIENT,
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_SUBAGENT_METRIC_VERSION,
+                provider
+            )),
+            provider
+        );
+    }
+    for provider in ["amazon-bedrock", "google-vertex"] {
+        assert_eq!(
+            shared(&build(
+                GROK_CLIENT,
+                GROK_PARSER_VERSION,
+                GROK_METRIC_VERSION,
+                provider
+            )),
+            "unknown"
+        );
+        assert_eq!(
+            shared(&build(
+                crate::CODEX_CLIENT,
+                crate::CODEX_PARSER_VERSION,
+                crate::CODEX_METRIC_VERSION,
+                provider
+            )),
+            "unknown"
+        );
+    }
+    assert_eq!(
+        shared(&build(
+            GROK_CLIENT,
+            GROK_PARSER_VERSION,
+            GROK_METRIC_VERSION,
+            "xai"
+        )),
+        "xai"
+    );
+    assert_eq!(
+        shared(&build(
+            crate::CODEX_CLIENT,
+            crate::CODEX_PARSER_VERSION,
+            crate::CODEX_METRIC_VERSION,
+            "openai"
+        )),
+        "openai"
+    );
+    assert_eq!(
+        shared(&build(
+            CLAUDE_CLIENT,
+            CLAUDE_PARSER_VERSION,
+            CLAUDE_METRIC_VERSION,
+            "other-provider"
+        )),
+        "unknown"
+    );
+    assert_eq!(crate::APP_VERSION, "0.1.13");
+
+    // Parser v1 and v2 records (saved by earlier versions) are never shared.
+    for old_parser in ["claude-transcript-v1", "claude-transcript-v2"] {
+        let legacy = build(
+            CLAUDE_CLIENT,
+            old_parser,
+            CLAUDE_METRIC_VERSION,
+            "anthropic",
+        );
+        assert!(crate::SharedSample::from_metric(&legacy, Uuid::new_v4()).is_none());
+    }
+    assert_eq!(CLAUDE_PARSER_VERSION, "claude-transcript-v3");
+}
+
+fn user_with(at: &str, id: &str, fields: Value) -> Vec<u8> {
+    with_fields(claude_user(at, id, json!("synthetic")), fields)
+}
+
+fn assistant_end(at: &str, id: &str) -> Vec<u8> {
+    assistant(at, id, "end_turn", 40)
+}
+
+#[test]
+fn claude_task_notifications_are_activity_never_prompts() {
+    let notification = |at: &str, id: &str| {
+        user_with(
+            at,
+            id,
+            json!({ "origin": { "kind": "task-notification" } }),
+        )
+    };
+    // After a terminal record a notification starts nothing, so later assistant records
+    // (the model reacting to it) emit no measurement.
+    let mut after = claude_parser();
+    after.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    assert!(after
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
+        .is_some());
+    assert!(after
+        .consume(&notification("2026-10-03T10:05:00Z", "note-1"))
+        .is_none());
+    assert!(after
+        .consume(&assistant("2026-10-03T10:05:05Z", "call-2", "tool_use", 9))
+        .is_none());
+    assert!(after
+        .consume(&assistant_end("2026-10-03T10:05:10Z", "call-3"))
+        .is_none());
+
+    // Mid-turn it neither restarts the turn nor continues it as an interjection: only activity.
+    let mut mid = claude_parser();
+    mid.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    mid.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    mid.consume(&notification("2026-10-03T10:00:20Z", "note-1"));
+    let found = mid
+        .consume(&assistant_end("2026-10-03T10:00:40Z", "call-2"))
+        .unwrap();
+    assert_eq!(found.duration_seconds, 40.0);
+    assert_eq!(found.output_tokens, 45);
+
+    // A background event never discards the active turn the way a real interruption does.
+    let mut keeps = claude_parser();
+    keeps.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    keeps.consume(&notification("2026-10-03T10:00:05Z", "note-1"));
+    assert!(keeps
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
+        .is_some());
+
+    // Human origin and origin-less records follow the v2 rules.
+    let mut human = claude_parser();
+    human.consume(&user_with(
+        "2026-10-03T10:00:00Z",
+        "human",
+        json!({ "origin": { "kind": "human" } }),
+    ));
+    assert!(human
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
+        .is_some());
+}
+
+#[test]
+fn claude_subagent_coordinator_follow_ups_are_prompts_even_when_meta() {
+    let session = "11111111-2222-4333-8444-555555555555";
+    let agent = "a1b2c3d4e5f60718";
+    let record = |line: Vec<u8>| as_subagent(line, session, agent);
+    let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    parser.consume(&record(claude_user(
+        "2026-10-03T10:00:00Z",
+        "task-1",
+        json!("task"),
+    )));
+    let first = parser
+        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .unwrap();
+    parser.consume(&record(user_with(
+        "2026-10-03T10:10:00Z",
+        "follow-up",
+        json!({ "isMeta": true, "origin": { "kind": "coordinator" } }),
+    )));
+    let second = parser
+        .consume(&record(assistant_end("2026-10-03T10:10:20Z", "sub-2")))
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.duration_seconds, 20.0);
+
+    // Other meta records, with or without an origin, stay ignored.
+    let mut ignored = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    ignored.consume(&record(user_with(
+        "2026-10-03T10:00:00Z",
+        "meta",
+        json!({ "isMeta": true, "origin": { "kind": "task-notification" } }),
+    )));
+    ignored.consume(&record(user_with(
+        "2026-10-03T10:00:01Z",
+        "meta-2",
+        json!({ "isMeta": true }),
+    )));
+    assert!(ignored
+        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .is_none());
+
+    // A non-meta record with a background origin is activity only in a subagent file: it
+    // neither starts a turn after a terminal record nor continues or discards an active one.
+    let mut background = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    background.consume(&record(claude_user(
+        "2026-10-03T10:00:00Z",
+        "task-1",
+        json!("task"),
+    )));
+    assert!(background
+        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .is_some());
+    background.consume(&record(user_with(
+        "2026-10-03T10:05:00Z",
+        "note-1",
+        json!({ "origin": { "kind": "task-notification" } }),
+    )));
+    assert!(background
+        .consume(&record(assistant_end("2026-10-03T10:05:10Z", "sub-2")))
+        .is_none());
+    let mut mid = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    mid.consume(&record(claude_user(
+        "2026-10-03T10:00:00Z",
+        "task-1",
+        json!("task"),
+    )));
+    mid.consume(&record(assistant(
+        "2026-10-03T10:00:10Z",
+        "sub-1",
+        "tool_use",
+        5,
+    )));
+    mid.consume(&record(user_with(
+        "2026-10-03T10:00:20Z",
+        "note-1",
+        json!({ "origin": { "kind": "task-notification" } }),
+    )));
+    let found = mid
+        .consume(&record(assistant_end("2026-10-03T10:00:30Z", "sub-2")))
+        .unwrap();
+    assert_eq!(found.duration_seconds, 30.0);
+    // Human origin is an ordinary prompt in a subagent file.
+    let mut human = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    human.consume(&record(user_with(
+        "2026-10-03T10:00:00Z",
+        "task-1",
+        json!({ "origin": { "kind": "human" } }),
+    )));
+    assert!(human
+        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .is_some());
+
+    // A follow-up within 30 minutes of active work continues the same turn (v2 rules).
+    let mut continued = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    continued.consume(&record(claude_user(
+        "2026-10-03T10:00:00Z",
+        "task-1",
+        json!("task"),
+    )));
+    continued.consume(&record(assistant(
+        "2026-10-03T10:00:10Z",
+        "sub-1",
+        "tool_use",
+        5,
+    )));
+    continued.consume(&record(user_with(
+        "2026-10-03T10:00:20Z",
+        "follow-up",
+        json!({ "isMeta": true, "origin": { "kind": "coordinator" } }),
+    )));
+    let found = continued
+        .consume(&record(assistant_end("2026-10-03T10:00:30Z", "sub-2")))
+        .unwrap();
+    assert_eq!(found.duration_seconds, 30.0);
+}
+
+#[test]
+fn claude_parser_started_mid_file_waits_for_a_turn_boundary() {
+    // Terminal assistant boundary: the partial turn is skipped, the next full turn is measured.
+    let mut tail = claude_parser();
+    tail.begin_mid_file();
+    tail.consume(&claude_user("2026-10-03T10:00:00Z", "partial", json!("go")));
+    assert!(tail
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "partial-end"))
+        .is_none());
+    tail.consume(&claude_user("2026-10-03T10:01:00Z", "full", json!("go")));
+    let found = tail
+        .consume(&assistant_end("2026-10-03T10:01:10Z", "full-end"))
+        .unwrap();
+    assert_eq!(found.duration_seconds, 10.0);
+
+    // A prompt without a null parentUuid cannot synchronise, even after a notification.
+    let mut unsynced = claude_parser();
+    unsynced.begin_mid_file();
+    unsynced.consume(&user_with(
+        "2026-10-03T10:00:00Z",
+        "mid",
+        json!({ "parentUuid": "previous-record" }),
+    ));
+    assert!(unsynced
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "mid-end"))
+        .is_none());
+
+    // A conversation's first prompt (parentUuid null) is a boundary and starts a turn.
+    let mut first = claude_parser();
+    first.begin_mid_file();
+    first.consume(&user_with(
+        "2026-10-03T10:00:00Z",
+        "first",
+        json!({ "parentUuid": null }),
+    ));
+    assert!(first
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "first-end"))
+        .is_some());
+
+    // A parser reading from the start never waits.
+    let mut archive = claude_parser();
+    archive.consume(&claude_user("2026-10-03T10:00:00Z", "full", json!("go")));
+    assert!(archive
+        .consume(&assistant_end("2026-10-03T10:00:10Z", "full-end"))
+        .is_some());
+}
+
+#[test]
+fn recent_tail_reader_synchronizes_claude_transcripts_but_archive_reads_everything() {
+    let temp = TestDir::new();
+    let path = temp.path().join("transcript.jsonl");
+    let mut contents = jsonl(&[user_with(
+        "2026-10-03T09:00:00Z",
+        "header",
+        json!({ "parentUuid": null }),
+    )]);
+    contents.extend_from_slice(&jsonl(&[assistant("2026-10-03T09:00:05Z", "head-1", "tool_use", 3)]));
+    for _ in 0..4_000 {
+        contents.extend_from_slice(b"{\"type\":\"ignored_event\",\"padding\":\"0123456789012345678901234567890123456789012345678901234567890123456789\"}\n");
+    }
+    contents.extend_from_slice(&jsonl(&[
+        claude_user("2026-10-03T10:00:00Z", "partial", json!("go")),
+        assistant_end("2026-10-03T10:00:10Z", "partial-end"),
+        claude_user("2026-10-03T10:01:00Z", "full", json!("go")),
+        assistant_end("2026-10-03T10:01:10Z", "full-end"),
+    ]));
+    fs::write(&path, &contents).unwrap();
+
+    let poll_all = |mut reader: crate::reader::IncrementalReader| {
+        let mut found = Vec::new();
+        for _ in 0..8 {
+            found.extend(reader.poll(8 * 1_048_576).unwrap());
+        }
+        found
+    };
+    let tail = poll_all(crate::reader::IncrementalReader::recent_tail_claude(
+        path.clone(),
+    ));
+    assert_eq!(tail.len(), 1, "partial turn skipped, next full turn measured");
+    assert_eq!(tail[0].duration_seconds, 10.0);
+
+    let archive = poll_all(crate::reader::IncrementalReader::beginning_claude(path));
+    assert_eq!(archive.len(), 2, "reading from the start keeps every complete turn");
+}
+
+#[test]
+fn codex_parser_requires_the_observed_turn_start() {
+    let start = "2026-10-03T10:00:00Z";
+    let end = "2026-10-03T10:00:05Z";
+    let feed = |parser: &mut crate::parser::CodexEventParser, with_start: bool| {
+        parser.consume(&event(
+            "session_meta",
+            json!({ "id": "codex-session", "source": "cli", "model_provider": "openai" }),
+            start,
+        ));
+        if with_start {
+            parser.consume(&event(
+                "event_msg",
+                json!({ "type": "task_started", "turn_id": "turn", "started_at": start }),
+                start,
+            ));
+        }
+        parser.consume(&event(
+            "turn_context",
+            json!({ "turn_id": "turn", "model": "gpt-test", "effort": "high" }),
+            start,
+        ));
+        parser.consume(&event(
+            "token_usage_record",
+            json!({ "turn_id": "turn", "turn_token_usage": { "output_tokens": 50 } }),
+            start,
+        ));
+        parser.consume(&event(
+            "event_msg",
+            json!({ "type": "task_complete", "turn_id": "turn", "started_at": start, "completed_at": end, "duration_ms": 5000 }),
+            end,
+        ))
+    };
+    // A tail that began mid-turn never saw the start (nor, usually, the context).
+    let mut tail = crate::parser::CodexEventParser::new("file".into());
+    tail.begin_mid_file();
+    assert!(feed(&mut tail, false).is_none());
+    let mut archive = crate::parser::CodexEventParser::new("file".into());
+    let found = feed(&mut archive, true).unwrap();
+    assert_eq!(found.model.as_deref(), Some("gpt-test"));
+    assert_eq!(found.output_tokens, 50);
 }

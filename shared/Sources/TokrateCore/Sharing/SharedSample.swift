@@ -6,7 +6,7 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.12"
+    public let appVersion = "0.1.13"
     public let parserVersion: String
     public let metricVersion: String
     public let model: String
@@ -20,9 +20,10 @@ public struct SharedSample: Encodable, Sendable {
 
     public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
         let duration = metric.durationSeconds * 1_000
-        // v1 Claude records may remain in local history but are never shared by a v2 release.
-        guard metric.isSupportedSourceTuple, metric.parserVersion != "claude-transcript-v1",
-              ["openai", "anthropic", "xai", "unknown"].contains(metric.provider ?? "unknown"),
+        // v1 and v2 Claude records may remain in local history but are never shared from 0.1.13.
+        guard metric.isSupportedSourceTuple,
+              !["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion),
+              Self.isAllowedProvider(metric.provider, client: metric.client),
               (metric.client != "grok-build" || metric.clientVersion == nil || metric.clientVersion == "unknown")
         else { return nil }
         guard duration.isFinite, (1...86_400_000).contains(duration),
@@ -43,6 +44,15 @@ public struct SharedSample: Encodable, Sendable {
         ttftMs = metric.ttftSeconds.flatMap { value in
             let ms = value * 1_000
             return ms.isFinite && (0...duration).contains(ms) ? ms : nil
+        }
+    }
+
+    /// Bedrock and Vertex are explicit-evidence providers only Claude Code reports.
+    public static func isAllowedProvider(_ provider: String?, client: String) -> Bool {
+        switch provider ?? "unknown" {
+        case "openai", "anthropic", "xai", "unknown": true
+        case "amazon-bedrock", "google-vertex": client == "claude-code"
+        default: false
         }
     }
 

@@ -148,7 +148,7 @@ struct SharingView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Text(cohort.model).lineLimit(1)
-                Text("· \(cohort.provider)").foregroundStyle(DashboardStyle.muted).lineLimit(1)
+                Text("· \(ModelCohort.providerTitle(cohort.provider))").foregroundStyle(DashboardStyle.muted).lineLimit(1)
                 Spacer(minLength: 4)
                 Text(cohort.medianThroughput.map { String(format: "%.1f t/s", $0) } ?? "—")
                     .monospacedDigit().fontWeight(.medium)

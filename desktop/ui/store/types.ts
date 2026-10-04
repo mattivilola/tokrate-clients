@@ -117,7 +117,14 @@ export interface Bridge {
 }
 
 export type ToolFilter = "all" | SourceId;
-export type ProviderFilter = "all" | "openai" | "anthropic" | "xai" | "unknown";
+export type ProviderFilter =
+  | "all"
+  | "openai"
+  | "anthropic"
+  | "amazon-bedrock"
+  | "google-vertex"
+  | "xai"
+  | "unknown";
 export type ChartMetric = "throughput" | "ttft";
 export type View = "home" | "settings";
 

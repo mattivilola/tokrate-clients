@@ -138,10 +138,16 @@ struct SettingsSourcesPage: View {
         SettingsPage {
             SettingsGroup(
                 title: "Coding tools",
-                footer: "Tokrate reads these session folders on this Mac, automatically, whenever monitoring is on. Choose a different Codex folder while monitoring is paused."
+                footer: "Tokrate reads these session folders on this Mac, automatically, whenever monitoring is on. Choose a different folder while monitoring is paused, for example if you set CLAUDE_CONFIG_DIR or GROK_HOME in a terminal: apps opened from Finder don't see those variables."
             ) {
                 SourceStatusList(statuses: store.sourceStatuses) { status in
-                    if status.client == "codex" { CodexFolderButton(store: store).buttonStyle(SecondaryButtonStyle()) }
+                    if let kind = SourceFolderKind(rawValue: status.client) {
+                        HStack(spacing: 8) {
+                            if store.hasCustomFolder(for: kind) { SourceFolderResetButton(store: store, kind: kind) }
+                            SourceFolderButton(store: store, kind: kind)
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                    }
                 }
             }
             if let error = store.errorMessage {

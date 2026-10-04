@@ -253,6 +253,7 @@ impl IncrementalReader {
         let tail_start = current_size.saturating_sub(self.tail_bytes.unwrap_or(DEFAULT_TAIL_BYTES));
         self.offset = header_end.max(tail_start);
         self.startup = if self.offset > header_end {
+            self.parser.begin_mid_file();
             Startup::Alignment
         } else {
             Startup::Ready

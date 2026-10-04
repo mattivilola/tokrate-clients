@@ -84,6 +84,23 @@ final class CodexSessionMonitorTests: XCTestCase {
         XCTAssertEqual(history.records.first?.model, "reported-model")
     }
 
+    func testTailCompletionWithoutObservedStartIsSkippedAndArchiveEmitsTheWholeTurn() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("mid-turn.jsonl")
+        let begin = Data(#"{"timestamp":"2026-10-03T19:59:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"mid"}}"#.utf8) + Data([0x0A])
+        let context = Data(#"{"type":"turn_context","payload":{"turn_id":"mid","model":"reported-model"}}"#.utf8) + Data([0x0A])
+        let usage = Data(#"{"type":"token_usage_record","payload":{"turn_id":"mid","turn_token_usage":{"output_tokens":555}}}"#.utf8) + Data([0x0A])
+        let complete = Data(#"{"timestamp":"2026-10-03T20:00:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"mid","duration_ms":60000}}"#.utf8) + Data([0x0A])
+        try (metadata(id: "mid-turn") + begin + context + padding(bytes: CodexSessionMonitor.recentTailBytes + 4_096) + usage + complete).write(to: file)
+        let monitor = CodexSessionMonitor(root: directory)
+        var emitted: [TurnMetric] = []
+        for _ in 0..<10 { emitted += try await monitor.poll() }
+        XCTAssertEqual(emitted.count, 1, "the live tail emitted nothing; only the archive reader measured the turn")
+        XCTAssertEqual(emitted.first?.model, "reported-model")
+        XCTAssertEqual(emitted.first?.outputTokens, 555)
+    }
+
     private func temporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -94,6 +111,6 @@ final class CodexSessionMonitorTests: XCTestCase {
     }
     private func padding(bytes: Int) -> Data { Data(repeating: 0x20, count: bytes) + Data([0x0A]) }
     private func turn(id: String, tokens: Int) -> Data {
-        Data("{\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"\(id)\",\"turn_token_usage\":{\"output_tokens\":\(tokens)}}}\n{\"timestamp\":\"2026-10-03T20:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(id)\",\"duration_ms\":1000}}\n".utf8)
+        Data("{\"timestamp\":\"2026-10-03T19:59:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"\(id)\"}}\n{\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"\(id)\",\"turn_token_usage\":{\"output_tokens\":\(tokens)}}}\n{\"timestamp\":\"2026-10-03T20:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(id)\",\"duration_ms\":1000}}\n".utf8)
     }
 }

@@ -5,10 +5,13 @@ protocol JSONLMetricParser: Sendable {
     mutating func consume(line: Data) -> TurnMetric?
     mutating func reset(sourceIdentity: String)
     mutating func reconcile(snapshot: Data) -> [TurnMetric]
+    /// Called when the reader starts at a recent tail offset inside the file rather than at byte 0.
+    mutating func markStartedMidFile()
 }
 
 extension JSONLMetricParser {
     mutating func reconcile(snapshot: Data) -> [TurnMetric] { [] }
+    mutating func markStartedMidFile() {}
 }
 
 /// Incremental, bounded JSONL input for the additional local transcript formats.
@@ -56,6 +59,7 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
                 offset = size > tail ? size - tail : 0
                 // A tail can start in the middle of a record. Drop that first partial line.
                 droppingLine = offset > 0
+                if offset > 0 { parser.markStartedMidFile() }
             }
             tailInitializationPending = false
         }

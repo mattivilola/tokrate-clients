@@ -29,7 +29,7 @@ struct ProviderFilterPicker: View {
         Picker("Inference provider", selection: $provider) {
             Text("All inference providers").tag(String?.none)
             ForEach(providers, id: \.self) { value in
-                Text(value == "unknown" ? "Inference provider unknown" : value).tag(Optional(value))
+                Text(value == "unknown" ? "Inference provider unknown" : ModelCohort.providerTitle(value)).tag(Optional(value))
             }
         }
         .pickerStyle(.inline)
@@ -83,7 +83,7 @@ struct ClientProviderFilterView: View {
             Menu {
                 ProviderFilterPicker(provider: $provider, providers: providers)
             } label: {
-                MenuFieldLabel(text: "Provider: \(provider.map { $0 == "unknown" ? "Unknown" : $0 } ?? "All")")
+                MenuFieldLabel(text: "Provider: \(provider.map(ModelCohort.providerTitle) ?? "All")")
             }
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
             .accessibilityLabel("Filter by inference provider")

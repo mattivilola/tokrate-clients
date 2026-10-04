@@ -21,6 +21,29 @@ struct SourceStatus: Identifiable, Equatable, Sendable {
     var isFound: Bool { availability == .found }
 }
 
+/// The coding tools whose session folder the user can choose. Finder-launched apps do not inherit
+/// shell variables such as `CLAUDE_CONFIG_DIR` or `GROK_HOME`, so each folder needs an in-app override.
+/// The raw value is the stable client identifier.
+enum SourceFolderKind: String, CaseIterable, Sendable {
+    case codex
+    case claudeCode = "claude-code"
+    case grokBuild = "grok-build"
+
+    var title: String { ModelCohort.clientTitle(rawValue) }
+
+    /// What the chosen folder holds, as it appears in help text.
+    var folderNoun: String {
+        switch self {
+        case .codex: "session folder"
+        case .claudeCode: "projects folder"
+        case .grokBuild: "sessions folder"
+        }
+    }
+
+    fileprivate var pathDefaultsKey: String { "sourceFolderPath.\(rawValue)" }
+    fileprivate var bookmarkDefaultsKey: String { "sourceFolderBookmark.\(rawValue)" }
+}
+
 @MainActor
 @Observable
 final class HistoryStore {
@@ -37,7 +60,8 @@ final class HistoryStore {
     private(set) var history: MetricHistory
     private(set) var isMonitoring = false
     private(set) var errorMessage: String?
-    private(set) var hasCustomFolder = false
+    /// Folders the user chose, by tool. Absent tools read their default (or environment) folder.
+    private(set) var customFolders: [SourceFolderKind: URL] = [:]
     private(set) var sourceStatus = "Waiting for session folders"
     private(set) var sourceStatuses: [SourceStatus] = []
     var dashboardSelection: DashboardSelection {
@@ -56,10 +80,8 @@ final class HistoryStore {
     @ObservationIgnored private var claudeMonitor: ClaudeSessionMonitor?
     @ObservationIgnored private var grokMonitor: GrokSessionMonitor?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
-    @ObservationIgnored private var selectedFolder: URL
-    @ObservationIgnored private let claudeProjectsFolder: URL
-    @ObservationIgnored private let grokSessionsFolder: URL
-    @ObservationIgnored private var securityScopedFolder: URL?
+    @ObservationIgnored private let defaultFolders: [SourceFolderKind: URL]
+    @ObservationIgnored private var securityScopedFolders: [SourceFolderKind: URL] = [:]
 
     var records: [TurnMetric] { history.records }
     var availableClients: [String] {
@@ -123,19 +145,20 @@ final class HistoryStore {
         let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tokrate", isDirectory: true)
         self.persistenceURL = persistenceURL ?? supportDirectory.appendingPathComponent("history-v1.json")
-        selectedFolder = codexFolder ?? FileManager.default.homeDirectoryForCurrentUser
+        let codexDefault = codexFolder ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/sessions", isDirectory: true)
         let environment = ProcessInfo.processInfo.environment
         let claudeConfig = Self.configuredDirectory(
             override: environment["CLAUDE_CONFIG_DIR"],
             fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
         )
-        self.claudeProjectsFolder = claudeProjectsFolder ?? claudeConfig.appendingPathComponent("projects", isDirectory: true)
+        let claudeDefault = claudeProjectsFolder ?? claudeConfig.appendingPathComponent("projects", isDirectory: true)
         let grokHome = Self.configuredDirectory(
             override: environment["GROK_HOME"],
             fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok", isDirectory: true)
         )
-        self.grokSessionsFolder = grokSessionsFolder ?? grokHome.appendingPathComponent("sessions", isDirectory: true)
+        let grokDefault = grokSessionsFolder ?? grokHome.appendingPathComponent("sessions", isDirectory: true)
+        defaultFolders = [.codex: codexDefault, .claudeCode: claudeDefault, .grokBuild: grokDefault]
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -148,6 +171,11 @@ final class HistoryStore {
         } else {
             history = MetricHistory()
         }
+        for kind in SourceFolderKind.allCases {
+            guard let restored = Self.restoredFolder(for: kind, defaults: defaults) else { continue }
+            customFolders[kind] = restored.url
+            if restored.hasScopedAccess { securityScopedFolders[kind] = restored.url }
+        }
         updateSourceStatus(claude: nil, grok: nil)
     }
 
@@ -157,12 +185,37 @@ final class HistoryStore {
         startMonitoring()
     }
 
-    func selectFolder(_ url: URL) {
-        releaseSelectedFolderAccess()
-        let didStartAccess = url.startAccessingSecurityScopedResource()
-        selectedFolder = url
-        securityScopedFolder = didStartAccess ? url : nil
-        hasCustomFolder = true
+    /// The folder a tool is read from: the user's choice, else the default or environment folder.
+    func folder(for kind: SourceFolderKind) -> URL {
+        customFolders[kind] ?? defaultFolders[kind]!
+    }
+
+    func hasCustomFolder(for kind: SourceFolderKind) -> Bool { customFolders[kind] != nil }
+
+    /// Folders can only change while monitoring is paused, because monitors are created from them
+    /// when monitoring starts. The choice is persisted so it survives relaunch.
+    func selectFolder(_ url: URL, for kind: SourceFolderKind) {
+        guard !isMonitoring else { return }
+        releaseFolderAccess(for: kind)
+        if url.startAccessingSecurityScopedResource() { securityScopedFolders[kind] = url }
+        customFolders[kind] = url
+        defaults.set(url.path, forKey: kind.pathDefaultsKey)
+        if let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+            defaults.set(bookmark, forKey: kind.bookmarkDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: kind.bookmarkDefaultsKey)
+        }
+        errorMessage = nil
+        updateSourceStatus(claude: nil, grok: nil)
+    }
+
+    /// Returns a tool to its default (or environment-variable) folder.
+    func resetFolder(for kind: SourceFolderKind) {
+        guard !isMonitoring, customFolders[kind] != nil else { return }
+        releaseFolderAccess(for: kind)
+        customFolders[kind] = nil
+        defaults.removeObject(forKey: kind.pathDefaultsKey)
+        defaults.removeObject(forKey: kind.bookmarkDefaultsKey)
         errorMessage = nil
         updateSourceStatus(claude: nil, grok: nil)
     }
@@ -170,13 +223,13 @@ final class HistoryStore {
     func startMonitoring() {
         guard !isMonitoring else { return }
         errorMessage = nil
-        monitor = CodexSessionMonitor(root: selectedFolder)
-        claudeMonitor = ClaudeSessionMonitor(root: claudeProjectsFolder)
-        grokMonitor = GrokSessionMonitor(root: grokSessionsFolder)
+        monitor = CodexSessionMonitor(root: folder(for: .codex))
+        claudeMonitor = ClaudeSessionMonitor(root: folder(for: .claudeCode))
+        grokMonitor = GrokSessionMonitor(root: folder(for: .grokBuild))
         isMonitoring = true
         updateSourceStatus(claude: nil, grok: nil)
         saveHistory()
-        let codexFolder = selectedFolder
+        let codexFolder = folder(for: .codex)
         guard let monitor, let claudeMonitor, let grokMonitor else { return }
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -245,45 +298,69 @@ final class HistoryStore {
         }
     }
 
-    private func releaseSelectedFolderAccess() {
-        securityScopedFolder?.stopAccessingSecurityScopedResource()
-        securityScopedFolder = nil
+    private func releaseFolderAccess(for kind: SourceFolderKind) {
+        securityScopedFolders.removeValue(forKey: kind)?.stopAccessingSecurityScopedResource()
+    }
+
+    /// Resolves a persisted folder choice. The bookmark wins because it follows a moved or renamed
+    /// folder; the stored path is the fallback and is refreshed from the bookmark.
+    private static func restoredFolder(for kind: SourceFolderKind, defaults: UserDefaults) -> (url: URL, hasScopedAccess: Bool)? {
+        guard let path = defaults.string(forKey: kind.pathDefaultsKey) else { return nil }
+        if let bookmark = defaults.data(forKey: kind.bookmarkDefaultsKey) {
+            var isStale = false
+            if let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale) {
+                let hasScopedAccess = url.startAccessingSecurityScopedResource()
+                if isStale,
+                   let fresh = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    defaults.set(fresh, forKey: kind.bookmarkDefaultsKey)
+                }
+                defaults.set(url.path, forKey: kind.pathDefaultsKey)
+                return (url, hasScopedAccess)
+            }
+        }
+        return (URL(fileURLWithPath: path, isDirectory: true), false)
     }
 
     private func updateSourceStatus(
         claude: (rootAvailable: Bool, files: Int)?,
         grok: (rootAvailable: Bool, sessions: Int)?
     ) {
-        let codexAvailable = FileManager.default.fileExists(atPath: selectedFolder.path)
-        let codex = hasCustomFolder ? "Custom Codex folder" : "Codex sessions"
+        let codexFolder = folder(for: .codex), claudeFolder = folder(for: .claudeCode), grokFolder = folder(for: .grokBuild)
+        let codexAvailable = FileManager.default.fileExists(atPath: codexFolder.path)
+        let codex = hasCustomFolder(for: .codex) ? "Custom Codex folder" : "Codex sessions"
         let claudeText = claude.map { $0.rootAvailable ? "Claude Code \($0.files) files" : "Claude Code folder not found" }
-            ?? (FileManager.default.fileExists(atPath: claudeProjectsFolder.path) ? "Claude Code available" : "Claude Code folder not found")
+            ?? (FileManager.default.fileExists(atPath: claudeFolder.path) ? "Claude Code available" : "Claude Code folder not found")
         let grokText = grok.map { $0.rootAvailable ? "Grok Build \($0.sessions) sessions" : "Grok Build folder not found" }
-            ?? (FileManager.default.fileExists(atPath: grokSessionsFolder.path) ? "Grok Build available" : "Grok Build folder not found")
+            ?? (FileManager.default.fileExists(atPath: grokFolder.path) ? "Grok Build available" : "Grok Build folder not found")
         sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText)"
 
-        let claudeFound = claude?.rootAvailable ?? FileManager.default.fileExists(atPath: claudeProjectsFolder.path)
-        let grokFound = grok?.rootAvailable ?? FileManager.default.fileExists(atPath: grokSessionsFolder.path)
+        let claudeFound = claude?.rootAvailable ?? FileManager.default.fileExists(atPath: claudeFolder.path)
+        let grokFound = grok?.rootAvailable ?? FileManager.default.fileExists(atPath: grokFolder.path)
         sourceStatuses = [
             SourceStatus(
                 client: TurnMetric.codexClient,
                 availability: codexAvailable ? .found : .notFound,
-                detail: hasCustomFolder ? "Custom folder" : nil,
-                path: Self.displayPath(selectedFolder)
+                detail: Self.detail(custom: hasCustomFolder(for: .codex), nil),
+                path: Self.displayPath(codexFolder)
             ),
             SourceStatus(
                 client: "claude-code",
                 availability: claudeFound ? .found : .notFound,
-                detail: claude.flatMap { $0.rootAvailable ? "\($0.files) session files" : nil },
-                path: Self.displayPath(claudeProjectsFolder)
+                detail: Self.detail(custom: hasCustomFolder(for: .claudeCode), claude.flatMap { $0.rootAvailable ? "\($0.files) session files" : nil }),
+                path: Self.displayPath(claudeFolder)
             ),
             SourceStatus(
                 client: "grok-build",
                 availability: grokFound ? .found : .notFound,
-                detail: grok.flatMap { $0.rootAvailable ? "\($0.sessions) sessions" : nil },
-                path: Self.displayPath(grokSessionsFolder)
+                detail: Self.detail(custom: hasCustomFolder(for: .grokBuild), grok.flatMap { $0.rootAvailable ? "\($0.sessions) sessions" : nil }),
+                path: Self.displayPath(grokFolder)
             )
         ]
+    }
+
+    private static func detail(custom: Bool, _ count: String?) -> String? {
+        let parts = [custom ? "Custom folder" : nil, count].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private static func displayPath(_ url: URL) -> String {

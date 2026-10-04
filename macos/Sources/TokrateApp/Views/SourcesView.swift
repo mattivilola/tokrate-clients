@@ -1,20 +1,35 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Codex session-folder chooser, shared by Settings > Sources and the full history window.
-/// Choosing is only possible while monitoring is paused, as before.
-struct CodexFolderButton: View {
+/// Session-folder chooser for one coding tool, shared by Settings > Sources and the full history window.
+/// Choosing is only possible while monitoring is paused.
+struct SourceFolderButton: View {
     @Bindable var store: HistoryStore
+    var kind: SourceFolderKind = .codex
     @State private var isChoosing = false
 
     var body: some View {
         Button("Choose folder…") { isChoosing = true }
             .disabled(store.isMonitoring)
-            .help(store.isMonitoring ? "Pause monitoring to choose a different Codex folder." : "Choose a different Codex session folder")
+            .help(store.isMonitoring ? "Pause monitoring to choose a different \(kind.title) folder." : "Choose a different \(kind.title) \(kind.folderNoun)")
+            .accessibilityLabel("Choose \(kind.title) folder")
             .accessibilityHint(store.isMonitoring ? "Unavailable while monitoring. Pause monitoring first." : "Opens a folder picker")
             .fileImporter(isPresented: $isChoosing, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
-                if case .success(let urls) = result, let url = urls.first { store.selectFolder(url) }
+                if case .success(let urls) = result, let url = urls.first { store.selectFolder(url, for: kind) }
             }
+    }
+}
+
+/// Returns one coding tool to its default folder; only offered while a custom folder is set.
+struct SourceFolderResetButton: View {
+    @Bindable var store: HistoryStore
+    let kind: SourceFolderKind
+
+    var body: some View {
+        Button("Reset to default") { store.resetFolder(for: kind) }
+            .disabled(store.isMonitoring)
+            .help(store.isMonitoring ? "Pause monitoring to reset the \(kind.title) folder." : "Use the default \(kind.title) \(kind.folderNoun) again")
+            .accessibilityLabel("Reset \(kind.title) folder to default")
     }
 }
 

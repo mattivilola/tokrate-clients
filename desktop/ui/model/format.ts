@@ -1,4 +1,4 @@
-import { client, clientLabel, type Metric } from "../metrics";
+import { PROVIDER_LABELS, client, clientLabel, type Metric } from "../metrics";
 import type { SourceId } from "../store/types";
 
 /** One decimal by default; an em dash when there is no value. */
@@ -39,10 +39,9 @@ export const SOURCE_TITLES: Record<SourceId, string> = {
   "grok-build": "Grok Build",
 };
 
+/** Provider filter options in picker order: every attributable provider, then the unknown route. */
 export const PROVIDER_TITLES: Record<string, string> = {
-  openai: "OpenAI",
-  anthropic: "Anthropic",
-  xai: "xAI",
+  ...PROVIDER_LABELS,
   unknown: "Unknown route",
 };
 

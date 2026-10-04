@@ -137,7 +137,7 @@ final class PresentationTests: XCTestCase {
             ModelCohort(metric("4", model: "x", rate: 1, provider: "openai")),
             ModelCohort(metric("5", model: "x", rate: 1, provider: "unknown"))
         ])
-        XCTAssertEqual(providers.map(\.qualifier), ["openai", "unknown"])
+        XCTAssertEqual(providers.map(\.qualifier), ["OpenAI", "Unknown"])
     }
 
     func testPickerSectionsGroupByCodingToolInAlphabeticalOrder() {

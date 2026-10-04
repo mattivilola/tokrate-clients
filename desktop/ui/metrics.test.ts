@@ -235,3 +235,28 @@ it("keeps chart bucket min, max and counts", () => {
   const last = buckets(rows, now, 1, "throughput").at(-1)!;
   expect(last).toMatchObject({ value: 20, min: 10, max: 30, count: 2 });
 });
+it("labels providers, including the Claude Code cloud routes", async () => {
+  const { providerLabel, providerRoute, cohortRows } = await import("./metrics");
+  expect(providerLabel("anthropic")).toBe("Anthropic");
+  expect(providerLabel("amazon-bedrock")).toBe("Amazon Bedrock");
+  expect(providerLabel("google-vertex")).toBe("Google Vertex AI");
+  expect(providerLabel("openai")).toBe("OpenAI");
+  expect(providerLabel("xai")).toBe("xAI");
+  for (const unknown of ["unknown", null, undefined, "other"]) {
+    expect(providerLabel(unknown)).toBe("Unknown route");
+    expect(providerRoute(unknown)).toBe("Unknown route");
+  }
+  expect(providerRoute("amazon-bedrock")).toBe("Amazon Bedrock route");
+  // Same model through two routes stays two cohorts, told apart by the provider name.
+  const now = Date.parse(m().completedAt);
+  const claude = { client: "claude-code", model: "claude-sonnet-4-5-20250929", codexTTFTSeconds: null };
+  const rows = cohortRows(
+    [
+      m({ ...claude, id: "a", provider: "anthropic" }),
+      m({ ...claude, id: "b", provider: "amazon-bedrock", completedAt: new Date(now - 1000).toISOString() }),
+    ],
+    now - DAY,
+    now + 1,
+  );
+  expect(rows.map((r) => r.qualifier)).toEqual(["Anthropic", "Amazon Bedrock"]);
+});

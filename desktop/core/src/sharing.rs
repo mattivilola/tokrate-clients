@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.12";
+pub const APP_VERSION: &str = "0.1.13";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -110,12 +110,7 @@ impl SharedSample {
                 .filter(|value| safe_identifier(value, 80, false))
                 .unwrap_or("unknown")
                 .to_owned(),
-            provider: match metric.provider.as_deref() {
-                Some("openai" | "anthropic" | "xai" | "unknown") => {
-                    metric.provider.as_deref().unwrap().to_owned()
-                }
-                _ => "unknown".to_owned(),
-            },
+            provider: shared_provider(client, metric.provider.as_deref()).to_owned(),
             reasoning_effort: metric
                 .reasoning_effort
                 .as_deref()
@@ -133,6 +128,19 @@ impl SharedSample {
             duration_ms,
             ttft_ms,
         })
+    }
+}
+
+/// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for
+/// Claude Code; any other value or pairing is shared as `unknown`.
+fn shared_provider(client: &str, provider: Option<&str>) -> &'static str {
+    match (client, provider) {
+        (_, Some("openai")) => "openai",
+        (_, Some("anthropic")) => "anthropic",
+        (_, Some("xai")) => "xai",
+        (CLAUDE_CLIENT, Some("amazon-bedrock")) => "amazon-bedrock",
+        (CLAUDE_CLIENT, Some("google-vertex")) => "google-vertex",
+        _ => "unknown",
     }
 }
 

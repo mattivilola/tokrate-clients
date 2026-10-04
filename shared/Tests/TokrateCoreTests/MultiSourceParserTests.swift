@@ -23,7 +23,7 @@ final class MultiSourceParserTests: XCTestCase {
         )))
 
         XCTAssertEqual(metric.client, "claude-code")
-        XCTAssertEqual(metric.parserVersion, "claude-transcript-v2")
+        XCTAssertEqual(metric.parserVersion, "claude-transcript-v3")
         XCTAssertEqual(metric.metricVersion, "claude-observed-turn-v1")
         XCTAssertEqual(metric.outputTokens, 42)
         XCTAssertEqual(metric.durationSeconds, 5, accuracy: 0.001)
@@ -40,9 +40,9 @@ final class MultiSourceParserTests: XCTestCase {
         let bytes = try JSONEncoder().encode(sample)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         XCTAssertEqual(json["client"] as? String, "claude-code")
-        XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v2")
+        XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v3")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-turn-v1")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.12")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.13")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         let serialized = try XCTUnwrap(String(data: bytes, encoding: .utf8))
         XCTAssertFalse(serialized.contains("PRIVATE_PROMPT"))
@@ -225,7 +225,7 @@ final class MultiSourceParserTests: XCTestCase {
             codexTTFTSeconds: 0.1,
             turnThroughputTPS: 10,
             client: "claude-code",
-            parserVersion: "claude-transcript-v2",
+            parserVersion: "claude-transcript-v3",
             metricVersion: "claude-observed-turn-v1",
             provider: "unknown"
         )

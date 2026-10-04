@@ -117,7 +117,7 @@ struct HistoryView: View {
                     if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
                 }
                 .buttonStyle(PrimaryButtonStyle())
-                CodexFolderButton(store: store)
+                SourceFolderButton(store: store)
                     .buttonStyle(SecondaryButtonStyle())
             }
         }

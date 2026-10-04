@@ -14,11 +14,15 @@ pub(crate) trait JsonlEventParser: Send {
     fn reset(&mut self, source_identity: String);
     fn consume(&mut self, line: &[u8]) -> Option<TurnMetric>;
     fn excludes_session(&self) -> bool;
+    /// The reader started inside the file, after its header, so earlier records were never seen.
+    fn begin_mid_file(&mut self) {}
 }
 
 #[derive(Default)]
 struct TurnState {
     started_at: Option<DateTime<Utc>>,
+    /// This parser instance saw the turn's `task_started` event.
+    start_observed: bool,
     output_tokens: Option<i64>,
     reasoning_output_tokens: Option<i64>,
     duration_milliseconds: Option<f64>,
@@ -116,6 +120,7 @@ impl CodexEventParser {
 
         if subtype == "task_started" {
             let state = self.turn_state_mut(turn_id);
+            state.start_observed = true;
             if state.started_at.is_none() {
                 state.started_at = parse_date(payload.get("started_at")).or(event_date);
             }
@@ -145,7 +150,9 @@ impl CodexEventParser {
                 })
             })?;
 
-        if is_agent_session || already_emitted {
+        // A completion whose start this instance never saw (the reader began mid-turn) lacks its
+        // turn context and cannot be measured faithfully.
+        if is_agent_session || already_emitted || !state.start_observed {
             return None;
         }
         let output_tokens = state.output_tokens?;

@@ -39,13 +39,16 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     }
 
     /// The single allowlist of client/parser/metric tuples that may be displayed as comparable
-    /// measurements or shared. Claude's v1 parser stays listed so saved history keeps decoding.
+    /// measurements or shared. Claude's v1 and v2 parsers stay listed so saved history keeps decoding;
+    /// `SharedSample` only shares v3.
     public static func isSupportedSourceTuple(client: String, parserVersion: String, metricVersion: String) -> Bool {
         switch (client, parserVersion, metricVersion) {
         case ("codex", "codex-rollout-v1", "turn-v1"),
              ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v2", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v2", "claude-observed-subagent-turn-v1"),
+             ("claude-code", "claude-transcript-v3", "claude-observed-turn-v1"),
+             ("claude-code", "claude-transcript-v3", "claude-observed-subagent-turn-v1"),
              ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"):
             true
         default:

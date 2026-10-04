@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DAY, cohort, type Metric } from "../metrics";
 import { buildDashboard, communityLine } from "./dashboard";
-import { folderName, readout, signedPercent } from "./format";
+import { PROVIDER_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
 import { niceCeil } from "../components/TrendChart";
 import { GAUGE } from "../components/Gauge";
@@ -60,6 +60,24 @@ describe("dashboard model", () => {
     const records = [turn("1", 5, 60), turn("2", 6, 30, { client: "claude-code", provider: "unknown", codexTTFTSeconds: null })];
     expect(buildDashboard(input(records, { tool: "claude-code" })).cohorts).toHaveLength(1);
     expect(buildDashboard(input(records, { provider: "openai" })).filtered.map((m) => m.id)).toEqual(["1"]);
+  });
+  it("filters Claude Code turns by Bedrock and Vertex providers", () => {
+    const claude = (id: string, provider: string) =>
+      turn(id, 5, 60, { client: "claude-code", provider, codexTTFTSeconds: null });
+    const records = [claude("a", "anthropic"), claude("b", "amazon-bedrock"), claude("c", "google-vertex")];
+    for (const [provider, id] of [["anthropic", "a"], ["amazon-bedrock", "b"], ["google-vertex", "c"]] as const) {
+      expect(buildDashboard(input(records, { provider })).filtered.map((m) => m.id)).toEqual([id]);
+    }
+  });
+  it("offers every attributable provider in the filter", () => {
+    expect(PROVIDER_TITLES).toEqual({
+      openai: "OpenAI",
+      anthropic: "Anthropic",
+      "amazon-bedrock": "Amazon Bedrock",
+      "google-vertex": "Google Vertex AI",
+      xai: "xAI",
+      unknown: "Unknown route",
+    });
   });
   it("ignores turns outside the 7 day retention and in the future", () => {
     const records = [turn("old", 8 * 24 * 60, 10), turn("future", -10, 10)];

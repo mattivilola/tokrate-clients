@@ -3,7 +3,7 @@ import { ModelPicker } from "./Header";
 import { Footer } from "./Footer";
 import { chartCopy, MetricToggle, RangeToggle, TrendDetails, useTrendBuckets } from "./Trend";
 import { TrendChart } from "./TrendChart";
-import { clientLabel, measurementChip, measurementTitle, relativeTime } from "../metrics";
+import { clientLabel, measurementChip, measurementTitle, providerRoute, relativeTime } from "../metrics";
 import type { Dashboard } from "../model/dashboard";
 import { effortChip, exactTime, modelName, num } from "../model/format";
 import { useStore } from "../store/store";
@@ -91,7 +91,7 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                         {measurementChip(m) && <Chip>{measurementChip(m)}</Chip>}
                       </span>
                       <span className="table-sub">
-                        {clientLabel(m)} · {m.provider ?? "unknown"} route
+                        {clientLabel(m)} · {providerRoute(m.provider)}
                       </span>
                     </td>
                     <td className="num">{m.outputTokens}</td>
