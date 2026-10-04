@@ -6,7 +6,7 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.11"
+    public let appVersion = "0.1.12"
     public let parserVersion: String
     public let metricVersion: String
     public let model: String
@@ -20,7 +20,8 @@ public struct SharedSample: Encodable, Sendable {
 
     public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
         let duration = metric.durationSeconds * 1_000
-        guard metric.isSupportedSourceTuple,
+        // v1 Claude records may remain in local history but are never shared by a v2 release.
+        guard metric.isSupportedSourceTuple, metric.parserVersion != "claude-transcript-v1",
               ["openai", "anthropic", "xai", "unknown"].contains(metric.provider ?? "unknown"),
               (metric.client != "grok-build" || metric.clientVersion == nil || metric.clientVersion == "unknown")
         else { return nil }

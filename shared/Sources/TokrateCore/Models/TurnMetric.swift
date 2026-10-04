@@ -26,23 +26,53 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// Generic name for the source-reported TTFT observation. The stored Codex name remains
     /// for backward compatibility with existing history files.
     public var isSupportedSourceTuple: Bool {
+        Self.isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
+    }
+    public var ttftSeconds: Double? {
+        isSupportedSourceTuple && client == "codex" ? codexTTFTSeconds : nil
+    }
+    public var throughputLabel: String {
+        Self.throughputLabel(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
+    }
+    public var throughputExplanation: String {
+        Self.throughputExplanation(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
+    }
+
+    /// The single allowlist of client/parser/metric tuples that may be displayed as comparable
+    /// measurements or shared. Claude's v1 parser stays listed so saved history keeps decoding.
+    public static func isSupportedSourceTuple(client: String, parserVersion: String, metricVersion: String) -> Bool {
         switch (client, parserVersion, metricVersion) {
-        case ("codex", "codex-rollout-v1", "turn-v1"):
-            true
-        case ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),
+        case ("codex", "codex-rollout-v1", "turn-v1"),
+             ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),
+             ("claude-code", "claude-transcript-v2", "claude-observed-turn-v1"),
+             ("claude-code", "claude-transcript-v2", "claude-observed-subagent-turn-v1"),
              ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"):
             true
         default:
             false
         }
     }
-    public var ttftSeconds: Double? {
-        isSupportedSourceTuple && client == "codex" ? codexTTFTSeconds : nil
+
+    public static func throughputLabel(client: String, parserVersion: String, metricVersion: String) -> String {
+        guard isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion) else {
+            return "Turn throughput"
+        }
+        return switch metricVersion {
+        case "grok-observed-work-turn-v1": "Work-turn throughput · includes subagent output"
+        case "claude-observed-subagent-turn-v1": "Subagent turn speed"
+        default: "Turn throughput"
+        }
     }
-    public var throughputLabel: String {
-        isSupportedSourceTuple && metricVersion == "grok-observed-work-turn-v1"
-            ? "Work-turn throughput · includes subagent output"
-            : "Turn throughput"
+
+    public static func throughputExplanation(client: String, parserVersion: String, metricVersion: String) -> String {
+        guard isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion) else {
+            return "Includes tools, waiting & reasoning"
+        }
+        return switch metricVersion {
+        case "grok-observed-work-turn-v1": "Includes nested subagent output, tools & waiting"
+        case "claude-observed-subagent-turn-v1": "Subagent task prompt to final answer, including tools and waiting."
+        default: "Includes tools, waiting & reasoning"
+        }
     }
     public let turnThroughputTPS: Double
     /// Deliberately unavailable until Codex provides a verified generation-only metric.

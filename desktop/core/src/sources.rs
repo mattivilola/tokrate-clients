@@ -6,8 +6,12 @@ use std::path::PathBuf;
 
 const TOTAL_POLL_BUDGET: usize = 1_048_576;
 const CODEX_BUDGET: usize = 360_448;
-const CLAUDE_BUDGET: usize = 360_448;
-const GROK_BUDGET: usize = TOTAL_POLL_BUDGET - CODEX_BUDGET - CLAUDE_BUDGET;
+const CLAUDE_TOTAL_BUDGET: usize = 360_448;
+// Subagent transcripts get a reserved quarter of Claude's share so primary sessions and
+// subagents each keep service while the other is catching up.
+const CLAUDE_SUBAGENT_BUDGET: usize = CLAUDE_TOTAL_BUDGET / 4;
+const CLAUDE_BUDGET: usize = CLAUDE_TOTAL_BUDGET - CLAUDE_SUBAGENT_BUDGET;
+const GROK_BUDGET: usize = TOTAL_POLL_BUDGET - CODEX_BUDGET - CLAUDE_TOTAL_BUDGET;
 
 /// Polls the three supported local data roots under one aggregate content-read limit.
 pub struct SourceMonitor {
@@ -16,6 +20,7 @@ pub struct SourceMonitor {
     grok_root: PathBuf,
     codex: Monitor,
     claude: Monitor,
+    claude_subagents: Monitor,
     grok: GrokMonitor,
     bytes_read_last_poll: usize,
     had_source_error: bool,
@@ -28,6 +33,7 @@ impl SourceMonitor {
         Self {
             codex: Monitor::new(codex_root.clone()),
             claude: Monitor::new_claude(claude_root.clone()),
+            claude_subagents: Monitor::new_claude_subagents(claude_root.clone()),
             grok: GrokMonitor::new(grok_root.clone()),
             codex_root,
             claude_root,
@@ -45,6 +51,7 @@ impl SourceMonitor {
             }
             "claude-code" => {
                 self.claude_root = root.clone();
+                self.claude_subagents = Monitor::new_claude_subagents(root.clone());
                 self.claude = Monitor::new_claude(root);
             }
             "grok-build" => {
@@ -90,6 +97,15 @@ impl SourceMonitor {
                 Err(_) => self.had_source_error = true,
             }
             self.bytes_read_last_poll += self.claude.bytes_read_last_poll();
+            match self
+                .claude_subagents
+                .poll_with_budget(now, CLAUDE_SUBAGENT_BUDGET)
+            {
+                Ok(found) => records.extend(found),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => self.had_source_error = true,
+            }
+            self.bytes_read_last_poll += self.claude_subagents.bytes_read_last_poll();
         }
         if self.grok_root.is_dir() {
             match self.grok.poll_with_budget(now, GROK_BUDGET) {

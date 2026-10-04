@@ -1,3 +1,4 @@
+use crate::claude_parser::is_subagent_transcript_path;
 use crate::model::TurnMetric;
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
 use chrono::{DateTime, Duration, Utc};
@@ -48,7 +49,16 @@ pub struct Monitor {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum JsonlFormat {
     Codex,
+    /// Claude Code session transcripts; subagent transcripts are excluded.
     Claude,
+    /// Claude Code `subagents/agent-*.jsonl` transcripts only.
+    ClaudeSubagent,
+}
+
+impl JsonlFormat {
+    fn is_claude(self) -> bool {
+        matches!(self, Self::Claude | Self::ClaudeSubagent)
+    }
 }
 
 impl Monitor {
@@ -61,6 +71,12 @@ impl Monitor {
 
     pub fn new_claude(root: PathBuf) -> Self {
         Self::with_format(root, JsonlFormat::Claude)
+    }
+
+    /// Monitors only the Claude Code subagent transcripts under a projects root, with
+    /// its own file cap and reader lanes so they cannot crowd out primary sessions.
+    pub fn new_claude_subagents(root: PathBuf) -> Self {
+        Self::with_format(root, JsonlFormat::ClaudeSubagent)
     }
 
     fn with_format(root: PathBuf, format: JsonlFormat) -> Self {
@@ -286,20 +302,20 @@ impl Monitor {
                 file.modified_at = candidate.modified_at;
                 file.last_discovered_size = candidate.size;
             } else {
-                let archive = (candidate.size > RECENT_TAIL_BYTES).then(|| match self.format {
-                    JsonlFormat::Codex => IncrementalReader::beginning(candidate.path.clone()),
-                    JsonlFormat::Claude => {
+                let archive = (candidate.size > RECENT_TAIL_BYTES).then(|| {
+                    if self.format.is_claude() {
                         IncrementalReader::beginning_claude(candidate.path.clone())
+                    } else {
+                        IncrementalReader::beginning(candidate.path.clone())
                     }
                 });
                 self.files.insert(
                     key,
                     WatchedFile {
-                        live: match self.format {
-                            JsonlFormat::Codex => IncrementalReader::recent_tail(candidate.path),
-                            JsonlFormat::Claude => {
-                                IncrementalReader::recent_tail_claude(candidate.path)
-                            }
+                        live: if self.format.is_claude() {
+                            IncrementalReader::recent_tail_claude(candidate.path)
+                        } else {
+                            IncrementalReader::recent_tail(candidate.path)
                         },
                         archive,
                         identity: candidate.identity,
@@ -355,18 +371,23 @@ fn discover_candidates(
             {
                 continue;
             }
-            if format == JsonlFormat::Claude
-                && (entry.path().components().any(|component| {
-                    component
-                        .as_os_str()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case("subagents")
-                }) || entry
-                    .path()
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("agent-")))
-            {
+            let excluded = match format {
+                JsonlFormat::Codex => false,
+                JsonlFormat::Claude => {
+                    let path = entry.path();
+                    path.components().any(|component| {
+                        component
+                            .as_os_str()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case("subagents")
+                    }) || path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.to_ascii_lowercase().starts_with("agent-"))
+                }
+                JsonlFormat::ClaudeSubagent => !is_subagent_transcript_path(&entry.path()),
+            };
+            if excluded {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {

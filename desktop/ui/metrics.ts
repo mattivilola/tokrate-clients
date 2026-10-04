@@ -42,12 +42,19 @@ export const clientLabel = (m: Metric) =>
   ({ codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build" })[
     client(m)
   ] ?? "Coding tool";
+const SUBAGENT_METRIC_VERSION = "claude-observed-subagent-turn-v1";
 export const measurementLabel = (m: Metric) =>
-  client(m) === "claude-code"
-    ? "Transcript-observed turn throughput"
-    : client(m) === "grok-build"
-      ? "Work-turn throughput · includes nested agent output"
-      : "Completed-turn throughput";
+  metricVersion(m) === SUBAGENT_METRIC_VERSION
+    ? "Subagent turn speed"
+    : client(m) === "claude-code"
+      ? "Transcript-observed turn throughput"
+      : client(m) === "grok-build"
+        ? "Work-turn throughput · includes nested agent output"
+        : "Completed-turn throughput";
+export const measurementExplanation = (m: Metric) =>
+  metricVersion(m) === SUBAGENT_METRIC_VERSION
+    ? "Subagent task prompt to final answer, including tools and waiting."
+    : null;
 export const label = (m: Metric) =>
   `${m.model ?? "Unknown model"} · ${m.reasoningEffort ?? "unknown"} effort · ${clientLabel(m)} ${m.clientVersion ?? "version unknown"}`;
 export const communityId = (m: Metric) =>

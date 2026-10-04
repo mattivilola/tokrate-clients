@@ -470,6 +470,9 @@ fn valid_selection(value: &str) -> bool {
 }
 fn metric_label(metric: &TurnMetric) -> &'static str {
     match metric.client.as_str() {
+        "claude-code" if metric.metric_version == "claude-observed-subagent-turn-v1" => {
+            "subagent turn speed"
+        }
         "claude-code" => "transcript-observed turn throughput",
         "grok-build" => "work-turn throughput · includes nested agent output",
         _ => "completed-turn throughput",

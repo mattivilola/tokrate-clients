@@ -115,7 +115,7 @@ final class SharingSessionTests: XCTestCase {
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
         XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
-        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.11")
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.12")
         XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
@@ -131,7 +131,7 @@ final class SharingSessionTests: XCTestCase {
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
         let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
-        XCTAssertEqual(reported.appVersion, "0.1.11")
+        XCTAssertEqual(reported.appVersion, "0.1.12")
         XCTAssertEqual(reported.reasoningEffort, "ultra")
         let missing = try XCTUnwrap(SharedSample(metric()))
         XCTAssertEqual(missing.reasoningEffort, "unknown")
@@ -188,6 +188,14 @@ final class SharingSessionTests: XCTestCase {
         let row = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
         XCTAssertTrue(row["ttftMs"] is NSNull)
         XCTAssertTrue(row["reasoningOutputTokens"] is NSNull)
+    }
+
+    func testLegacyClaudeParserRecordsAreNeverShared() {
+        func claude(_ parser: String) -> TurnMetric {
+            TurnMetric(id: parser, completedAt: now, model: "claude-test", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10, client: "claude-code", parserVersion: parser, metricVersion: "claude-observed-turn-v1", sourceKind: "primary", provider: "unknown")
+        }
+        XCTAssertNil(SharedSample(claude("claude-transcript-v1")))
+        XCTAssertNotNil(SharedSample(claude("claude-transcript-v2")))
     }
 
     func testQueueIsBoundedAndExpiresAfterADay() {

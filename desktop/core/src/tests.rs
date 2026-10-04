@@ -2,7 +2,8 @@ use crate::parser::JsonlEventParser;
 use crate::{
     signed_request, GrokMonitor, History, Monitor, ReportedReasoningEffort, SharingQueue,
     SourceMonitor, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
-    GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION, MAX_PENDING_SAMPLES,
+    CLAUDE_SUBAGENT_METRIC_VERSION, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+    MAX_PENDING_SAMPLES,
 };
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -397,7 +398,8 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
         json!([]),
     ));
     interjection.consume(&user("interjection", t1));
-    assert!(interjection
+    // A message typed mid-turn continues the turn instead of failing it closed.
+    let continued = interjection
         .consume(&claude_message(
             "assistant",
             "assistant",
@@ -406,9 +408,11 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
             "claude-model",
             "end_turn",
             2,
-            json!([])
+            json!([]),
         ))
-        .is_none());
+        .unwrap();
+    assert_eq!(continued.output_tokens, 4);
+    assert_eq!(continued.duration_seconds, 2.0);
     interjection.consume(&user("next-turn", t1));
     assert!(interjection
         .consume(&claude_message(
@@ -618,6 +622,561 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
         ))
         .unwrap();
     assert_eq!(unknown.model, None);
+}
+
+fn with_fields(line: Vec<u8>, fields: Value) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(&line).unwrap();
+    for (key, field) in fields.as_object().unwrap() {
+        value[key] = field.clone();
+    }
+    serde_json::to_vec(&value).unwrap()
+}
+
+fn as_subagent(line: Vec<u8>, session: &str, agent: &str) -> Vec<u8> {
+    with_fields(
+        line,
+        json!({"isSidechain": true, "sessionId": session, "agentId": agent}),
+    )
+}
+
+fn assistant(timestamp: &str, id: &str, stop_reason: &str, tokens: i64) -> Vec<u8> {
+    claude_message(
+        "assistant",
+        "assistant",
+        timestamp,
+        id,
+        "claude-model",
+        stop_reason,
+        tokens,
+        json!([]),
+    )
+}
+
+fn poll_until_idle(monitor: &mut Monitor, now: DateTime<Utc>) -> Vec<TurnMetric> {
+    let mut found = Vec::new();
+    for _ in 0..4 {
+        found.extend(monitor.poll(now).unwrap());
+    }
+    found
+}
+
+fn claude_parser() -> crate::claude_parser::ClaudeTranscriptParser {
+    crate::claude_parser::ClaudeTranscriptParser::new("file".into())
+}
+
+#[test]
+fn claude_interjection_continues_one_turn_from_its_original_start() {
+    let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
+    let mut plain = claude_parser();
+    plain.consume(&human("turn", "2026-10-03T10:00:00Z"));
+    plain.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    let baseline = plain
+        .consume(&assistant("2026-10-03T10:00:40Z", "call-2", "end_turn", 7))
+        .unwrap();
+
+    let mut parser = claude_parser();
+    parser.consume(&human("turn", "2026-10-03T10:00:00Z"));
+    parser.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    parser.consume(&human("typed-while-working", "2026-10-03T10:00:20Z"));
+    parser.consume(&assistant("2026-10-03T10:00:30Z", "call-1b", "tool_use", 3));
+    let result = parser
+        .consume(&assistant("2026-10-03T10:00:40Z", "call-2", "end_turn", 7))
+        .unwrap();
+    assert_eq!(result.output_tokens, 15);
+    assert_eq!(result.duration_seconds, 40.0);
+    assert_eq!(result.turn_throughput_tps, 15.0 / 40.0);
+    assert_eq!(result.model.as_deref(), Some("claude-model"));
+    assert_eq!(result.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(result.client_version.as_deref(), Some("1.2.3"));
+    assert_eq!(result.parser_version, "claude-transcript-v2");
+    assert_eq!(result.metric_version, CLAUDE_METRIC_VERSION);
+    assert_eq!(result.source_kind.as_deref(), Some("primary"));
+    // Identity comes from the original human turn, so an interjection never changes it.
+    assert_eq!(result.id, baseline.id);
+}
+
+#[test]
+fn claude_interjection_gap_over_thirty_minutes_starts_a_new_turn() {
+    let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
+    let mut parser = claude_parser();
+    parser.consume(&human("old", "2026-10-03T10:00:00Z"));
+    parser.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    // 30 minutes after the last activity still continues the turn.
+    parser.consume(&human("boundary", "2026-10-03T10:30:10Z"));
+    parser.consume(&assistant("2026-10-03T10:30:20Z", "call-2", "tool_use", 4));
+    // More than 30 minutes later the old turn is abandoned and a new one starts.
+    parser.consume(&human("new", "2026-10-03T11:00:21Z"));
+    let result = parser
+        .consume(&assistant("2026-10-03T11:00:41Z", "call-3", "end_turn", 40))
+        .unwrap();
+    assert_eq!(result.output_tokens, 40);
+    assert_eq!(result.duration_seconds, 20.0);
+
+    let mut continued = claude_parser();
+    continued.consume(&human("old", "2026-10-03T10:00:00Z"));
+    continued.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    continued.consume(&human("boundary", "2026-10-03T10:30:10Z"));
+    let whole = continued
+        .consume(&assistant("2026-10-03T10:30:20Z", "call-2", "end_turn", 4))
+        .unwrap();
+    assert_eq!(whole.output_tokens, 9);
+    assert_eq!(whole.duration_seconds, 1820.0);
+}
+
+#[test]
+fn claude_tool_results_count_as_activity_for_long_tool_runs() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "prompt",
+        json!("synthetic"),
+    ));
+    parser.consume(&assistant("2026-10-03T10:01:00Z", "call-1", "tool_use", 5));
+    // The tool ran for 39 minutes; its result is activity and never starts a turn.
+    parser.consume(&claude_user(
+        "2026-10-03T10:40:00Z",
+        "tool-result",
+        json!([{"type":"tool_result","content":"SYNTHETIC_TOOL_SENTINEL"}]),
+    ));
+    parser.consume(&claude_user(
+        "2026-10-03T10:41:00Z",
+        "typed-after-tool",
+        json!("synthetic"),
+    ));
+    let result = parser
+        .consume(&assistant("2026-10-03T10:42:00Z", "call-2", "end_turn", 7))
+        .unwrap();
+    assert_eq!(result.output_tokens, 12);
+    assert_eq!(result.duration_seconds, 2520.0);
+
+    let mut orphan = claude_parser();
+    orphan.consume(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "orphan-result",
+        json!([{"type":"tool_result","content":"x"}]),
+    ));
+    assert!(orphan
+        .consume(&assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9))
+        .is_none());
+}
+
+#[test]
+fn claude_user_records_without_a_timestamp_are_ignored_entirely() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "prompt",
+        json!("synthetic"),
+    ));
+    parser.consume(&assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5));
+    let without_time = |content: Value| {
+        let mut value: Value =
+            serde_json::from_slice(&claude_user("2026-10-03T10:00:06Z", "no-time", content))
+                .unwrap();
+        value.as_object_mut().unwrap().remove("timestamp");
+        serde_json::to_vec(&value).unwrap()
+    };
+    // Neither a human prompt nor an interruption marker without a time touches the turn.
+    parser.consume(&without_time(json!("synthetic")));
+    parser.consume(&without_time(json!("[Request interrupted by user]")));
+    let result = parser
+        .consume(&assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 7))
+        .unwrap();
+    assert_eq!(result.output_tokens, 12);
+    assert_eq!(result.duration_seconds, 10.0);
+
+    let mut idle = claude_parser();
+    idle.consume(&without_time(json!("synthetic")));
+    assert!(idle
+        .consume(&assistant("2026-10-03T10:00:10Z", "call", "end_turn", 9))
+        .is_none());
+}
+
+#[test]
+fn claude_interruption_discards_the_turn_and_does_not_start_one() {
+    let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
+    for marker in [
+        json!("[Request interrupted by user]"),
+        json!([{"type":"text","text":"[Request interrupted by user for tool use]"}]),
+    ] {
+        let mut parser = claude_parser();
+        parser.consume(&human("interrupted", "2026-10-03T10:00:00Z"));
+        parser.consume(&assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5));
+        parser.consume(&claude_user("2026-10-03T10:00:06Z", "marker", marker));
+        // The marker did not start a turn, so the trailing answer has nothing to attach to.
+        assert!(parser
+            .consume(&assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 9))
+            .is_none());
+        parser.consume(&human("after", "2026-10-03T10:01:00Z"));
+        let result = parser
+            .consume(&assistant("2026-10-03T10:01:10Z", "call-3", "end_turn", 20))
+            .unwrap();
+        assert_eq!(result.output_tokens, 20);
+        assert_eq!(result.duration_seconds, 10.0);
+    }
+}
+
+#[test]
+fn claude_synthetic_messages_invalidate_the_turn_without_model_ambiguity() {
+    let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
+    let synthetic = |at: &str, id: &str, stop: &str| {
+        claude_message(
+            "assistant",
+            "assistant",
+            at,
+            id,
+            "<synthetic>",
+            stop,
+            0,
+            json!([]),
+        )
+    };
+    let mut only = claude_parser();
+    only.consume(&human("synthetic-only", "2026-10-03T10:00:00Z"));
+    assert!(only
+        .consume(&synthetic("2026-10-03T10:00:02Z", "s1", "end_turn"))
+        .is_none());
+
+    let mut mixed = claude_parser();
+    mixed.consume(&human("synthetic-mixed", "2026-10-03T10:00:00Z"));
+    mixed.consume(&assistant("2026-10-03T10:00:01Z", "real-1", "tool_use", 5));
+    mixed.consume(&synthetic("2026-10-03T10:00:02Z", "s2", "tool_use"));
+    assert!(mixed
+        .consume(&assistant("2026-10-03T10:00:03Z", "real-2", "end_turn", 6))
+        .is_none());
+
+    // The invalid turn is cleared at its terminal message; later turns are unaffected.
+    mixed.consume(&human("clean", "2026-10-03T10:01:00Z"));
+    let clean = mixed
+        .consume(&assistant("2026-10-03T10:01:10Z", "real-3", "end_turn", 30))
+        .unwrap();
+    assert_eq!(clean.model.as_deref(), Some("claude-model"));
+    assert_eq!(clean.output_tokens, 30);
+}
+
+#[test]
+fn claude_meta_user_records_neither_start_nor_interrupt_turns() {
+    let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
+    let meta = |id: &str, at: &str| {
+        with_fields(
+            claude_user(at, id, json!("synthetic caveat")),
+            json!({"isMeta": true}),
+        )
+    };
+    let mut starts = claude_parser();
+    starts.consume(&meta("meta-start", "2026-10-03T10:00:00Z"));
+    assert!(starts
+        .consume(&assistant("2026-10-03T10:00:05Z", "call-1", "end_turn", 9))
+        .is_none());
+
+    // A meta record far past the continuation window must not replace the active turn.
+    let mut meta_interrupt = claude_parser();
+    meta_interrupt.consume(&human("kept", "2026-10-03T10:00:00Z"));
+    meta_interrupt.consume(&with_fields(
+        claude_user(
+            "2026-10-03T10:00:01Z",
+            "meta-interrupt",
+            json!("[Request interrupted by user]"),
+        ),
+        json!({"isMeta": true}),
+    ));
+    assert!(meta_interrupt
+        .consume(&assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9))
+        .is_some());
+
+    let mut active = claude_parser();
+    active.consume(&human("real", "2026-10-03T10:00:00Z"));
+    active.consume(&assistant("2026-10-03T10:00:01Z", "call-1", "tool_use", 5));
+    active.consume(&meta("meta-later", "2026-10-03T10:45:00Z"));
+    let result = active
+        .consume(&assistant("2026-10-03T10:45:10Z", "call-2", "end_turn", 7))
+        .unwrap();
+    assert_eq!(result.output_tokens, 12);
+    assert_eq!(result.duration_seconds, 2710.0);
+}
+
+#[test]
+fn claude_subagent_parser_emits_distinct_subagent_metrics_and_each_prompt_is_a_turn() {
+    let session = "11111111-2222-4333-8444-555555555555";
+    let agent = "a1b2c3d4e5f60718";
+    let user = |id: &str, at: &str| {
+        as_subagent(
+            claude_user(at, id, json!("synthetic task prompt")),
+            session,
+            agent,
+        )
+    };
+    let reply = |at: &str, id: &str, stop: &str, tokens: i64| {
+        as_subagent(assistant(at, id, stop, tokens), session, agent)
+    };
+    let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    parser.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    parser.consume(&reply("2026-10-03T10:00:04Z", "sub-call-1", "tool_use", 10));
+    let first = parser
+        .consume(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
+        .unwrap();
+    assert_eq!(first.client, CLAUDE_CLIENT);
+    assert_eq!(first.parser_version, "claude-transcript-v2");
+    assert_eq!(first.metric_version, CLAUDE_SUBAGENT_METRIC_VERSION);
+    assert_eq!(first.source_kind.as_deref(), Some("subagent"));
+    assert_eq!(first.provider.as_deref(), Some("unknown"));
+    assert_eq!(first.codex_ttft_seconds, None);
+    assert_eq!(first.streaming_tps, None);
+    assert_eq!(first.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(first.output_tokens, 40);
+    assert_eq!(first.duration_seconds, 10.0);
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        first.id,
+        format!(
+            "{:x}",
+            Sha256::digest(format!("{session}|{agent}|task-1").as_bytes())
+        ),
+        "the subagent identity is sessionId|agentId|user turn uuid"
+    );
+
+    // A later follow-up prompt that ends in another final answer is a separate turn.
+    parser.consume(&user("task-2", "2026-10-03T10:05:00Z"));
+    let second = parser
+        .consume(&reply("2026-10-03T10:05:20Z", "sub-call-3", "end_turn", 60))
+        .unwrap();
+    assert_eq!(second.output_tokens, 60);
+    assert_eq!(second.duration_seconds, 20.0);
+    assert_ne!(second.id, first.id);
+
+    // The same records measured as primary produce nothing, and the reverse holds too.
+    let mut primary = claude_parser();
+    primary.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    assert!(primary
+        .consume(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
+        .is_none());
+    let mut subagent = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    subagent.consume(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "primary-turn",
+        json!("synthetic"),
+    ));
+    assert!(subagent
+        .consume(&assistant(
+            "2026-10-03T10:00:10Z",
+            "primary-call",
+            "end_turn",
+            30
+        ))
+        .is_none());
+
+    // Primary identity is unaffected by the subagent scheme.
+    let mut primary = claude_parser();
+    primary.consume(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "task-1",
+        json!("synthetic"),
+    ));
+    let primary = primary
+        .consume(&assistant(
+            "2026-10-03T10:00:10Z",
+            "sub-call-2",
+            "end_turn",
+            30,
+        ))
+        .unwrap();
+    assert_ne!(primary.id, first.id);
+    assert_eq!(primary.metric_version, CLAUDE_METRIC_VERSION);
+}
+
+#[test]
+fn claude_subagent_parser_rejects_unsafe_or_mismatched_agent_identity() {
+    let user = |agent: Option<&str>| {
+        let mut line = as_subagent(
+            claude_user("2026-10-03T10:00:00Z", "task", json!("synthetic")),
+            "session-1",
+            "agent-ok",
+        );
+        let mut value: Value = serde_json::from_slice(&line).unwrap();
+        match agent {
+            Some(agent) => value["agentId"] = json!(agent),
+            None => {
+                value.as_object_mut().unwrap().remove("agentId");
+            }
+        }
+        line = serde_json::to_vec(&value).unwrap();
+        line
+    };
+    for agent in [None, Some("../escape"), Some("")] {
+        let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+        parser.consume(&user(agent));
+        assert!(parser
+            .consume(&as_subagent(
+                assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9),
+                "session-1",
+                "agent-ok",
+            ))
+            .is_none());
+    }
+    let mut mismatch = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    mismatch.consume(&user(Some("agent-ok")));
+    assert!(mismatch
+        .consume(&as_subagent(
+            assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9),
+            "session-1",
+            "agent-other",
+        ))
+        .is_none());
+}
+
+#[test]
+fn claude_monitors_measure_subagents_separately_and_primary_selection_excludes_them() {
+    let temp = TestDir::new();
+    let codex = temp.path().join("codex");
+    let claude = temp.path().join("claude-projects");
+    let grok = temp.path().join("grok-sessions");
+    fs::create_dir_all(&codex).unwrap();
+    fs::create_dir_all(&grok).unwrap();
+    let session = "session-synthetic";
+    let project = claude.join("project-a");
+    let subagents = project.join(session).join("subagents");
+    fs::create_dir_all(&subagents).unwrap();
+    let start = "2026-10-03T10:00:00Z";
+    let end = "2026-10-03T10:00:10Z";
+    let with_session = |line: Vec<u8>| with_fields(line, json!({"sessionId": session}));
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        jsonl(&[
+            with_session(claude_user(start, "main-user", json!("synthetic"))),
+            with_session(assistant(end, "main-call", "end_turn", 50)),
+        ]),
+    )
+    .unwrap();
+    fs::write(
+        subagents.join("agent-abc123.jsonl"),
+        jsonl(&[
+            as_subagent(
+                claude_user(start, "sub-user", json!("synthetic")),
+                session,
+                "abc123",
+            ),
+            as_subagent(
+                assistant(end, "sub-call", "end_turn", 70),
+                session,
+                "abc123",
+            ),
+        ]),
+    )
+    .unwrap();
+    // Not a subagent transcript: wrong file name and wrong directory.
+    fs::write(
+        subagents.join("notes.jsonl"),
+        jsonl(&[
+            as_subagent(claude_user(start, "x-user", json!("x")), session, "abc123"),
+            as_subagent(assistant(end, "x-call", "end_turn", 888), session, "abc123"),
+        ]),
+    )
+    .unwrap();
+    fs::write(
+        project.join("agent-loose.jsonl"),
+        jsonl(&[
+            as_subagent(claude_user(start, "y-user", json!("x")), session, "loose"),
+            as_subagent(assistant(end, "y-call", "end_turn", 999), session, "loose"),
+        ]),
+    )
+    .unwrap();
+
+    let now = time("2026-10-03T10:00:20Z");
+    let mut primary_only = Monitor::new_claude(claude.clone());
+    let primary = poll_until_idle(&mut primary_only, now);
+    assert_eq!(primary.len(), 1);
+    assert_eq!(primary[0].source_kind.as_deref(), Some("primary"));
+    assert_eq!(primary[0].output_tokens, 50);
+
+    let mut subagent_only = Monitor::new_claude_subagents(claude.clone());
+    let subagent = poll_until_idle(&mut subagent_only, now);
+    assert_eq!(subagent.len(), 1);
+    assert_eq!(subagent[0].source_kind.as_deref(), Some("subagent"));
+    assert_eq!(subagent[0].output_tokens, 70);
+
+    let mut monitor = SourceMonitor::new(codex, claude, grok);
+    let mut found = Vec::new();
+    for _ in 0..4 {
+        found.extend(monitor.poll(now).unwrap());
+        assert!(monitor.bytes_read_last_poll() <= SourceMonitor::MAX_POLL_BYTES);
+    }
+    let mut tokens: Vec<(i64, Option<&str>, &str)> = found
+        .iter()
+        .map(|row| {
+            (
+                row.output_tokens,
+                row.source_kind.as_deref(),
+                row.metric_version.as_str(),
+            )
+        })
+        .collect();
+    tokens.sort();
+    assert_eq!(
+        tokens,
+        vec![
+            (50, Some("primary"), CLAUDE_METRIC_VERSION),
+            (70, Some("subagent"), CLAUDE_SUBAGENT_METRIC_VERSION),
+        ]
+    );
+    assert_ne!(found[0].id, found[1].id);
+}
+
+#[test]
+fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
+    let mut metric = TurnMetric::new_observed(
+        "local-subagent-digest".into(),
+        time("2026-10-03T10:03:47Z"),
+        Some("claude-sonnet-5-5".into()),
+        90,
+        3.0,
+        Some("2.1.0".into()),
+        None,
+        Some("subagent".into()),
+        Some("unknown".into()),
+        Some("high".into()),
+        CLAUDE_CLIENT,
+        CLAUDE_PARSER_VERSION,
+        CLAUDE_SUBAGENT_METRIC_VERSION,
+    );
+    let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
+    assert_eq!(sample.source_kind, "subagent");
+    assert_eq!(sample.app_version, "0.1.12");
+    assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
+    assert_eq!(sample.parser_version, "claude-transcript-v2");
+    assert_eq!(sample.ttft_ms, None);
+    let json = serde_json::to_value(&sample).unwrap();
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "appVersion",
+            "client",
+            "clientVersion",
+            "durationMs",
+            "metricVersion",
+            "model",
+            "observedAt",
+            "outputTokens",
+            "parserVersion",
+            "provider",
+            "reasoningEffort",
+            "reasoningOutputTokens",
+            "sampleId",
+            "sourceKind",
+            "ttftMs"
+        ]
+    );
+    assert!(!json.to_string().contains("local-subagent-digest"));
+
+    // The new parser version is the only supported Claude definition.
+    metric.parser_version = "claude-transcript-v1".into();
+    assert!(crate::SharedSample::from_metric(&metric, Uuid::new_v4()).is_none());
 }
 
 #[test]
@@ -1322,7 +1881,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.11");
+    assert_eq!(first[0].app_version, "0.1.12");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -1375,6 +1934,21 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         CLAUDE_PARSER_VERSION,
         CLAUDE_METRIC_VERSION,
     );
+    let subagent = TurnMetric::new_observed(
+        "local-subagent-digest".into(),
+        completed,
+        Some("claude-sonnet-5-5".into()),
+        90,
+        3.0,
+        Some("1.2.3".into()),
+        None,
+        Some("subagent".into()),
+        Some("unknown".into()),
+        None,
+        CLAUDE_CLIENT,
+        CLAUDE_PARSER_VERSION,
+        CLAUDE_SUBAGENT_METRIC_VERSION,
+    );
     let grok = TurnMetric::new_observed(
         "local-grok-digest".into(),
         completed,
@@ -1401,6 +1975,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
             Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
         )
         .unwrap(),
+        crate::SharedSample::from_metric(
+            &subagent,
+            Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
+        )
+        .unwrap(),
     ];
     let now = time("2026-10-03T10:05:00Z");
     let key = [7_u8; 32];
@@ -1414,7 +1993,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.11-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.12-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -1422,7 +2001,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.11-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.12-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -1431,13 +2010,20 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     );
     assert_eq!(request.public_key, packet["publicKey"]);
     assert_eq!(request.signature, packet["signature"]);
-    assert_eq!(actual["samples"].as_array().unwrap().len(), 2);
+    assert_eq!(actual["samples"].as_array().unwrap().len(), 3);
     assert_eq!(actual["samples"][0]["client"], "claude-code");
     assert_eq!(actual["samples"][0]["provider"], "unknown");
     assert_eq!(actual["samples"][0]["ttftMs"], Value::Null);
     assert_eq!(actual["samples"][1]["client"], "grok-build");
     assert_eq!(actual["samples"][1]["clientVersion"], "unknown");
     assert_eq!(actual["samples"][1]["ttftMs"], Value::Null);
+    assert_eq!(actual["samples"][2]["client"], "claude-code");
+    assert_eq!(actual["samples"][2]["sourceKind"], "subagent");
+    assert_eq!(
+        actual["samples"][2]["metricVersion"],
+        "claude-observed-subagent-turn-v1"
+    );
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.12");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())

@@ -1,7 +1,7 @@
 use crate::model::{
     ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
-    CLAUDE_PARSER_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT,
-    GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION,
+    CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.11";
+pub const APP_VERSION: &str = "0.1.12";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -58,6 +58,12 @@ impl SharedSample {
                 CLAUDE_CLIENT,
                 CLAUDE_PARSER_VERSION,
                 CLAUDE_METRIC_VERSION,
+                false,
+            ),
+            (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION) => (
+                CLAUDE_CLIENT,
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_SUBAGENT_METRIC_VERSION,
                 false,
             ),
             (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION) => {

@@ -72,11 +72,12 @@ impl IncrementalReader {
     }
 
     pub fn beginning_claude(path: PathBuf) -> Self {
+        let parser = ClaudeTranscriptParser::for_path(&path);
         Self::new(
             path,
             Startup::Beginning,
             None,
-            Box::new(ClaudeTranscriptParser::new(String::new())),
+            Box::new(parser),
             TailHeader::AnyTypedEvent,
         )
     }
@@ -92,11 +93,12 @@ impl IncrementalReader {
     }
 
     pub fn recent_tail_claude(path: PathBuf) -> Self {
+        let parser = ClaudeTranscriptParser::for_path(&path);
         Self::new(
             path,
             Startup::Header,
             Some(DEFAULT_TAIL_BYTES),
-            Box::new(ClaudeTranscriptParser::new(String::new())),
+            Box::new(parser),
             TailHeader::AnyTypedEvent,
         )
     }

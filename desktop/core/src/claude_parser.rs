@@ -1,22 +1,52 @@
 use crate::model::{
     ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
-    CLAUDE_PARSER_VERSION,
+    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
 };
 use crate::parser::JsonlEventParser;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 
 const MAX_TRACKED_MESSAGES: usize = 4_096;
 const MAX_EMITTED_TURNS: usize = 8_192;
 const MAX_IDENTIFIER_BYTES: usize = 512;
+/// A human message this soon after the turn's last activity continues that turn.
+const INTERJECTION_CONTINUATION_MINUTES: i64 = 30;
+const INTERRUPTION_MARKER: &str = "[Request interrupted by user";
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+/// Which transcript records a parser instance measures.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecordScope {
+    /// Main-conversation records of a session transcript.
+    Primary,
+    /// Records of one subagent transcript (`<session>/subagents/agent-<id>.jsonl`).
+    Subagent,
+}
+
+/// True only for subagent transcripts: a `subagents` directory component and an `agent-*` file name.
+pub(crate) fn is_subagent_transcript_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("subagents")
+    }) && path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("agent-"))
+}
 
 #[derive(Default)]
 struct TurnState {
     started_at: Option<DateTime<Utc>>,
     private_identity: String,
     session_identity: Option<String>,
+    agent_identity: Option<String>,
+    last_activity: Option<DateTime<Utc>>,
+    invalid: bool,
     ambiguous: bool,
     incomplete_usage: bool,
     messages: HashMap<String, Option<i64>>,
@@ -29,23 +59,43 @@ struct TurnState {
 
 /// Reads Claude Code transcript records without retaining content blocks or prompts.
 pub(crate) struct ClaudeTranscriptParser {
+    scope: RecordScope,
     source_identity: String,
     client_version: Option<String>,
     version_ambiguous: bool,
     turn: Option<TurnState>,
-    next_ordinal: u64,
     emitted_ids: HashSet<String>,
     emitted_order: VecDeque<String>,
 }
 
 impl ClaudeTranscriptParser {
+    #[cfg(test)]
     pub fn new(source_identity: String) -> Self {
+        Self::with_scope(source_identity, RecordScope::Primary)
+    }
+
+    #[cfg(test)]
+    pub fn new_subagent(source_identity: String) -> Self {
+        Self::with_scope(source_identity, RecordScope::Subagent)
+    }
+
+    /// Chooses subagent or primary measurement from the transcript's location.
+    pub fn for_path(path: &Path) -> Self {
+        let scope = if is_subagent_transcript_path(path) {
+            RecordScope::Subagent
+        } else {
+            RecordScope::Primary
+        };
+        Self::with_scope(String::new(), scope)
+    }
+
+    fn with_scope(source_identity: String, scope: RecordScope) -> Self {
         Self {
+            scope,
             source_identity,
             client_version: None,
             version_ambiguous: false,
             turn: None,
-            next_ordinal: 0,
             emitted_ids: HashSet::new(),
             emitted_order: VecDeque::new(),
         }
@@ -53,10 +103,7 @@ impl ClaudeTranscriptParser {
 
     fn consume_value(&mut self, root: &Value) -> Option<TurnMetric> {
         let object = root.as_object()?;
-        if object.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-            return None;
-        }
-        if !is_primary_record(object) {
+        if !self.accepts_record(object) {
             return None;
         }
         self.observe_version(object.get("version"));
@@ -66,16 +113,40 @@ impl ClaudeTranscriptParser {
             "user" => {
                 if !message.is_some_and(|message| {
                     message.get("role").and_then(Value::as_str) == Some("user")
-                }) || !is_human_user(message.and_then(|message| message.get("content")))
-                {
+                }) {
                     return None;
                 }
-                let timestamp = parse_date(object.get("timestamp"));
-                if let Some(active) = self.turn.as_mut() {
-                    // A human message inside an unfinished assistant/tool cycle makes
-                    // the transcript boundary ambiguous, so fail this turn closed.
-                    active.ambiguous = true;
+                // Meta records and records without a usable time are ignored entirely.
+                if object.get("isMeta").and_then(Value::as_bool) == Some(true) {
                     return None;
+                }
+                let timestamp = parse_date(object.get("timestamp"))?;
+                let content = message.and_then(|message| message.get("content"));
+                if is_tool_result(content) {
+                    // Tool output is activity inside the turn, never a turn boundary.
+                    if let Some(active) = self.turn.as_mut() {
+                        record_activity(active, timestamp);
+                    }
+                    return None;
+                }
+                if is_interruption(content) {
+                    // An interrupted turn has no trustworthy completion: drop it and
+                    // do not treat the marker as the start of another turn.
+                    self.turn = None;
+                    return None;
+                }
+                if !is_human_user(content) {
+                    return None;
+                }
+                if let Some(active) = self.turn.as_mut() {
+                    // The user typed while Claude was still working: the same turn
+                    // continues from its original start unless activity stopped long ago.
+                    if active.last_activity.is_some_and(|last| {
+                        timestamp - last <= Duration::minutes(INTERJECTION_CONTINUATION_MINUTES)
+                    }) {
+                        record_activity(active, timestamp);
+                        return None;
+                    }
                 }
                 let identity = object
                     .get("uuid")
@@ -83,20 +154,23 @@ impl ClaudeTranscriptParser {
                     .and_then(Value::as_str)
                     .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
                     .map(str::to_owned)
-                    .or_else(|| timestamp.map(|date| date.to_rfc3339()))
-                    .unwrap_or_else(|| {
-                        self.next_ordinal = self.next_ordinal.saturating_add(1);
-                        format!("missing-time-{}", self.next_ordinal)
-                    });
+                    .unwrap_or_else(|| timestamp.to_rfc3339());
                 let session_identity = object
                     .get("sessionId")
                     .and_then(Value::as_str)
                     .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
                     .map(str::to_owned);
+                let agent_identity = object
+                    .get("agentId")
+                    .and_then(Value::as_str)
+                    .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
+                    .map(str::to_owned);
                 self.turn = Some(TurnState {
-                    started_at: timestamp,
+                    started_at: Some(timestamp),
+                    last_activity: Some(timestamp),
                     private_identity: identity,
                     session_identity,
+                    agent_identity,
                     ..TurnState::default()
                 });
                 return None;
@@ -114,6 +188,23 @@ impl ClaudeTranscriptParser {
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             return None;
+        }
+        if let Some(timestamp) = parse_date(object.get("timestamp")) {
+            record_activity(turn, timestamp);
+        }
+        let synthetic = message.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL);
+        if synthetic {
+            // Client-generated placeholder messages are not model output.
+            turn.invalid = true;
+        }
+        if self.scope == RecordScope::Subagent
+            && turn.agent_identity.as_deref()
+                != object
+                    .get("agentId")
+                    .and_then(Value::as_str)
+                    .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
+        {
+            turn.incomplete_usage = true;
         }
         if let (Some(original), Some(current)) = (
             turn.session_identity.as_deref(),
@@ -164,14 +255,17 @@ impl ClaudeTranscriptParser {
             }
         }
 
-        if message
-            .get("model")
-            .and_then(Value::as_str)
-            .is_some_and(|model| safe_identifier(model, 80))
-        {
-            observe_model(message.get("model").and_then(Value::as_str), turn);
-        } else {
-            turn.has_modelless_message = true;
+        // A synthetic message only invalidates the turn; it never makes the model ambiguous.
+        if !synthetic {
+            if message
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| safe_identifier(model, 80))
+            {
+                observe_model(message.get("model").and_then(Value::as_str), turn);
+            } else {
+                turn.has_modelless_message = true;
+            }
         }
         observe_effort(object, message, turn);
 
@@ -180,6 +274,13 @@ impl ClaudeTranscriptParser {
             self.finish_turn(completed_at)
         } else {
             None
+        }
+    }
+
+    fn accepts_record(&self, root: &serde_json::Map<String, Value>) -> bool {
+        match self.scope {
+            RecordScope::Primary => is_primary_record(root),
+            RecordScope::Subagent => is_subagent_record(root),
         }
     }
 
@@ -207,7 +308,8 @@ impl ClaudeTranscriptParser {
         let completed_at = completed_at?;
         let started_at = turn.started_at?;
         let duration = (completed_at - started_at).num_nanoseconds()? as f64 / 1e9;
-        if turn.ambiguous
+        if turn.invalid
+            || turn.ambiguous
             || turn.incomplete_usage
             || duration <= 0.0
             || !duration.is_finite()
@@ -228,7 +330,13 @@ impl ClaudeTranscriptParser {
             .session_identity
             .as_deref()
             .unwrap_or(&self.source_identity);
-        let id = digest_id(identity, &turn.private_identity);
+        let id = match (self.scope, turn.agent_identity.as_deref()) {
+            (RecordScope::Subagent, Some(agent)) => {
+                digest_id(&[identity, agent, &turn.private_identity])
+            }
+            (RecordScope::Subagent, None) => return None,
+            (RecordScope::Primary, _) => digest_id(&[identity, &turn.private_identity]),
+        };
         if !self.remember_emitted(id.clone()) {
             return None;
         }
@@ -252,9 +360,19 @@ impl ClaudeTranscriptParser {
             },
             client: CLAUDE_CLIENT.to_owned(),
             parser_version: CLAUDE_PARSER_VERSION.to_owned(),
-            metric_version: CLAUDE_METRIC_VERSION.to_owned(),
+            metric_version: match self.scope {
+                RecordScope::Primary => CLAUDE_METRIC_VERSION,
+                RecordScope::Subagent => CLAUDE_SUBAGENT_METRIC_VERSION,
+            }
+            .to_owned(),
             reasoning_output_tokens: None,
-            source_kind: Some("primary".to_owned()),
+            source_kind: Some(
+                match self.scope {
+                    RecordScope::Primary => "primary",
+                    RecordScope::Subagent => "subagent",
+                }
+                .to_owned(),
+            ),
             // A product/model name does not establish which provider route was used.
             provider: Some("unknown".to_owned()),
             reasoning_effort: if turn.effort_ambiguous {
@@ -281,7 +399,7 @@ impl ClaudeTranscriptParser {
 
 impl JsonlEventParser for ClaudeTranscriptParser {
     fn reset(&mut self, source_identity: String) {
-        *self = Self::new(source_identity);
+        *self = Self::with_scope(source_identity, self.scope);
     }
 
     fn consume(&mut self, line: &[u8]) -> Option<TurnMetric> {
@@ -312,6 +430,45 @@ fn is_primary_record(root: &serde_json::Map<String, Value>) -> bool {
     root.get("isSidechain").and_then(Value::as_bool) == Some(false)
         && root.get("userType").and_then(Value::as_str) == Some("external")
         && !root.contains_key("agentId")
+}
+
+fn is_subagent_record(root: &serde_json::Map<String, Value>) -> bool {
+    root.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        && root.get("userType").and_then(Value::as_str) == Some("external")
+        && root
+            .get("agentId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
+}
+
+/// Claude Code records a user interruption as a text user record with this prefix.
+fn is_interruption(content: Option<&Value>) -> bool {
+    match content {
+        Some(Value::String(text)) => text.starts_with(INTERRUPTION_MARKER),
+        Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with(INTERRUPTION_MARKER))
+        }),
+        _ => false,
+    }
+}
+
+fn record_activity(turn: &mut TurnState, timestamp: DateTime<Utc>) {
+    if turn.last_activity.map_or(true, |last| timestamp > last) {
+        turn.last_activity = Some(timestamp);
+    }
+}
+
+fn is_tool_result(content: Option<&Value>) -> bool {
+    matches!(content, Some(Value::Array(blocks)) if blocks.iter().any(|block| {
+        block
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| matches!(kind, "tool_result" | "tool_use_result"))
+    }))
 }
 
 fn is_human_user(content: Option<&Value>) -> bool {
@@ -402,10 +559,6 @@ fn safe_version(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
-fn digest_id(source: &str, turn: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(source.as_bytes());
-    digest.update(b"|");
-    digest.update(turn.as_bytes());
-    format!("{:x}", digest.finalize())
+fn digest_id(parts: &[&str]) -> String {
+    format!("{:x}", Sha256::digest(parts.join("|").as_bytes()))
 }

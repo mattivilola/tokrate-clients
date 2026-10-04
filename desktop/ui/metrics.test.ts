@@ -8,6 +8,7 @@ import {
   communityId,
   metricDefinition,
   alertsForCohorts,
+  measurementExplanation,
   measurementLabel,
   signal,
   buckets,
@@ -124,6 +125,33 @@ it("keeps each source/parser/metric cohort separate and uses the backend communi
   expect(measurementLabel(grok)).toMatch("includes nested agent output");
   expect(summarize([claude]).ttft.count).toBe(0);
   expect(metricDefinition(claude)).not.toBe(metricDefinition(grok));
+});
+it("labels subagent turns and keeps their cohorts separate from primary Claude turns", () => {
+  const claude = m({
+    client: "claude-code",
+    parserVersion: "claude-transcript-v2",
+    metricVersion: "claude-observed-turn-v1",
+    provider: "unknown",
+    sourceKind: "primary",
+    codexTTFTSeconds: null,
+  });
+  const subagent = m({
+    ...claude,
+    metricVersion: "claude-observed-subagent-turn-v1",
+    sourceKind: "subagent",
+  });
+  expect(measurementLabel(subagent)).toBe("Subagent turn speed");
+  expect(measurementExplanation(subagent)).toBe(
+    "Subagent task prompt to final answer, including tools and waiting.",
+  );
+  expect(measurementLabel(claude)).toBe("Transcript-observed turn throughput");
+  expect(measurementExplanation(claude)).toBeNull();
+  expect(cohort(subagent)).not.toBe(cohort(claude));
+  expect(metricDefinition(subagent)).not.toBe(metricDefinition(claude));
+  expect(communityId(subagent)).not.toBe(communityId(claude));
+  // Subagent cohorts stay selectable: selection never filters by source kind.
+  expect(select([subagent, claude], cohort(subagent))).toEqual([subagent]);
+  expect(select([subagent, claude], "latest")).toEqual([subagent]);
 });
 it("filters community alerts by matching published cohort IDs", () => {
   const rows = [
