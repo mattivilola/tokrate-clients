@@ -1,4 +1,8 @@
-use crate::model::{ReportedReasoningEffort, TurnMetric};
+use crate::model::{
+    ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
+    CLAUDE_PARSER_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT,
+    GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+};
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -9,7 +13,7 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.8";
+pub const APP_VERSION: &str = "0.1.9";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -22,11 +26,11 @@ const MAX_SEEN_LOCAL_IDS: usize = 50_000;
 pub struct SharedSample {
     pub sample_id: Uuid,
     pub observed_at: String,
-    pub client: &'static str,
+    pub client: String,
     pub client_version: String,
     pub app_version: &'static str,
-    pub parser_version: &'static str,
-    pub metric_version: &'static str,
+    pub parser_version: String,
+    pub metric_version: String,
     pub model: String,
     pub provider: String,
     pub reasoning_effort: String,
@@ -39,6 +43,28 @@ pub struct SharedSample {
 
 impl SharedSample {
     pub fn from_metric(metric: &TurnMetric, sample_id: Uuid) -> Option<Self> {
+        let (client, parser_version, metric_version, supports_ttft) = match (
+            metric.client.as_str(),
+            metric.parser_version.as_str(),
+            metric.metric_version.as_str(),
+        ) {
+            (CODEX_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => (
+                CODEX_CLIENT,
+                CODEX_PARSER_VERSION,
+                CODEX_METRIC_VERSION,
+                true,
+            ),
+            (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION) => (
+                CLAUDE_CLIENT,
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_METRIC_VERSION,
+                false,
+            ),
+            (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION) => {
+                (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION, false)
+            }
+            _ => return None,
+        };
         let duration_ms = metric.duration_seconds * 1_000.0;
         if !duration_ms.is_finite()
             || !(1.0..=86_400_000.0).contains(&duration_ms)
@@ -51,15 +77,18 @@ impl SharedSample {
         let reasoning_output_tokens = metric
             .reasoning_output_tokens
             .filter(|value| (0..=metric.output_tokens).contains(value));
-        let ttft_ms = metric.codex_ttft_seconds.and_then(|value| {
-            let milliseconds = value * 1_000.0;
-            (milliseconds.is_finite() && (0.0..=duration_ms).contains(&milliseconds))
-                .then_some(milliseconds)
-        });
+        let ttft_ms = supports_ttft
+            .then_some(metric.codex_ttft_seconds)
+            .flatten()
+            .and_then(|value| {
+                let milliseconds = value * 1_000.0;
+                (milliseconds.is_finite() && (0.0..=duration_ms).contains(&milliseconds))
+                    .then_some(milliseconds)
+            });
         Some(Self {
             sample_id,
             observed_at: format_date(observed_at),
-            client: "codex",
+            client: client.to_owned(),
             client_version: metric
                 .client_version
                 .as_deref()
@@ -67,20 +96,20 @@ impl SharedSample {
                 .unwrap_or("unknown")
                 .to_owned(),
             app_version: APP_VERSION,
-            parser_version: "codex-rollout-v1",
-            metric_version: "turn-v1",
+            parser_version: parser_version.to_owned(),
+            metric_version: metric_version.to_owned(),
             model: metric
                 .model
                 .as_deref()
                 .filter(|value| safe_identifier(value, 80, false))
                 .unwrap_or("unknown")
                 .to_owned(),
-            provider: if metric.provider.as_deref() == Some("openai") {
-                "openai"
-            } else {
-                "unknown"
-            }
-            .to_owned(),
+            provider: match metric.provider.as_deref() {
+                Some("openai" | "anthropic" | "xai" | "unknown") => {
+                    metric.provider.as_deref().unwrap().to_owned()
+                }
+                _ => "unknown".to_owned(),
+            },
             reasoning_effort: metric
                 .reasoning_effort
                 .as_deref()

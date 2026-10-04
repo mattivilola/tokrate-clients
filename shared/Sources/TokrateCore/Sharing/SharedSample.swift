@@ -4,11 +4,11 @@ import Foundation
 public struct SharedSample: Encodable, Sendable {
     public let sampleId: UUID
     public let observedAt: Date
-    public let client = "codex"
+    public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.7"
-    public let parserVersion = "codex-rollout-v1"
-    public let metricVersion = "turn-v1"
+    public let appVersion = "0.1.9"
+    public let parserVersion: String
+    public let metricVersion: String
     public let model: String
     public let provider: String
     public let reasoningEffort: String
@@ -20,19 +20,26 @@ public struct SharedSample: Encodable, Sendable {
 
     public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
         let duration = metric.durationSeconds * 1_000
+        guard metric.isSupportedSourceTuple,
+              ["openai", "anthropic", "xai", "unknown"].contains(metric.provider ?? "unknown"),
+              (metric.client != "grok-build" || metric.clientVersion == nil || metric.clientVersion == "unknown")
+        else { return nil }
         guard duration.isFinite, (1...86_400_000).contains(duration),
               (0...10_000_000).contains(metric.outputTokens) else { return nil }
         self.sampleId = sampleId
         observedAt = Date(timeIntervalSince1970: floor(metric.completedAt.timeIntervalSince1970 / 300) * 300)
+        client = metric.client
         clientVersion = metric.clientVersion.flatMap { $0.range(of: "^[a-zA-Z0-9.+_-]{1,40}$", options: .regularExpression) != nil ? $0 : nil } ?? "unknown"
+        parserVersion = metric.parserVersion
+        metricVersion = metric.metricVersion
         model = Self.safeIdentifier(metric.model, maximum: 80) ?? "unknown"
         sourceKind = ["primary", "subagent"].contains(metric.sourceKind ?? "") ? metric.sourceKind! : "unknown"
-        provider = metric.provider == "openai" ? "openai" : "unknown"
+        provider = metric.provider ?? "unknown"
         reasoningEffort = metric.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown"
         outputTokens = metric.outputTokens
         reasoningOutputTokens = metric.reasoningOutputTokens.flatMap { (0...metric.outputTokens).contains($0) ? $0 : nil }
         durationMs = duration
-        ttftMs = metric.codexTTFTSeconds.flatMap { value in
+        ttftMs = metric.ttftSeconds.flatMap { value in
             let ms = value * 1_000
             return ms.isFinite && (0...duration).contains(ms) ? ms : nil
         }

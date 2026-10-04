@@ -5,6 +5,10 @@ import {
   change,
   select,
   cohort,
+  communityId,
+  metricDefinition,
+  alertsForCohorts,
+  measurementLabel,
   signal,
   buckets,
   DAY,
@@ -80,9 +84,54 @@ it("keeps missing and explicit unknown provider cohorts distinct", () => {
     cohort(m({ provider: "unknown" })),
   );
   expect(JSON.parse(cohort(m({ provider: undefined })))).toEqual([
+    "codex",
+    "1",
+    "codex-rollout-v1",
+    "turn-v1",
     "gpt-test",
     null,
-    "1",
     "high",
+    null,
+  ]);
+});
+it("keeps each source/parser/metric cohort separate and uses the backend community key", () => {
+  const codex = m();
+  const claude = m({
+    client: "claude-code",
+    parserVersion: "claude-transcript-v1",
+    metricVersion: "claude-observed-turn-v1",
+    provider: "unknown",
+    codexTTFTSeconds: null,
+  });
+  const grok = m({
+    client: "grok-build",
+    parserVersion: "grok-session-v1",
+    metricVersion: "grok-observed-work-turn-v1",
+    provider: "unknown",
+    codexTTFTSeconds: null,
+  });
+  expect(new Set([cohort(codex), cohort(claude), cohort(grok)]).size).toBe(3);
+  expect(JSON.parse(communityId(claude))).toEqual([
+    "gpt-test",
+    "unknown",
+    "1",
+    "claude-transcript-v1",
+    "claude-observed-turn-v1",
+    "high",
+    "claude-code",
+  ]);
+  expect(measurementLabel(claude)).toBe("Transcript-observed turn throughput");
+  expect(measurementLabel(grok)).toMatch("includes nested agent output");
+  expect(summarize([claude]).ttft.count).toBe(0);
+  expect(metricDefinition(claude)).not.toBe(metricDefinition(grok));
+});
+it("filters community alerts by matching published cohort IDs", () => {
+  const rows = [
+    { cohortId: "claude-cohort", message: "matching" },
+    { cohortId: "grok-cohort", message: "other source" },
+    { message: "no cohort in public alert contract" },
+  ];
+  expect(alertsForCohorts(rows, new Set(["claude-cohort"]))).toEqual([
+    rows[0],
   ]);
 });

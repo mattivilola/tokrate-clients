@@ -33,25 +33,55 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     let provider: String?
     let clientVersion: String?
     let reasoningEffort: String?
+    let client: String
+    let parserVersion: String
+    let metricVersion: String
 
-    init(model: String?, provider: String?, clientVersion: String?, reasoningEffort: String? = nil) {
+    init(
+        model: String?, provider: String?, clientVersion: String?, reasoningEffort: String? = nil,
+        client: String = TurnMetric.codexClient,
+        parserVersion: String = TurnMetric.codexParserVersion,
+        metricVersion: String = TurnMetric.codexMetricVersion
+    ) {
         self.model = model
         self.provider = provider
         self.clientVersion = clientVersion
         self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
+        self.client = client
+        self.parserVersion = parserVersion
+        self.metricVersion = metricVersion
     }
 
     init(_ metric: TurnMetric) {
-        self.init(model: metric.model, provider: metric.provider, clientVersion: metric.clientVersion, reasoningEffort: metric.reasoningEffort)
+        self.init(
+            model: metric.model,
+            provider: metric.provider,
+            clientVersion: metric.clientVersion,
+            reasoningEffort: metric.reasoningEffort,
+            client: metric.client,
+            parserVersion: metric.parserVersion,
+            metricVersion: metric.metricVersion
+        )
     }
 
     var id: String {
-        [model, provider, clientVersion, reasoningEffort].map(Self.encode).joined(separator: ".")
+        [model, provider, clientVersion, parserVersion, metricVersion, reasoningEffort, client].map(Self.encode).joined(separator: ".")
     }
 
     var displayModel: String { model ?? "Unknown model" }
+    var clientLabel: String {
+        Self.clientTitle(client)
+    }
+    static func clientTitle(_ client: String) -> String {
+        switch client {
+        case "codex": "Codex"
+        case "claude-code": "Claude Code"
+        case "grok-build": "Grok Build"
+        default: client
+        }
+    }
     var detailLabel: String {
-        [provider ?? "provider unknown", clientVersion.map { "Codex \($0)" } ?? "Codex version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
+        [clientLabel, "parser \(parserVersion)", "metric \(metricVersion)", provider.map { "provider \($0)" } ?? "provider unknown", clientVersion.map { "version \($0)" } ?? "version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
             .joined(separator: " · ")
     }
     var selectionLabel: String { "\(displayModel) · \(detailLabel)" }
@@ -59,22 +89,37 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     /// Matches the public board's stable seven-dimension JSON identity.
     var communityBoardID: String? {
         guard let model, isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
-              provider == "openai" else { return nil }
+              ["openai", "anthropic", "xai", "unknown"].contains(provider ?? "unknown"),
+              ["codex", "claude-code", "grok-build"].contains(client),
+              isSupportedTuple else { return nil }
         let version = clientVersion.flatMap { isSafe($0, pattern: "^[a-zA-Z0-9.+_-]{1,40}$") ? $0 : nil } ?? "unknown"
-        let dimensions = [model, "openai", version, "codex-rollout-v1", "turn-v1", reasoningEffort ?? "unknown", "codex"]
+        guard isSafe(parserVersion, pattern: "^[a-zA-Z0-9._-]{1,40}$"),
+              isSafe(metricVersion, pattern: "^[a-zA-Z0-9._-]{1,48}$") else { return nil }
+        let dimensions = [model, provider ?? "unknown", version, parserVersion, metricVersion, reasoningEffort ?? "unknown", client]
         guard let data = try? JSONSerialization.data(withJSONObject: dimensions, options: [.fragmentsAllowed, .withoutEscapingSlashes]) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
     init?(id: String) {
         let parts = id.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3 || parts.count == 4,
+        if parts.count == 3 || parts.count == 4 {
+            guard let model = Self.decode(parts[0]),
+                  let provider = Self.decode(parts[1]),
+                  let clientVersion = Self.decode(parts[2]) else { return nil }
+            let effort: String?? = parts.count == 4 ? Self.decode(parts[3]) : .some(nil)
+            guard let effort else { return nil }
+            self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort)
+            return
+        }
+        guard parts.count == 7,
               let model = Self.decode(parts[0]),
               let provider = Self.decode(parts[1]),
-              let clientVersion = Self.decode(parts[2]) else { return nil }
-        let effort: String?? = parts.count == 4 ? Self.decode(parts[3]) : .some(nil)
-        guard let effort else { return nil }
-        self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort)
+              let clientVersion = Self.decode(parts[2]),
+              let parserValue = Self.decode(parts[3]), let parserVersion = parserValue,
+              let metricValue = Self.decode(parts[4]), let metricVersion = metricValue,
+              let effort = Self.decode(parts[5]),
+              let clientValue = Self.decode(parts[6]), let client = clientValue else { return nil }
+        self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort, client: client, parserVersion: parserVersion, metricVersion: metricVersion)
     }
 
     private static func encode(_ value: String?) -> String {
@@ -90,6 +135,23 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
 
     private func isSafe(_ value: String, pattern: String) -> Bool {
         value.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private var isSupportedTuple: Bool {
+        switch (client, parserVersion, metricVersion) {
+        case ("codex", "codex-rollout-v1", "turn-v1"),
+             ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),
+             ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"):
+            true
+        default:
+            false
+        }
+    }
+
+    var throughputLabel: String {
+        isSupportedTuple && metricVersion == "grok-observed-work-turn-v1"
+            ? "Work-turn throughput · includes subagent output"
+            : "Turn throughput"
     }
 }
 
@@ -168,7 +230,7 @@ struct LocalPeriodComparison: Equatable, Sendable {
     init(records: [TurnMetric], range: DashboardRange, now: Date) {
         func stats(from values: [TurnMetric]) -> PeriodMetricStats {
             let throughput = values.filter { $0.outputTokens >= 20 && $0.turnThroughputTPS.isFinite && $0.turnThroughputTPS >= 0 }
-            let ttft = values.compactMap(\.codexTTFTSeconds).filter { $0.isFinite && $0 >= 0 }
+            let ttft = values.compactMap(\.ttftSeconds).filter { $0.isFinite && $0 >= 0 }
             return PeriodMetricStats(
                 throughput: MetricStats(values: throughput.map(\.turnThroughputTPS)),
                 ttft: MetricStats(values: ttft)
@@ -234,6 +296,7 @@ struct DashboardSnapshot {
     let range: DashboardRange
     let selection: DashboardSelection
     let selectedCohort: ModelCohort?
+    let throughputLabel: String
     let latest: TurnMetric?
     let points: [Bucket]
     let turnCount: Int
@@ -252,12 +315,18 @@ struct DashboardSnapshot {
         range: DashboardRange,
         selection: DashboardSelection = .latest,
         now: Date = .now,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        clientFilter: String? = nil,
+        providerFilter: String? = nil
     ) {
         self.range = range
         self.selection = selection
         let retentionCutoff = now.addingTimeInterval(-MetricHistory.retention)
-        let retained = records.filter { $0.completedAt >= retentionCutoff && $0.completedAt <= now }
+        let retained = records.filter { metric in
+            metric.completedAt >= retentionCutoff && metric.completedAt <= now
+                && (clientFilter == nil || metric.client == clientFilter)
+                && (providerFilter == nil || (metric.provider ?? "unknown") == providerFilter)
+        }
         let latestCohort = retained.max { $0.completedAt < $1.completedAt }.map(ModelCohort.init)
         let resolvedCohort: ModelCohort?
         switch selection {
@@ -269,6 +338,7 @@ struct DashboardSnapshot {
             resolvedCohort = nil
         }
         selectedCohort = resolvedCohort
+        throughputLabel = resolvedCohort?.throughputLabel ?? "Turn throughput"
 
         let selectedRetained = resolvedCohort.map { cohort in
             retained.filter { ModelCohort($0) == cohort }
@@ -308,7 +378,7 @@ struct DashboardSnapshot {
         let eligible = scoped.filter(Self.isThroughputEligible)
         turnCount = eligible.count
         throughput = MetricStats(values: eligible.map(\.turnThroughputTPS))
-        ttft = MetricStats(values: scoped.compactMap(\.codexTTFTSeconds).filter { $0.isFinite && $0 >= 0 })
+        ttft = MetricStats(values: scoped.compactMap(\.ttftSeconds).filter { $0.isFinite && $0 >= 0 })
         medianRate = throughput.median
         medianTTFT = ttft.median
         latest = eligible.max { $0.completedAt < $1.completedAt }
@@ -343,6 +413,9 @@ struct DashboardSnapshot {
 
     static func ordered(_ summaries: [CohortSummary], by sort: CohortComparisonSort) -> [CohortSummary] {
         summaries.sorted { left, right in
+            if left.cohort.metricVersion != right.cohort.metricVersion {
+                return left.cohort.metricVersion < right.cohort.metricVersion
+            }
             switch sort {
             case .recent:
                 return left.latestAt == right.latestAt
@@ -381,7 +454,7 @@ struct DashboardSnapshot {
         let groups = Dictionary(grouping: records, by: ModelCohort.init)
         return groups.map { cohort, turns in
             let eligible = turns.filter(isThroughputEligible)
-            let ttft = turns.compactMap(\.codexTTFTSeconds).filter { $0.isFinite && $0 >= 0 }
+            let ttft = turns.compactMap(\.ttftSeconds).filter { $0.isFinite && $0 >= 0 }
             return CohortSummary(
                 cohort: cohort,
                 throughput: MetricStats(values: eligible.map(\.turnThroughputTPS)),
@@ -398,13 +471,13 @@ struct DashboardSnapshot {
         let eligible = records.filter(isThroughputEligible)
         let current = eligible.filter { $0.completedAt >= currentStart }
         let baseline = eligible.filter { $0.completedAt < currentStart && $0.completedAt >= baselineStart }
-        let ttftRecords = records.filter { $0.codexTTFTSeconds.map { $0.isFinite && $0 >= 0 } == true }
+        let ttftRecords = records.filter { $0.ttftSeconds.map { $0.isFinite && $0 >= 0 } == true }
         let currentTTFTRecords = ttftRecords.filter { $0.completedAt >= currentStart }
         let baselineTTFTRecords = ttftRecords.filter { $0.completedAt < currentStart && $0.completedAt >= baselineStart }
         let currentThroughput = MetricStats(values: current.map(\.turnThroughputTPS))
         let baselineThroughput = MetricStats(values: baseline.map(\.turnThroughputTPS))
-        let currentTTFT = MetricStats(values: currentTTFTRecords.compactMap(\.codexTTFTSeconds))
-        let baselineTTFT = MetricStats(values: baselineTTFTRecords.compactMap(\.codexTTFTSeconds))
+        let currentTTFT = MetricStats(values: currentTTFTRecords.compactMap(\.ttftSeconds))
+        let baselineTTFT = MetricStats(values: baselineTTFTRecords.compactMap(\.ttftSeconds))
 
         let status: PersonalTrend.Status
         let latestCurrentObservation = [current.map(\.completedAt).max(), currentTTFTRecords.map(\.completedAt).max()]

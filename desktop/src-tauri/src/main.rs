@@ -34,9 +34,15 @@ fn retry_sharing(app: tauri::AppHandle, state: State<Shared>) -> Snapshot {
     state.lock().unwrap().snapshot(None)
 }
 #[tauri::command]
-async fn choose_folder(app: tauri::AppHandle) -> Result<Snapshot, String> {
+async fn choose_folder(app: tauri::AppHandle, source: String) -> Result<Snapshot, String> {
+    let title = match source.as_str() {
+        "codex" => "Choose Codex sessions folder",
+        "claude-code" => "Choose Claude Code projects folder",
+        "grok-build" => "Choose Grok Build sessions folder",
+        _ => return Err("Choose a supported source".into()),
+    };
     let folder = rfd::AsyncFileDialog::new()
-        .set_title("Choose Codex sessions folder")
+        .set_title(title)
         .pick_folder()
         .await;
     let state = app.state::<Shared>();
@@ -44,7 +50,7 @@ async fn choose_folder(app: tauri::AppHandle) -> Result<Snapshot, String> {
         state
             .lock()
             .unwrap()
-            .set_root(folder.path().to_path_buf())?;
+            .set_source_root(&source, folder.path().to_path_buf())?;
     }
     let result = state.lock().unwrap().snapshot(None);
     Ok(result)

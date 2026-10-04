@@ -1,22 +1,31 @@
 //! Portable, content-free metrics processing shared by the Tokrate desktop hosts.
 
+mod claude_parser;
+mod grok;
 mod history;
 mod model;
 mod monitor;
 mod parser;
 mod reader;
 mod sharing;
+mod sources;
 
 #[cfg(test)]
 mod tests;
 
+pub use grok::GrokMonitor;
 pub use history::History;
-pub use model::{ReportedReasoningEffort, TurnMetric};
+pub use model::{
+    ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
+    CLAUDE_PARSER_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT,
+    GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+};
 pub use monitor::Monitor;
 pub use sharing::{
     signed_request, SharedSample, SharedSampleEnvelope, SharingQueue, SignedRequest, APP_VERSION,
     MAX_PENDING_SAMPLES,
 };
+pub use sources::SourceMonitor;
 
 /// Errors produced while validating or encoding a public sharing request.
 #[derive(Debug)]

@@ -5,6 +5,10 @@ export interface Metric {
   provider?: string | null;
   clientVersion?: string | null;
   reasoningEffort?: string | null;
+  client?: string;
+  parserVersion?: string;
+  metricVersion?: string;
+  sourceKind?: string | null;
   outputTokens: number;
   durationSeconds: number;
   codexTTFTSeconds: number | null;
@@ -17,25 +21,54 @@ export interface Stats {
   count: number;
 }
 export const DAY = 86400000;
+export const client = (m: Metric) => m.client ?? "codex";
+export const parserVersion = (m: Metric) =>
+  m.parserVersion ?? "codex-rollout-v1";
+export const metricVersion = (m: Metric) => m.metricVersion ?? "turn-v1";
+export const metricDefinition = (m: Metric) =>
+  JSON.stringify([client(m), parserVersion(m), metricVersion(m)]);
 export const cohort = (m: Metric) =>
   JSON.stringify([
+    client(m),
+    m.clientVersion ?? null,
+    parserVersion(m),
+    metricVersion(m),
     m.model ?? null,
     m.provider ?? null,
-    m.clientVersion ?? null,
     m.reasoningEffort ?? null,
+    m.sourceKind ?? null,
   ]);
+export const clientLabel = (m: Metric) =>
+  ({ codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build" })[
+    client(m)
+  ] ?? "Coding tool";
+export const measurementLabel = (m: Metric) =>
+  client(m) === "claude-code"
+    ? "Transcript-observed turn throughput"
+    : client(m) === "grok-build"
+      ? "Work-turn throughput · includes nested agent output"
+      : "Completed-turn throughput";
 export const label = (m: Metric) =>
-  `${m.model ?? "Unknown model"} · ${m.reasoningEffort ?? "unknown"} effort · Codex ${m.clientVersion ?? "unknown"}`;
+  `${m.model ?? "Unknown model"} · ${m.reasoningEffort ?? "unknown"} effort · ${clientLabel(m)} ${m.clientVersion ?? "version unknown"}`;
 export const communityId = (m: Metric) =>
   JSON.stringify([
     m.model ?? "unknown",
     m.provider ?? "unknown",
     m.clientVersion ?? "unknown",
-    "codex-rollout-v1",
-    "turn-v1",
+    parserVersion(m),
+    metricVersion(m),
     m.reasoningEffort ?? "unknown",
-    "codex",
+    client(m),
   ]);
+export function alertsForCohorts<T extends { cohortId?: unknown }>(
+  alerts: T[],
+  cohortIds: Set<string>,
+): T[] {
+  return alerts.filter(
+    (alert) =>
+      typeof alert.cohortId === "string" && cohortIds.has(alert.cohortId),
+  );
+}
 export function stats(values: number[]): Stats {
   const s = values
     .filter(Number.isFinite)

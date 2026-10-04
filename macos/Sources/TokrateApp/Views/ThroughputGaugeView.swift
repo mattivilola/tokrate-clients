@@ -12,9 +12,10 @@ struct ThroughputGaugeView: View {
     var body: some View {
         VStack(spacing: 2) {
             HStack {
-                Text("LATEST TURN THROUGHPUT")
+                Text(metric?.throughputLabel ?? "Turn throughput")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .tracking(1.1)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.78)
                 Spacer()
                 if let metric {
                     Text(metric.completedAt.formatted(date: .omitted, time: .shortened))
@@ -38,7 +39,7 @@ struct ThroughputGaugeView: View {
             }
             .frame(height: compact ? 172 : 205)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Latest turn throughput")
+            .accessibilityLabel(metric?.throughputLabel ?? "Latest turn throughput")
             .accessibilityValue(value.map { String(format: "%.1f output tokens per whole-turn second", $0) } ?? "No completed turns yet")
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
@@ -54,7 +55,9 @@ struct ThroughputGaugeView: View {
             }
             .font(.system(size: 11, weight: .medium))
             .padding(.top, 8)
-            Text("Includes tools, waiting & reasoning")
+            Text(metric?.metricVersion == "grok-observed-work-turn-v1"
+                ? "Includes nested subagent output, tools & waiting"
+                : "Includes tools, waiting & reasoning")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
                 .padding(.top, 3)
         }

@@ -9,11 +9,11 @@ use std::{
     time::Duration,
 };
 use tauri::Manager;
-use tokrate_core::{signed_request, History, Monitor, SharingQueue, TurnMetric};
+use tokrate_core::{signed_request, History, SharingQueue, SourceMonitor, TurnMetric};
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct Settings {
     pub sharing: bool,
     pub monitoring: bool,
@@ -21,24 +21,32 @@ pub struct Settings {
     pub selection: String,
     pub days: u8,
     pub root: String,
+    pub claude_root: String,
+    pub grok_root: String,
 }
 impl Default for Settings {
     fn default() -> Self {
-        let root = std::env::var_os("CODEX_HOME")
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                    .unwrap_or_default();
-                PathBuf::from(home).join(".codex")
-            })
-            .join("sessions");
+            .unwrap_or_else(|| PathBuf::from("."));
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let grok_home = std::env::var_os("GROK_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".grok"));
         Self {
             sharing: true,
             monitoring: true,
             show_speed: true,
             selection: "latest".into(),
             days: 1,
-            root: root.to_string_lossy().into(),
+            root: codex_home.join("sessions").to_string_lossy().into(),
+            claude_root: claude_home.join("projects").to_string_lossy().into(),
+            grok_root: grok_home.join("sessions").to_string_lossy().into(),
         }
     }
 }
@@ -67,7 +75,7 @@ pub struct Snapshot {
 pub struct Runtime {
     settings: Settings,
     history: History,
-    monitor: Monitor,
+    monitor: SourceMonitor,
     dir: PathBuf,
     status: String,
     pub monitor_status: String,
@@ -86,7 +94,12 @@ impl Runtime {
         std::fs::create_dir_all(&dir)?;
         let (settings, status) = match std::fs::read(dir.join("settings.json")) {
             Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
-                Ok(s) if [1, 7].contains(&s.days) => (s, "Starting…"),
+                Ok(mut s) if [1, 7].contains(&s.days) => {
+                    if !valid_selection(&s.selection) {
+                        s.selection = "latest".into();
+                    }
+                    (s, "Starting…")
+                }
                 _ => {
                     let mut s = Settings::default();
                     s.sharing = false;
@@ -109,7 +122,11 @@ impl Runtime {
         let history_read_error = loaded_history.is_err();
         let history = loaded_history.unwrap_or_default();
         Ok(Self {
-            monitor: Monitor::new(PathBuf::from(&settings.root)),
+            monitor: SourceMonitor::new(
+                PathBuf::from(&settings.root),
+                PathBuf::from(&settings.claude_root),
+                PathBuf::from(&settings.grok_root),
+            ),
             settings,
             history,
             dir,
@@ -206,15 +223,22 @@ impl Runtime {
         self.settings = next;
         Ok(())
     }
-    pub fn set_root(&mut self, root: PathBuf) -> Result<(), String> {
+    pub fn set_source_root(&mut self, source: &str, root: PathBuf) -> Result<(), String> {
         if !root.is_dir() {
             return Err("Choose an existing folder".into());
         }
         let mut next = self.settings.clone();
-        next.root = root.to_string_lossy().into();
+        match source {
+            "codex" => next.root = root.to_string_lossy().into(),
+            "claude-code" => next.claude_root = root.to_string_lossy().into(),
+            "grok-build" => next.grok_root = root.to_string_lossy().into(),
+            _ => return Err("Choose a supported source".into()),
+        }
         self.save_settings(&next)?;
         self.settings = next;
-        self.monitor = Monitor::new(root);
+        self.monitor
+            .set_root(source, root)
+            .map_err(|_| "Could not start the selected monitor")?;
         Ok(())
     }
     fn valid(&self, g: u64) -> bool {
@@ -227,11 +251,15 @@ impl Runtime {
             match self.monitor.poll(now) {
                 Ok(found) => {
                     records = found;
-                    self.monitor_status = "Monitoring Codex sessions".into();
+                    if self.monitor.had_source_error() {
+                        self.monitor_status = "A source folder could not be read. Other available monitors remain active.".into();
+                    } else {
+                        self.monitor_status = self.source_status();
+                    }
                 }
                 Err(_) => {
                     self.monitor_status =
-                        "Session folder unavailable. Start Codex or choose its sessions folder."
+                        "A selected source folder is unavailable. Choose an existing sessions or projects folder."
                             .into()
                 }
             }
@@ -280,12 +308,53 @@ impl Runtime {
                 && Some(cohort(m)) == selected
         });
         value
-            .map(|m| format!("{:.1} t/s · completed turn", m.turn_throughput_tps))
+            .map(|m| format!("{:.1} t/s · {}", m.turn_throughput_tps, metric_label(m)))
             .unwrap_or_else(|| "Tokrate · no selected turn".into())
+    }
+
+    fn source_status(&self) -> String {
+        let mut sources = Vec::new();
+        for (name, root) in [
+            ("Codex", &self.settings.root),
+            ("Claude Code", &self.settings.claude_root),
+            ("Grok Build", &self.settings.grok_root),
+        ] {
+            if PathBuf::from(root).is_dir() {
+                sources.push(name);
+            }
+        }
+        if sources.is_empty() {
+            "Waiting for a supported coding tool or choose its sessions/projects folder.".into()
+        } else {
+            format!("Monitoring {}", sources.join(", "))
+        }
     }
 }
 fn cohort(m: &TurnMetric) -> String {
-    serde_json::json!([m.model, m.provider, m.client_version, m.reasoning_effort]).to_string()
+    serde_json::json!([
+        m.client,
+        m.client_version,
+        m.parser_version,
+        m.metric_version,
+        m.model,
+        m.provider,
+        m.reasoning_effort,
+        m.source_kind
+    ])
+    .to_string()
+}
+fn valid_selection(value: &str) -> bool {
+    if matches!(value, "latest" | "all") {
+        return true;
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(value).is_ok_and(|parts| parts.len() == 8)
+}
+fn metric_label(metric: &TurnMetric) -> &'static str {
+    match metric.client.as_str() {
+        "claude-code" => "transcript-observed turn throughput",
+        "grok-build" => "work-turn throughput · includes nested agent output",
+        _ => "completed-turn throughput",
+    }
 }
 fn identity() -> Result<Zeroizing<[u8; 32]>, String> {
     let entry = keyring::Entry::new("dev.tokrate.desktop", "contribution-signing-key-v1")
@@ -547,7 +616,7 @@ mod tests {
         fresh.id = "fresh".into();
         fresh.completed_at = now;
         runtime.history.merge(&[fresh], now);
-        assert_eq!(runtime.tray_text(), "20.0 t/s · completed turn");
+        assert_eq!(runtime.tray_text(), "20.0 t/s · completed-turn throughput");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -9,10 +9,17 @@ struct HistoryView: View {
     @State private var range: DashboardRange = .week
 
     var body: some View {
-        let snapshot = DashboardSnapshot(records: store.records, range: range, selection: store.dashboardSelection)
+        let snapshot = DashboardSnapshot(
+            records: store.records,
+            range: range,
+            selection: store.dashboardSelection,
+            clientFilter: store.clientFilter,
+            providerFilter: store.providerFilter
+        )
         ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             header
+            ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
             CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
             if snapshot.selection.isAllModels {
                 CohortComparisonView(snapshot: snapshot, range: $range, compact: false)
@@ -35,7 +42,7 @@ struct HistoryView: View {
                 ContentUnavailableView {
                     Label(store.records.isEmpty ? "No turn history yet" : "No turns in this range", systemImage: "chart.xyaxis.line")
                 } description: {
-                    Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed Codex turns. Large histories may take a moment." : "Choose Start monitoring to read local Codex session files. Prompts and responses are never retained.") : "Choose 7 days or select another model cohort to view its local turns.")
+                    Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed turns from Codex, Claude Code, and Grok Build. Large histories may take a moment." : "Choose Start monitoring to read local session files. Prompts and responses are never retained.") : "Choose 7 days or select another client, provider, or model cohort to view its local turns.")
                 } actions: {
                     Button("Start monitoring") { store.startMonitoring() }
                         .buttonStyle(.borderedProminent)
@@ -113,14 +120,16 @@ struct HistoryView: View {
                     .monospacedDigit()
             }
             .width(min: 90)
-            TableColumn("Codex TTFT") { record in
-                Text(record.codexTTFTSeconds.map { String(format: "%.2f s", $0) } ?? "—")
+            TableColumn("TTFT") { record in
+                Text(record.ttftSeconds.map { String(format: "%.2f s", $0) } ?? "—")
                     .monospacedDigit()
+                    .help("Source-reported TTFT when available; first-visible-text semantics are unverified.")
             }
             .width(min: 100)
-            TableColumn("Turn throughput") { record in
+            TableColumn("Throughput") { record in
                 Text("\(record.turnThroughputTPS, specifier: "%.1f") t/s")
                     .monospacedDigit()
+                    .help(record.throughputLabel)
             }
             .width(min: 120)
         }
@@ -133,8 +142,10 @@ struct HistoryView: View {
                 .foregroundStyle(store.isMonitoring ? .green : .secondary)
             Text("· \(store.folderDescription)")
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(store.folderDescription)
             Spacer()
-            Text("Streaming speed unavailable · Codex TTFT semantics unverified")
+            Text("Streaming speed unavailable · TTFT semantics unverified")
                 .foregroundStyle(.secondary)
         }
         .font(.caption)

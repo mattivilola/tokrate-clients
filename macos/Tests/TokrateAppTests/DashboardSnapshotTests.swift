@@ -14,7 +14,10 @@ final class DashboardSnapshotTests: XCTestCase {
         outputTokens: Int = 100,
         rate: Double,
         ttft: Double? = nil,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        client: String = "codex",
+        parserVersion: String = "codex-rollout-v1",
+        metricVersion: String = "turn-v1"
     ) -> TurnMetric {
         TurnMetric(
             id: id,
@@ -24,7 +27,10 @@ final class DashboardSnapshotTests: XCTestCase {
             durationSeconds: 10,
             codexTTFTSeconds: ttft,
             turnThroughputTPS: rate,
+            client: client,
             clientVersion: clientVersion,
+            parserVersion: parserVersion,
+            metricVersion: metricVersion,
             provider: provider,
             reasoningEffort: reasoningEffort
         )
@@ -119,6 +125,36 @@ final class DashboardSnapshotTests: XCTestCase {
         XCTAssertNil(restoredLegacy.reasoningEffort)
         XCTAssertEqual(restoredLegacy, ModelCohort(model: "gpt-s", provider: "openai", clientVersion: "1.0"))
         XCTAssertEqual(DashboardSelection.restored(from: "cohort:\(oldParts)"), .cohort(restoredLegacy))
+    }
+
+    func testClientAndProviderFiltersKeepSourceMetricsAndCommunityCohortsSeparate() {
+        let records = [
+            metric("codex", secondsAgo: 10, model: "shared-model", provider: "openai", rate: 10, ttft: 1),
+            metric("claude", secondsAgo: 9, model: "shared-model", provider: "unknown", clientVersion: nil, rate: 20, client: "claude-code", parserVersion: "claude-transcript-v1", metricVersion: "claude-observed-turn-v1"),
+            metric("grok", secondsAgo: 8, model: "shared-model", provider: "unknown", clientVersion: nil, rate: 30, client: "grok-build", parserVersion: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1")
+        ]
+        let all = DashboardSnapshot(records: records, range: .day, selection: .all, now: now)
+        XCTAssertEqual(all.cohortSummaries.count, 3)
+        XCTAssertEqual(Set(all.cohortSummaries.map(\.cohort.client)), ["codex", "claude-code", "grok-build"])
+        XCTAssertEqual(Set(all.cohortSummaries.map { $0.cohort.communityBoardID }).count, 3)
+
+        let claudeOnly = DashboardSnapshot(records: records, range: .day, selection: .all, now: now, clientFilter: "claude-code", providerFilter: "unknown")
+        XCTAssertEqual(claudeOnly.cohortSummaries.count, 1)
+        XCTAssertEqual(claudeOnly.cohortSummaries.first?.cohort.parserVersion, "claude-transcript-v1")
+        XCTAssertEqual(claudeOnly.cohortSummaries.first?.cohort.communityBoardID,
+                       #"["shared-model","unknown","unknown","claude-transcript-v1","claude-observed-turn-v1","unknown","claude-code"]"#)
+
+        let openAIOnly = DashboardSnapshot(records: records, range: .day, selection: .all, now: now, providerFilter: "openai")
+        XCTAssertEqual(openAIOnly.cohortSummaries.map(\.cohort.client), ["codex"])
+        XCTAssertEqual(ModelCohort(records[2]).throughputLabel, "Work-turn throughput · includes subagent output")
+        XCTAssertNil(records[2].ttftSeconds)
+
+        for sort in [CohortComparisonSort.higherThroughput, .lowerTTFT] {
+            let ordered = DashboardSnapshot.ordered(all.cohortSummaries, by: sort)
+            XCTAssertEqual(ordered.map { $0.cohort.metricVersion }, [
+                "claude-observed-turn-v1", "grok-observed-work-turn-v1", "turn-v1"
+            ])
+        }
     }
 
     func testLocalPeriodComparisonKeepsMetricCountsIndependentAndRequiresFiveValues() {

@@ -9,3 +9,6 @@ Codex sessions default to `%USERPROFILE%\.codex\sessions`, or `$CODEX_HOME/sessi
 Click the tray icon or **Open dashboard** to see the gauge, model/effort selector, 24h/7d charts, local comparisons and sharing toggle. Windows tray icons do not support adjacent text: optional speed appears in the tooltip and tray menu. Closing the dashboard hides it to the tray; **Quit Tokrate** stops the app. Launching again reopens the existing instance.
 
 The signing key is stored in Windows Credential Manager. Sharing is ON for a new installation and remembers OFF; while OFF the app performs no community requests. Read the root README/privacy information and desktop test/release gates before distributing.
+
+
+The 0.1.9 source also monitors Claude Code (`CLAUDE_CONFIG_DIR/projects`, default `.claude/projects` in your home directory) and Grok Build (`GROK_HOME/sessions`, default `.grok/sessions`). The dashboard distinguishes coding tool from inference provider and labels each measurement definition. Source-specific folder settings support nonstandard installations. See [the shared contract](../docs/metrics-contract.md); native CI evidence does not establish interactive acceptance on every desktop configuration.

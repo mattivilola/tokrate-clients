@@ -1,5 +1,6 @@
+use crate::claude_parser::ClaudeTranscriptParser;
 use crate::model::TurnMetric;
-use crate::parser::CodexEventParser;
+use crate::parser::{CodexEventParser, JsonlEventParser};
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -38,13 +39,20 @@ enum Startup {
     Ready,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TailHeader {
+    CodexSessionMeta,
+    AnyTypedEvent,
+}
+
 /// An incremental reader with independent recent-tail and full-replay parser cursors.
 pub(crate) struct IncrementalReader {
     path: PathBuf,
     offset: u64,
     pending: Vec<u8>,
     identity: Option<FileIdentity>,
-    parser: CodexEventParser,
+    parser: Box<dyn JsonlEventParser>,
+    tail_header: TailHeader,
     startup: Startup,
     dropping_oversized_line: bool,
     bytes_read_last_poll: usize,
@@ -54,24 +62,64 @@ pub(crate) struct IncrementalReader {
 
 impl IncrementalReader {
     pub fn beginning(path: PathBuf) -> Self {
-        Self::new(path, Startup::Beginning, None)
+        Self::new(
+            path,
+            Startup::Beginning,
+            None,
+            Box::new(CodexEventParser::new(String::new())),
+            TailHeader::CodexSessionMeta,
+        )
+    }
+
+    pub fn beginning_claude(path: PathBuf) -> Self {
+        Self::new(
+            path,
+            Startup::Beginning,
+            None,
+            Box::new(ClaudeTranscriptParser::new(String::new())),
+            TailHeader::AnyTypedEvent,
+        )
     }
 
     pub fn recent_tail(path: PathBuf) -> Self {
-        Self::new(path, Startup::Header, Some(DEFAULT_TAIL_BYTES))
+        Self::new(
+            path,
+            Startup::Header,
+            Some(DEFAULT_TAIL_BYTES),
+            Box::new(CodexEventParser::new(String::new())),
+            TailHeader::CodexSessionMeta,
+        )
     }
 
-    fn new(path: PathBuf, startup: Startup, tail_bytes: Option<u64>) -> Self {
+    pub fn recent_tail_claude(path: PathBuf) -> Self {
+        Self::new(
+            path,
+            Startup::Header,
+            Some(DEFAULT_TAIL_BYTES),
+            Box::new(ClaudeTranscriptParser::new(String::new())),
+            TailHeader::AnyTypedEvent,
+        )
+    }
+
+    fn new(
+        path: PathBuf,
+        startup: Startup,
+        tail_bytes: Option<u64>,
+        mut parser: Box<dyn JsonlEventParser>,
+        tail_header: TailHeader,
+    ) -> Self {
         let identity = fs::metadata(&path)
             .ok()
             .and_then(|metadata| file_identity(&metadata));
         let source_identity = path.to_string_lossy().into_owned();
+        parser.reset(source_identity);
         Self {
             path,
             offset: 0,
             pending: Vec::new(),
             identity,
-            parser: CodexEventParser::new(source_identity),
+            parser,
+            tail_header,
             startup,
             dropping_oversized_line: false,
             bytes_read_last_poll: 0,
@@ -170,12 +218,22 @@ impl IncrementalReader {
         }
         let header = &self.pending[..newline];
         let parsed = serde_json::from_slice::<serde_json::Value>(header).ok();
-        if parsed
-            .as_ref()
-            .and_then(|value| value.get("type"))
-            .and_then(|value| value.as_str())
-            != Some("session_meta")
-        {
+        let header_is_valid = match self.tail_header {
+            TailHeader::CodexSessionMeta => {
+                parsed
+                    .as_ref()
+                    .and_then(|value| value.get("type"))
+                    .and_then(|value| value.as_str())
+                    == Some("session_meta")
+            }
+            TailHeader::AnyTypedEvent => parsed
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+        };
+        if !header_is_valid {
             self.pending.clear();
             self.startup = Startup::Unavailable;
             self.is_caught_up = true;

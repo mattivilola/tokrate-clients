@@ -1,5 +1,64 @@
 import SwiftUI
 
+struct ClientProviderFilterView: View {
+    @Binding var client: String?
+    @Binding var provider: String?
+    let clients: [String]
+    let providers: [String]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button { client = nil } label: { selectedRow("All coding tools", selected: client == nil) }
+                Divider()
+                ForEach(clients, id: \.self) { value in
+                    Button { client = value } label: {
+                        selectedRow(ModelCohort.clientTitle(value), selected: client == value)
+                    }
+                }
+            } label: {
+                filterLabel("Tool", value: client.map(ModelCohort.clientTitle) ?? "All")
+            }
+            .accessibilityLabel("Filter by coding tool")
+            .help("Filter comparisons by coding tool")
+
+            Menu {
+                Button { provider = nil } label: { selectedRow("All inference providers", selected: provider == nil) }
+                Divider()
+                ForEach(providers, id: \.self) { value in
+                    Button { provider = value } label: {
+                        selectedRow(value == "unknown" ? "Inference provider unknown" : value, selected: provider == value)
+                    }
+                }
+            } label: {
+                filterLabel("Provider", value: provider.map { $0 == "unknown" ? "Unknown" : $0 } ?? "All")
+            }
+            .accessibilityLabel("Filter by inference provider")
+            .help("Filter comparisons by inference provider")
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func filterLabel(_ title: String, value: String) -> some View {
+        HStack(spacing: 4) {
+            Text("\(title): \(value)").lineLimit(1).truncationMode(.middle)
+            Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func selectedRow(_ title: String, selected: Bool) -> some View {
+        HStack {
+            Text(title)
+            if selected { Image(systemName: "checkmark") }
+        }
+    }
+}
+
 struct CohortSelectionView: View {
     @Binding var selection: DashboardSelection
     let cohorts: [ModelCohort]
@@ -40,7 +99,7 @@ struct CohortSelectionView: View {
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
-            .accessibilityLabel("Model comparison selector")
+            .accessibilityLabel("Exact coding tool, inference provider, version, and metric cohort selector")
         }
         .menuStyle(.borderlessButton)
         .fixedSize(horizontal: false, vertical: true)
@@ -103,7 +162,7 @@ struct CohortComparisonView: View {
                         Text(summary.cohort.detailLabel)
                             .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                         comparisonLine(
-                            title: "Turn throughput",
+                            title: summary.cohort.throughputLabel,
                             median: summary.throughput.median,
                             minimum: summary.throughput.minimum,
                             maximum: summary.throughput.maximum,
@@ -112,7 +171,7 @@ struct CohortComparisonView: View {
                             digits: 1
                         )
                         comparisonLine(
-                            title: "Codex TTFT",
+                            title: "TTFT",
                             median: summary.ttft.median,
                             minimum: summary.ttft.minimum,
                             maximum: summary.ttft.maximum,
@@ -172,12 +231,12 @@ struct PersonalTrendView: View {
                         metricLine("Turn throughput", current: trend.currentThroughput, baseline: trend.baselineThroughput, unit: "t/s", digits: 1, sampleLabel: "eligible turns")
                     }
                     if trend.comparesTTFT {
-                        metricLine("Codex TTFT", current: trend.currentTTFT, baseline: trend.baselineTTFT, unit: "s", digits: 2, sampleLabel: "values")
+                        metricLine("TTFT", current: trend.currentTTFT, baseline: trend.baselineTTFT, unit: "s", digits: 2, sampleLabel: "values")
                     }
                     Text("Workload/tools may have changed; not a provider diagnosis. Reasoning effort: \(reasoningEffort ?? "unknown"); speed tier/workload are uncontrolled.")
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 } else {
-                    Text("Same model, provider, client version, and reasoning effort: \(reasoningEffort ?? "unknown"); speed tier/workload are uncontrolled.")
+                    Text("Same client, parser, metric, model, provider, version, and reasoning effort: \(reasoningEffort ?? "unknown"); speed tier/workload are uncontrolled.")
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 }
             }

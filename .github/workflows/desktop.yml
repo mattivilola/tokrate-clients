@@ -63,7 +63,7 @@ jobs:
         run: python desktop/scripts/native-smoke.py desktop/src-tauri/target/release/tokrate-desktop.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: tokrate-0.1.8-${{ matrix.artifact }}-unsigned-test-build
+          name: tokrate-0.1.9-${{ matrix.artifact }}-unsigned-test-build
           path: |
             desktop/src-tauri/target/release/bundle/nsis/*.exe
             desktop/src-tauri/target/release/bundle/deb/*.deb

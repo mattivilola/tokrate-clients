@@ -1,6 +1,6 @@
 # Tokrate desktop — Windows and Linux development
 
-Tauri 2 uses the system webview, a Rust monitor, and a small TypeScript dashboard. The native Swift Mac release remains unchanged. This client is version **0.1.8, pre-release development**; do not advertise stable platform support until the acceptance checklist passes.
+Tauri 2 uses the system webview, a Rust monitor, and a small TypeScript dashboard. The native Swift Mac release remains unchanged. This client is version **0.1.9, pre-release development**; do not advertise stable platform support until the acceptance checklist passes.
 
 ## Build
 
@@ -28,12 +28,12 @@ On Windows use the `.exe` suffix; on headless Linux wrap this in `xvfb-run -a db
 
 ## Boundaries
 
-- `core`: Codex JSONL, normalized history, bounded monitor, signed samples/queue; independent of Tauri.
+- `core`: Codex rollout JSONL, Claude Code transcript JSONL and Grok Build session event/usage logs; normalized history, bounded monitors and signed samples/queue; independent of Tauri.
 - `src-tauri`: credential manager, filesystem root, fixed HTTPS endpoints, network cancellation, native lifecycle and tray. Only normalized metrics reach the UI.
-- `ui`: exact cohorts, independent throughput/TTFT coverage, charts with gaps and local baselines. No chart library, remote font, analytics SDK or browser-fetch transport.
+- `ui`: exact source/parser/metric/model/provider/version/effort cohorts, coding-tool and provider filters, independent throughput/TTFT coverage, charts with gaps and local baselines. Claude and Grok do not report TTFT; their throughput definitions stay separate. No chart library, remote font, analytics SDK or browser-fetch transport.
 - Sharing OFF clears the queue and community results, cancels the network task and prevents further identity/network work. Requests already transmitted cannot be recalled.
 - Windows Credential Manager / Linux Secret Service hold signing keys. No plaintext-key fallback. Locked/unavailable credentials leave local monitoring operational; Retry starts a new future-only reporting period.
-- Public API schema remains v1, parser `codex-rollout-v1`, metric `turn-v1`. Backend must accept 0.1.8 before upload testing with real observations.
+- Public API schema remains v1. Codex reports parser `codex-rollout-v1` / metric `turn-v1`; Claude Code reports `claude-transcript-v1` / `claude-observed-turn-v1`; Grok Build reports `grok-session-v1` / `grok-observed-work-turn-v1`. New adapters only share samples completed after consent and report no TTFT. The backend must accept 0.1.9 before upload testing with real observations.
 
 ## Remaining release acceptance
 

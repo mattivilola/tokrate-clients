@@ -8,7 +8,13 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        let snapshot = DashboardSnapshot(records: store.records, range: range, selection: store.dashboardSelection)
+        let snapshot = DashboardSnapshot(
+            records: store.records,
+            range: range,
+            selection: store.dashboardSelection,
+            clientFilter: store.clientFilter,
+            providerFilter: store.providerFilter
+        )
         ScrollView {
         VStack(spacing: 10) {
             HStack(spacing: 9) {
@@ -46,6 +52,7 @@ struct MenuBarView: View {
                 .accessibilityLabel("Tokrate settings and full history")
             }
             .padding(.horizontal, 4).padding(.bottom, 2)
+            ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
             CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
             if snapshot.selection.isAllModels {
                 CohortComparisonView(snapshot: snapshot, range: $range)

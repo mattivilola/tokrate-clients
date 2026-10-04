@@ -37,6 +37,7 @@ struct Candidate {
 /// prevent newly completed turns from reaching the host.
 pub struct Monitor {
     root: PathBuf,
+    format: JsonlFormat,
     files: HashMap<String, WatchedFile>,
     last_discovery: Option<DateTime<Utc>>,
     next_caught_up_index: usize,
@@ -44,13 +45,28 @@ pub struct Monitor {
     bytes_read_last_poll: usize,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum JsonlFormat {
+    Codex,
+    Claude,
+}
+
 impl Monitor {
     pub const MAX_POLL_BYTES: usize = MAX_POLL_BYTES_PER_CALL;
     pub const RECENT_TAIL_BYTES: u64 = RECENT_TAIL_BYTES;
 
     pub fn new(root: PathBuf) -> Self {
+        Self::with_format(root, JsonlFormat::Codex)
+    }
+
+    pub fn new_claude(root: PathBuf) -> Self {
+        Self::with_format(root, JsonlFormat::Claude)
+    }
+
+    fn with_format(root: PathBuf, format: JsonlFormat) -> Self {
         Self {
             root,
+            format,
             files: HashMap::new(),
             last_discovery: None,
             next_caught_up_index: 0,
@@ -60,6 +76,14 @@ impl Monitor {
     }
 
     pub fn poll(&mut self, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
+        self.poll_with_budget(now, MAX_POLL_BYTES_PER_CALL)
+    }
+
+    pub fn poll_with_budget(
+        &mut self,
+        now: DateTime<Utc>,
+        max_bytes: usize,
+    ) -> io::Result<Vec<TurnMetric>> {
         self.bytes_read_last_poll = 0;
         if self.last_discovery.map_or(true, |last| {
             now < last || now - last >= Duration::seconds(10)
@@ -69,8 +93,9 @@ impl Monitor {
             self.last_discovery = Some(now);
         }
 
-        let mut byte_budget = MAX_POLL_BYTES_PER_CALL;
-        let mut live_budget = LIVE_BUDGET_BYTES;
+        let max_bytes = max_bytes.min(MAX_POLL_BYTES_PER_CALL);
+        let mut byte_budget = max_bytes;
+        let mut live_budget = max_bytes * LIVE_BUDGET_BYTES / MAX_POLL_BYTES_PER_CALL;
         let mut live_records = Vec::new();
         let (live_keys, next_caught_up_index) = self.select_live_keys();
         self.next_caught_up_index = next_caught_up_index;
@@ -166,7 +191,7 @@ impl Monitor {
         for record in archive_records {
             unique.insert(record.id.clone(), record);
         }
-        self.bytes_read_last_poll = MAX_POLL_BYTES_PER_CALL - byte_budget;
+        self.bytes_read_last_poll = max_bytes - byte_budget;
         let mut records: Vec<TurnMetric> = unique.into_values().collect();
         records.sort_by(|left, right| {
             right
@@ -243,7 +268,7 @@ impl Monitor {
 
     fn discover_files(&mut self, now: DateTime<Utc>) -> io::Result<()> {
         let cutoff = now - Duration::days(7);
-        let candidates = discover_candidates(&self.root, cutoff)?;
+        let candidates = discover_candidates(&self.root, cutoff, self.format)?;
         let mut seen = HashSet::new();
         for candidate in candidates.into_iter().take(MAX_FILES) {
             let key = candidate.path.to_string_lossy().into_owned();
@@ -261,12 +286,21 @@ impl Monitor {
                 file.modified_at = candidate.modified_at;
                 file.last_discovered_size = candidate.size;
             } else {
-                let archive = (candidate.size > RECENT_TAIL_BYTES)
-                    .then(|| IncrementalReader::beginning(candidate.path.clone()));
+                let archive = (candidate.size > RECENT_TAIL_BYTES).then(|| match self.format {
+                    JsonlFormat::Codex => IncrementalReader::beginning(candidate.path.clone()),
+                    JsonlFormat::Claude => {
+                        IncrementalReader::beginning_claude(candidate.path.clone())
+                    }
+                });
                 self.files.insert(
                     key,
                     WatchedFile {
-                        live: IncrementalReader::recent_tail(candidate.path),
+                        live: match self.format {
+                            JsonlFormat::Codex => IncrementalReader::recent_tail(candidate.path),
+                            JsonlFormat::Claude => {
+                                IncrementalReader::recent_tail_claude(candidate.path)
+                            }
+                        },
                         archive,
                         identity: candidate.identity,
                         last_discovered_size: candidate.size,
@@ -281,7 +315,11 @@ impl Monitor {
     }
 }
 
-fn discover_candidates(root: &Path, cutoff: DateTime<Utc>) -> io::Result<Vec<Candidate>> {
+fn discover_candidates(
+    root: &Path,
+    cutoff: DateTime<Utc>,
+    format: JsonlFormat,
+) -> io::Result<Vec<Candidate>> {
     let mut directories = vec![root.to_path_buf()];
     let mut candidates = Vec::new();
     let mut visited_entries = 0;
@@ -314,6 +352,20 @@ fn discover_candidates(root: &Path, cutoff: DateTime<Utc>) -> io::Result<Vec<Can
                     .extension()
                     .and_then(|extension| extension.to_str())
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"))
+            {
+                continue;
+            }
+            if format == JsonlFormat::Claude
+                && (entry.path().components().any(|component| {
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("subagents")
+                }) || entry
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("agent-")))
             {
                 continue;
             }

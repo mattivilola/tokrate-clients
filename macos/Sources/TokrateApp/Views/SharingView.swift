@@ -84,7 +84,7 @@ struct SharingView: View {
             } else if let target = selectedCohort {
                 let matches = board.cohorts.filter { exactlyMatches($0, target: target) }
                 if matches.isEmpty {
-                Text("Community data for this exact model, provider, client version, and reasoning effort is not available yet.")
+                Text("Community data for this exact client, parser, metric, model, provider, version, and reasoning effort is not available yet.")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
@@ -144,7 +144,7 @@ struct SharingView: View {
             .font(.system(size: 9))
             if let median = cohort.medianTtftMs {
                 HStack(spacing: 4) {
-                    Text("Codex TTFT median \(String(format: "%.0f", median)) ms")
+                    Text("TTFT median \(String(format: "%.0f", median)) ms")
                     if let minimum = cohort.minTtftMs, let maximum = cohort.maxTtftMs {
                         Text("· min \(String(format: "%.0f", minimum)) · max \(String(format: "%.0f", maximum)) ms")
                     }
@@ -188,7 +188,7 @@ struct SharingView: View {
                 comparisonLine("Throughput", metric: throughput, unit: "t/s", digits: 1)
             }
             if let ttft = comparison.ttft {
-                comparisonLine("Codex TTFT", metric: ttft, unit: "ms", digits: 0)
+                comparisonLine("TTFT", metric: ttft, unit: "ms", digits: 0)
             }
         }
         .padding(.top, 4)
@@ -295,7 +295,7 @@ struct SharingView: View {
     }
 
     private func alertRow(_ alert: GlobalBoard.Alert) -> some View {
-        Label(alert.message ?? "\(alert.model ?? "Community") · \(alert.metric == "ttft" ? "Codex TTFT" : "turn throughput"): \((alert.state ?? "change detected").replacingOccurrences(of: "_", with: " "))", systemImage: "exclamationmark.circle")
+        Label(alert.message ?? "\(alert.model ?? "Community") · \(alert.metric == "ttft" ? "TTFT" : "turn throughput"): \((alert.state ?? "change detected").replacingOccurrences(of: "_", with: " "))", systemImage: "exclamationmark.circle")
             .font(.system(size: 10)).foregroundStyle(.orange)
     }
 

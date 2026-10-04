@@ -1,14 +1,14 @@
 # Tokrate clients
 
-Tokrate is a local macOS menu bar app and command-line inspector for completed-turn metrics from Codex session JSONL files. It starts monitoring local Codex session logs automatically on launch. Community sharing is on by default; switching it off is remembered across launches. It makes no network requests while sharing is off and does not retain prompt or response text.
+Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. Version 0.1.9 source adds local Codex, Claude Code and Grok Build adapters; published binaries may lag the source (see Releases). Supported session folders are monitored automatically on launch. Community sharing is on by default; switching it off is remembered across launches. It makes no network requests while sharing is off and does not retain prompt or response text.
 
-Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, an easy model/cohort selector, rolling 24-hour / 7-day trends, median/min/max metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. Its throughput metric is Codex-reported output tokens divided by whole-turn duration, including tool work and waits. The app labels Codex's reported TTFT separately; streaming-only tokens per second remain unavailable.
+Click the menu-bar icon to open a compact dashboard immediately: a speedometer-style gauge, an easy model/cohort selector, rolling 24-hour / 7-day trends, median/min/max metrics, and one sharing switch. The gear menu opens the full history window, with the same gauge and chart plus the latest 500 per-turn rows. The dashboard separates coding tool, inference provider, model, reasoning effort and measurement definition. Codex uses completed-turn throughput; Claude Code uses transcript-observed turn throughput; Grok Build uses work-turn throughput including nested agent output. TTFT is currently available only when Codex reports it. These are not streaming generation rates or answer-quality scores.
 
 ## Privacy: performance statistics only
 
 No prompts, responses, code, file paths, names or account details are uploaded. The client includes no advertising or behavioral analytics SDKs and sends no separate usage-tracking events. Only the documented performance measurements are shared; switching sharing off stops its community network requests.
 
-A random Keychain signing identity links reports from this installation. The backend retains a hash of its public key and first/last reporting times to count reporting installations and limit duplicate influence. It does not know about installations that never report. This is **pseudonymous**, not a claim of perfect anonymity: infrastructure receives your IP to serve requests, and the stable key can link your contributions. Server samples expire after 30 days; the minimal installation registry remains for lifetime reporting counts, and backups may retain data longer.
+A random identity in the operating system’s credential store links reports from this installation (macOS Keychain, Windows Credential Manager or Linux Secret Service). The backend retains a hash of its public key and first/last reporting times to count reporting installations and limit duplicate influence. It does not know about installations that never report. This is **pseudonymous**, not a claim of perfect anonymity: infrastructure receives your IP to serve requests, and the stable key can link your contributions. Server samples expire after 30 days; the minimal installation registry remains for lifetime reporting counts, and backups may retain data longer.
 
 The public board normally requires 10 contributors and 50 eligible turns. During launch, labelled **Early data** may show aggregates from just one reporting installation and one eligible turn. Contributor keys are never public; small-cohort numbers can still reflect a single installation. Slowdown alerts retain the stronger evidence gates.
 
@@ -18,7 +18,7 @@ The public board normally requires 10 contributors and 50 eligible turns. During
 
 - `macos/`: shipping SwiftUI app, UI tests, packaging and signing scripts.
 - `windows/` and `linux/`: platform guidance for the new Tauri tray clients; no stable releases yet.
-- `desktop/`: Windows/Linux Rust core, shared dashboard, native host and CI packaging (0.1.8 development). See [desktop setup and release gates](desktop/README.md).
+- `desktop/`: Windows/Linux Rust core, shared dashboard, native host and CI packaging (0.1.9 development). See [desktop setup and release gates](desktop/README.md).
 - `shared/`: current Swift metric core, contribution logic, CLI and core tests. Portability beyond macOS is not yet verified.
 - Root `Package.swift`, `docs/`, and `LICENSE`: package assembly, cross-client contract and MIT license.
 
@@ -74,3 +74,10 @@ For offscreen UI previews, `DashboardSnapshot(records:range:now:calendar:)` acce
 Version 0.1.4 adds **Open global stats** to the dashboard and full history, opening the canonical `https://tokrate.dev` website in your browser even when in-app sharing is off. The gear menu includes **Show speed in menu bar** (on by default, persisted). Turning it off leaves only the speedometer icon. When enabled, the value updates after completed turns; it is not a live streaming-speed measurement. Paused monitoring shows a dash rather than a stale rate.
 
 The 0.1.7 decision panel adds recent 15-minute observations, current and previous 24-hour comparisons with per-metric coverage, and responsiveness ordering. Percentage changes require five eligible values in each period and a nonzero previous median. Previous seven-day comparisons are unavailable with seven-day local retention. Community evidence distinguishes an insufficient baseline, stale processing, and a qualified signal; neither missing alerts nor fresh processing establishes provider health. Geographic coverage and answer quality remain unmeasured.
+
+
+## Claude Code and Grok Build (0.1.9 source)
+
+Claude Code uses `~/.claude/projects` or `CLAUDE_CONFIG_DIR/projects`. Grok Build uses `~/.grok/sessions` or `GROK_HOME/sessions`, reading session events and usage summaries only. The Windows equivalents are relative to your user profile; source folders can be configured for nonstandard or WSL installations.
+
+Coding tools and inference providers are separate filters. An unknown provider is intentional when local records do not establish the routing provider. Grok historical summaries without a single-model usage breakdown remain model Unknown. Claude/Grok first-token timing stays unavailable. Different measurement definitions keep separate histories and baselines; see [the complete metric contract](docs/metrics-contract.md).

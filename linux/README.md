@@ -9,3 +9,6 @@ Codex sessions default to `~/.codex/sessions`, honoring `$CODEX_HOME`, with a se
 Tray behavior varies. GNOME may need an AppIndicator extension. Use the tray's **Open dashboard** menu; left-click and tooltip behavior are not consistent across Linux desktop environments. A dashboard stays available on desktops without a tray host. Speed uses the indicator title where supported, with a tray-menu fallback. Closing minimizes to the taskbar so a missing indicator host cannot strand the app; **Quit Tokrate** stops the app.
 
 A fresh install defaults sharing ON and remembers OFF. The local gauge/history work with sharing OFF, and no community request is made while OFF. Read the root README and service privacy information before distribution; the existing legal launch gates remain open.
+
+
+The 0.1.9 source also monitors Claude Code (`CLAUDE_CONFIG_DIR/projects`, default `.claude/projects` in your home directory) and Grok Build (`GROK_HOME/sessions`, default `.grok/sessions`). The dashboard distinguishes coding tool from inference provider and labels each measurement definition. Source-specific folder settings support nonstandard installations. See [the shared contract](../docs/metrics-contract.md); native CI evidence does not establish interactive acceptance on every desktop configuration.

@@ -29,13 +29,13 @@ struct TrendChartView: View {
                 .frame(height: compact ? 76 : 170)
             } else {
                 Chart(snapshot.points) { point in
-                    AreaMark(x: .value("Time", point.date), yStart: .value("Zero", 0), yEnd: .value("Median turn throughput", point.median))
+                    AreaMark(x: .value("Time", point.date), yStart: .value("Zero", 0), yEnd: .value(snapshot.throughputLabel, point.median))
                         .foregroundStyle(LinearGradient(colors: [.teal.opacity(0.2), .blue.opacity(0.01)], startPoint: .top, endPoint: .bottom))
-                    LineMark(x: .value("Time", point.date), y: .value("Median turn throughput", point.median))
+                    LineMark(x: .value("Time", point.date), y: .value(snapshot.throughputLabel, point.median))
                         .foregroundStyle(DashboardStyle.gradient)
                         .lineStyle(StrokeStyle(lineWidth: 2.25, lineCap: .round, lineJoin: .round))
                     if snapshot.points.count == 1 {
-                        PointMark(x: .value("Time", point.date), y: .value("Median turn throughput", point.median))
+                        PointMark(x: .value("Time", point.date), y: .value(snapshot.throughputLabel, point.median))
                             .foregroundStyle(.teal).symbolSize(30)
                     }
                 }
@@ -58,11 +58,13 @@ struct TrendChartView: View {
                     }
                 }
                 .frame(height: compact ? 76 : 170)
-                .accessibilityLabel("Local turn throughput over \(range == .day ? "24 hours" : "seven days"), in tokens per whole-turn second")
+                .accessibilityLabel("Local \(snapshot.throughputLabel) over \(range == .day ? "24 hours" : "seven days"), in tokens per whole-turn second")
             }
             Text("Whole-turn · 20+ output tokens · effort shown per cohort; speed tier/workload uncontrolled")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
-                .help("Median whole-turn throughput in each time interval, for turns with at least 20 output tokens. Each turn includes tool work, waiting, and reasoning.")
+                .help(snapshot.throughputLabel == "Work-turn throughput · includes subagent output"
+                    ? "Median whole-work-turn output per second in each time interval. Grok's reported output can include nested subagent work."
+                    : "Median whole-turn throughput in each time interval, for turns with at least 20 output tokens. Each turn includes tool work, waiting, and reasoning.")
         }
         .dashboardCard(padding: 12)
     }

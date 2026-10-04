@@ -10,6 +10,12 @@ const MAX_EMITTED_TURNS: usize = 8_192;
 const MAX_TURN_ID_BYTES: usize = 512;
 const MAX_SESSION_ID_BYTES: usize = 512;
 
+pub(crate) trait JsonlEventParser: Send {
+    fn reset(&mut self, source_identity: String);
+    fn consume(&mut self, line: &[u8]) -> Option<TurnMetric>;
+    fn excludes_session(&self) -> bool;
+}
+
 #[derive(Default)]
 struct TurnState {
     started_at: Option<DateTime<Utc>>,
@@ -182,6 +188,9 @@ impl CodexEventParser {
             turn_throughput_tps: throughput,
             streaming_tps: None,
             client_version: self.client_version.clone(),
+            client: crate::model::CODEX_CLIENT.to_owned(),
+            parser_version: crate::model::CODEX_PARSER_VERSION.to_owned(),
+            metric_version: crate::model::CODEX_METRIC_VERSION.to_owned(),
             reasoning_output_tokens: state.reasoning_output_tokens,
             source_kind: Some(self.source_kind.clone()),
             provider: Some(self.provider.clone()),
@@ -269,6 +278,20 @@ impl CodexEventParser {
                 self.emitted_turn_ids.remove(&oldest);
             }
         }
+    }
+}
+
+impl JsonlEventParser for CodexEventParser {
+    fn reset(&mut self, source_identity: String) {
+        CodexEventParser::reset(self, source_identity)
+    }
+
+    fn consume(&mut self, line: &[u8]) -> Option<TurnMetric> {
+        CodexEventParser::consume(self, line)
+    }
+
+    fn excludes_session(&self) -> bool {
+        CodexEventParser::excludes_session(self)
     }
 }
 
