@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { buckets, client, measurementLabel, type Metric } from "../metrics";
+import { buckets, client, measurementLabel, toolLabel, type Metric } from "../metrics";
 import type { Dashboard } from "../model/dashboard";
 import { num, signedPercent } from "../model/format";
 import { useStore } from "../store/store";
@@ -23,6 +23,8 @@ export function useTrendBuckets(
   );
 }
 
+const SPEED_HELP = "Response speed excludes tools and your time; turn speed covers the whole turn.";
+
 export function MetricToggle({ dashboard }: { dashboard: Dashboard }) {
   const store = useAppStore();
   const metric = useStore(store, (s) => s.ui.chartMetric);
@@ -31,11 +33,11 @@ export function MetricToggle({ dashboard }: { dashboard: Dashboard }) {
     <Segmented
       label="Chart metric"
       size="sm"
-      value={!firstToken && metric === "ttft" ? "response" : metric}
+      value={chartCopy(dashboard, metric).metric}
       onChange={(v) => store.setChartMetric(v)}
       options={[
-        { value: "response", label: "Response speed" },
-        { value: "throughput", label: "Turn speed" },
+        { value: "response", label: "Response speed", title: SPEED_HELP },
+        { value: "throughput", label: "Turn speed", title: SPEED_HELP },
         {
           value: "ttft",
           label: "First token",
@@ -66,15 +68,39 @@ export function RangeToggle() {
   );
 }
 
-export function chartCopy(dashboard: Dashboard, metric: ChartMetric) {
+/** The selected model has turns but none with per-response timing (for example Grok Build). */
+export const responseSpeedUnavailable = (dashboard: Dashboard) =>
+  !!dashboard.sample && dashboard.hero.value === null && dashboard.responseTotals.turns === 0;
+
+/** Why there is no response speed: names the coding tool when its source records only whole turns. */
+export const responseUnavailableText = (sample: Metric | undefined) =>
+  sample && client(sample) === "grok-build"
+    ? `${toolLabel("grok-build")} doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn.`
+    : "No response speed for this model yet.";
+
+/**
+ * Chart copy for the chosen metric. `null` is automatic: Response, or Turn when the model has no
+ * response data. An explicit choice is never overridden, even when it has no data.
+ */
+export function chartCopy(dashboard: Dashboard, metric: ChartMetric | null) {
   const firstToken = supportsFirstToken(dashboard.sample);
-  const effective: ChartMetric = !firstToken && metric === "ttft" ? "response" : metric;
+  const unavailable = responseSpeedUnavailable(dashboard);
+  const effective: ChartMetric =
+    metric && (firstToken || metric !== "ttft")
+      ? metric
+      : unavailable
+        ? "throughput"
+        : "response";
   return {
     metric: effective,
     unit: effective === "ttft" ? "s" : "tok/s",
     title: { response: "Response speed", throughput: "Turn speed", ttft: "First token" }[effective],
     empty:
-      effective === "ttft" ? "No first-token times in this range" : "Collecting data",
+      effective === "ttft"
+        ? "No first-token times in this range"
+        : effective === "response" && unavailable
+          ? responseUnavailableText(dashboard.sample)
+          : "Collecting data",
     summary: {
       response: dashboard.responseSummary,
       throughput: dashboard.summary.throughput,

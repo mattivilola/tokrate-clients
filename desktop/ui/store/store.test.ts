@@ -130,15 +130,17 @@ describe("AppStore", () => {
     expect(store.getState().snapshot.settings.sharing).toBe(false);
   });
 
-  it("starts on response speed with the response-ranked model list", () => {
+  it("starts with an automatic chart metric and the response-ranked model list", () => {
     const store = new AppStore(bridge());
     expect(store.getState().ui).toMatchObject({
-      chartMetric: "response",
+      chartMetric: null,
       modelsView: "response",
       sort: "throughput",
     });
     store.setModelsView("turn");
     expect(store.getState().ui.modelsView).toBe("turn");
+    store.setChartMetric("response");
+    expect(store.getState().ui.chartMetric).toBe("response");
   });
 
   it("uses the consent notice version 2", () => {

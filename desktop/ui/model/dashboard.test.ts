@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DAY, cohort, type LiveResponse, type Metric } from "../metrics";
 import { pickerLabel } from "../components/Header";
 import { heroCaption } from "../components/Hero";
+import { chartCopy } from "../components/Trend";
 import { buildDashboard, communityLine } from "./dashboard";
 import { PROVIDER_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
@@ -264,6 +265,35 @@ describe("response speed hero", () => {
   });
   it("migrates the legacy latest selection to Auto", () => {
     expect(buildDashboard(input(records, { selection: "latest" })).selection).toBe("auto");
+  });
+});
+
+describe("chart metric", () => {
+  const grok = (id: string, minutesAgo: number) =>
+    turn(id, minutesAgo, 60, { model: "grok-code-fast-1", provider: "xai", client: "grok-build" });
+  const GROK_TEXT =
+    "Grok Build doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn.";
+  it("follows the data until the user picks a metric", () => {
+    const timed = buildDashboard(input([claudeTurn("c1", 30, 100)]));
+    expect(chartCopy(timed, null).metric).toBe("response");
+    expect(chartCopy(timed, "throughput").metric).toBe("throughput");
+    const untimed = buildDashboard(input([grok("g1", 10), grok("g2", 20)]));
+    expect(chartCopy(untimed, null)).toMatchObject({ metric: "throughput", title: "Turn speed" });
+  });
+  it("keeps an explicit Response choice and explains why it is empty", () => {
+    const d = buildDashboard(input([grok("g1", 10), grok("g2", 20)]));
+    const copy = chartCopy(d, "response");
+    expect(copy.metric).toBe("response");
+    expect(copy.empty).toBe(GROK_TEXT);
+    expect(copy.summary.count).toBe(0);
+    // Other sources without response timing get the generic text.
+    const other = buildDashboard(input([turn("t1", 10, 60)]));
+    expect(chartCopy(other, "response").empty).toBe("No response speed for this model yet.");
+    expect(chartCopy(other, "throughput").empty).toBe("Collecting data");
+  });
+  it("falls back to automatic when first token is not captured", () => {
+    expect(chartCopy(buildDashboard(input([grok("g1", 10)])), "ttft").metric).toBe("throughput");
+    expect(chartCopy(buildDashboard(input([claudeTurn("c1", 30, 100)])), "ttft").metric).toBe("response");
   });
 });
 

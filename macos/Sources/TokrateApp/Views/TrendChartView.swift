@@ -25,7 +25,7 @@ extension DashboardSnapshot.Bucket: Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.date == rhs.date && lhs.median == rhs.median && lhs.turns == rhs.turns }
 }
 
-/// The speed the trend chart plots. Response speed is the default.
+/// The speed the trend chart plots. Until the user picks one, the chart is automatic.
 enum TrendMetric: String, CaseIterable, Identifiable {
     case responseSpeed, turnSpeed, firstToken
     var id: String { rawValue }
@@ -61,13 +61,35 @@ extension DashboardSnapshot {
         TrendMetric.allCases.filter { $0 != .firstToken || ttft.count > 0 }
     }
 
+    /// The selected model has turns but none with per-response timing (for example Grok Build).
+    var responseSpeedUnavailable: Bool {
+        responseHero == nil && responsePoints.isEmpty && (turnHero != nil || !points.isEmpty)
+    }
+
+    /// Why there is no response speed: names the coding tool when its source records only whole turns.
+    var responseSpeedUnavailableText: String {
+        switch selectedCohort?.client {
+        case "grok-build"?:
+            "\(ModelCohort.clientTitle("grok-build")) doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn."
+        default:
+            "No response speed for this model yet."
+        }
+    }
+
+    /// The metric the chart plots: an explicit choice wins, even when it has no data. Automatic
+    /// (nil, or a choice this source cannot offer) is Response, or Turn when the model has no response data.
+    func effectiveTrendMetric(_ choice: TrendMetric?) -> TrendMetric {
+        if let choice, availableTrendMetrics.contains(choice) { return choice }
+        return responseSpeedUnavailable ? .turnSpeed : .responseSpeed
+    }
+
     func trendSeries(for metric: TrendMetric) -> TrendSeries {
         switch metric {
         case .responseSpeed:
             return TrendSeries(
                 metric: metric, title: "Your response speed", axisName: "Response speed",
                 points: responsePoints, stats: response, unit: "tok/s", digits: 1,
-                emptyText: "Your next completed response starts the chart.",
+                emptyText: responseSpeedUnavailable ? responseSpeedUnavailableText : "Your next completed response starts the chart.",
                 definition: ResponseSpeedCopy.definition,
                 help: "Median per-turn response speed in each time interval, for turns with at least one response of 200+ output tokens. Only the time the model spent responding counts; tool runs and waiting are excluded. Effort is shown per model entry; speed tier and workload are uncontrolled.",
                 accessibilitySubject: "response speed, in output tokens per responding second"
@@ -107,7 +129,8 @@ struct TrendChartView: View {
     let snapshot: DashboardSnapshot
     @Binding var range: DashboardRange
     var compact = true
-    @State private var selectedMetric: TrendMetric = .responseSpeed
+    /// nil until the user picks a metric: the chart then follows what the model has data for.
+    @State private var selectedMetric: TrendMetric?
 
     var body: some View {
         if compact {
@@ -117,13 +140,7 @@ struct TrendChartView: View {
         }
     }
 
-    /// The chosen series, falling back to turn speed when a source has no response data at all.
-    private var series: TrendSeries {
-        let available = snapshot.availableTrendMetrics
-        var metric = available.contains(selectedMetric) ? selectedMetric : .responseSpeed
-        if metric == .responseSpeed, snapshot.responsePoints.isEmpty, snapshot.responseHero == nil, !snapshot.points.isEmpty { metric = .turnSpeed }
-        return snapshot.trendSeries(for: metric)
-    }
+    private var series: TrendSeries { snapshot.trendSeries(for: snapshot.effectiveTrendMetric(selectedMetric)) }
 
     private var content: some View {
         let series = series

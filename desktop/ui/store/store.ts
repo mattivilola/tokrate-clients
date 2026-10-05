@@ -87,7 +87,7 @@ export class AppStore {
         view: options.initialView ?? "home",
         toolFilter: "all",
         providerFilter: "all",
-        chartMetric: "response",
+        chartMetric: null,
         sort: "throughput",
         modelsView: "response",
         onboardingStep: 0,

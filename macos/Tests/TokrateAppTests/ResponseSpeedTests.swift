@@ -297,6 +297,37 @@ final class ResponseSpeedTests: XCTestCase {
         XCTAssertFalse(snapshot.responsePoints.isEmpty)
     }
 
+    func testTrendChartFollowsDataUntilTheUserPicksAMetric() {
+        let timed = (0..<3).map { turn("t\($0)", secondsAgo: Double($0 + 1) * 600) }
+        let withResponse = DashboardSnapshot(records: timed, range: .day, selection: .cohort(ModelCohort(timed[0])), now: now)
+        XCTAssertFalse(withResponse.responseSpeedUnavailable)
+        XCTAssertEqual(withResponse.effectiveTrendMetric(nil), .responseSpeed)
+        XCTAssertEqual(withResponse.effectiveTrendMetric(.turnSpeed), .turnSpeed)
+        XCTAssertEqual(withResponse.trendSeries(for: .responseSpeed).emptyText, "Your next completed response starts the chart.")
+
+        let grok = (0..<3).map {
+            turn("g\($0)", secondsAgo: Double($0 + 1) * 600, model: "grok-code-fast-1", provider: "xai", client: "grok-build",
+                 parser: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1", responseSpeed: nil)
+        }
+        let untimed = DashboardSnapshot(records: grok, range: .day, selection: .cohort(ModelCohort(grok[0])), now: now)
+        XCTAssertTrue(untimed.responseSpeedUnavailable)
+        XCTAssertEqual(untimed.effectiveTrendMetric(nil), .turnSpeed, "automatic follows the data")
+        XCTAssertEqual(untimed.effectiveTrendMetric(.responseSpeed), .responseSpeed, "an explicit choice is never overridden")
+        XCTAssertEqual(untimed.effectiveTrendMetric(.firstToken), .turnSpeed, "an unavailable choice falls back to automatic")
+        let series = untimed.trendSeries(for: .responseSpeed)
+        XCTAssertTrue(series.points.isEmpty)
+        XCTAssertEqual(series.emptyText, "Grok Build doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn.")
+        XCTAssertEqual(untimed.availableTrendMetrics, [.responseSpeed, .turnSpeed])
+
+        let other = (0..<3).map { turn("o\($0)", secondsAgo: Double($0 + 1) * 600, responseSpeed: nil) }
+        let otherSnapshot = DashboardSnapshot(records: other, range: .day, selection: .cohort(ModelCohort(other[0])), now: now)
+        XCTAssertEqual(otherSnapshot.trendSeries(for: .responseSpeed).emptyText, "No response speed for this model yet.")
+
+        let none = DashboardSnapshot(records: [], range: .day, now: now)
+        XCTAssertFalse(none.responseSpeedUnavailable)
+        XCTAssertEqual(none.effectiveTrendMetric(nil), .responseSpeed, "no turns yet: the chart waits for a response")
+    }
+
     func testSourcesWithoutResponseDataKeepTheTurnSpeedSignal() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

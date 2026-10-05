@@ -144,7 +144,8 @@ export interface UiState {
   view: View;
   toolFilter: ToolFilter;
   providerFilter: ProviderFilter;
-  chartMetric: ChartMetric;
+  /** null until the user picks a metric: the chart then follows what the model has data for. */
+  chartMetric: ChartMetric | null;
   sort: "recent" | "throughput" | "ttft";
   modelsView: ModelsView;
   /** 0 welcome, 1 sharing choice, 2 where to find Tokrate. */
