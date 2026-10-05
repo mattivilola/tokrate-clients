@@ -20,6 +20,13 @@ export interface Metric {
   /** Σ seconds the model spent responding across those responses. */
   responseDurationSeconds?: number | null;
   responseCount?: number | null;
+  /** Reasoning tokens inside `outputTokens`, when the tool reports them. */
+  reasoningOutputTokens?: number | null;
+  /**
+   * Output tokens of delegated subagent work started during this primary turn and not already in
+   * `outputTokens`. null: not final yet, or not applicable (subagent and legacy records).
+   */
+  delegatedOutputTokens?: number | null;
 }
 /** One qualifying API response from the live stream (local only, never persisted). */
 export interface LiveResponse {
@@ -82,6 +89,15 @@ export const GROK_RESPONSE_NOTE = "Grok Build: average over all model calls in a
 /** Full explanation of Grok Build's response speed for info popovers and help text. */
 export const GROK_RESPONSE_EXPLANATION =
   "Grok Build records output tokens per turn, not per response, so its response speed is the turn's output tokens divided by the time its model calls spent generating (tool runs and permission waits excluded). Short calls are included, which can make it read lower than per-response measurements from Codex and Claude Code. Turns with nested agents are not counted.";
+/** Efficiency indicator vocabulary (efficiency-v1). */
+export const EFFICIENCY_NAME = "Efficiency indicator";
+export const EFFICIENCY_SHORT = "Efficiency";
+export const EFFICIENCY_DEFINITION =
+  "Fewer output tokens per request scores higher. 100 = a typical request.";
+export const EFFICIENCY_EXPLANATION =
+  "The efficiency indicator compares the median output tokens a model spends to finish one of your requests (reasoning and delegated subagent work included) with the median across all your requests in the last 7 days. 100 is typical; 200 means half the tokens. It is an indicator, not a benchmark: it depends on what you ask each model to do, requests under 200 tokens are left out, and answer quality is not measured.";
+export const EFFICIENCY_INSUFFICIENT =
+  "Not enough requests yet: the efficiency indicator needs 20 eligible requests per model.";
 export const isGrokBuild = (m: Metric | undefined) => !!m && client(m) === "grok-build";
 /** Inference provider ids a Tokrate client can attribute from explicit evidence. */
 export const PROVIDER_LABELS: Record<string, string> = {
@@ -267,22 +283,27 @@ export function signal(
       : "Longer first-token waits than your baseline"
     : "No threshold crossing in your observations";
 }
+/** The chart's time slots: 24 hourly slots for 24 h, 28 six-hour slots for 7 d. */
+export function bucketRanges(now: number, days: number) {
+  const count = days === 1 ? 24 : 28,
+    step = (days * DAY) / count,
+    start = now - days * DAY;
+  return Array.from({ length: count }, (_, i) => ({
+    at: start + i * step,
+    end: start + (i + 1) * step,
+  }));
+}
 export function buckets(
   records: Metric[],
   now: number,
   days: number,
   metric: "response" | "throughput" | "ttft",
 ) {
-  const count = days === 1 ? 24 : 28,
-    step = (days * DAY) / count,
-    start = now - days * DAY;
-  return Array.from({ length: count }, (_, i) => {
-    const s = summarize(
-      period(records, start + i * step, start + (i + 1) * step),
-    )[metric];
+  return bucketRanges(now, days).map(({ at, end }) => {
+    const s = summarize(period(records, at, end))[metric];
     return {
-      at: start + i * step,
-      end: start + (i + 1) * step,
+      at,
+      end,
       value: s.median,
       min: s.min,
       max: s.max,

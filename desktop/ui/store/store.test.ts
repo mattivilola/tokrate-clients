@@ -143,8 +143,8 @@ describe("AppStore", () => {
     expect(store.getState().ui.chartMetric).toBe("response");
   });
 
-  it("uses the consent notice version 2", () => {
-    expect(SHARING_NOTICE_VERSION).toBe("2026-10-05-v2");
+  it("uses the consent notice version 3", () => {
+    expect(SHARING_NOTICE_VERSION).toBe("2026-10-05-v3");
   });
 
   it("opens settings at an anchor once", () => {

@@ -10,7 +10,7 @@ Version 1 is derived from the observed Codex session JSONL structure available i
 - `turnThroughputTPS` is `outputTokens / durationSeconds`. It includes tool time, waits, and reasoning time, so it is a completed-turn throughput metric rather than generation speed.
 - `codexTTFTSeconds` carries Codex's `time_to_first_token_ms` value. It is Codex-reported TTFT and does not claim first visible text timing.
 - `streamingTPS` is always `null` until a verified generation-only source is available. Tokrate never subtracts tool duration to estimate it.
-- A model is `null` when absent or when more than one model is observed during a turn. Agent sessions marked by `parent_thread_id` or `agent_path`, or a structured subagent source, are omitted to avoid silently combining subagent work.
+- A model is `null` when absent or when more than one model is observed during a turn. Agent sessions marked by `parent_thread_id` or `agent_path`, or a structured subagent source, are omitted to avoid silently combining subagent work; from 0.1.16 the output of spawned child sessions is counted separately as delegated output (see "Delegated output and efficiency indicator (0.1.16)").
 - Incomplete/aborted turns, malformed lines, non-finite values, negative values, missing output totals, and invalid durations produce no record.
 
 ## JSON representation
@@ -201,7 +201,7 @@ For the live stream responses are timed file-wide: also responses outside a huma
 
 ### Sharing
 
-`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; otherwise all three are null. `appVersion` is `0.1.15`.
+`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; otherwise all three are null. `appVersion` is `0.1.16` (0.1.15 before).
 
 ## Grok Build response speed (0.1.15)
 
@@ -224,3 +224,67 @@ Copy. Short note (row and badge tooltips, app caption): "Grok Build: average ove
 - **providerRegion.** For Claude models routed through Amazon Bedrock the inference-profile region prefix that model normalisation strips (`us`, `eu`, `apac`, `global`, `jp`, `au`, `ca`, `us-gov`) is kept as the new `TurnMetric.providerRegion`: that value, or `unknown` when the ID has no prefix, an unrecognised prefix, or the turn's messages disagree. It is nil for every other provider. It is part of the local cohort identity and is shared as `providerRegion` (always encoded for 0.1.14, null unless the provider is `amazon-bedrock`). It is not part of the public board's cohort ID.
 - **Region derivation.** From 0.1.14 the server derives the contributor's continent from the connection's country at upload time (via Cloudflare). Only the continent is stored: the country and IP address are not. Regions are shown publicly only with at least 3 contributors. The app sends no location field.
 - **Consent notice version 2.** The sharing consent notice version is 2 and mentions the region derivation and the response-speed fields. A saved consent for notice version 1 with sharing on is treated like a legacy default-on setting: sharing is paused, with no identity access and no community requests, and the consent choice is shown again until the user chooses. A saved OFF stays OFF.
+
+## Delegated output and efficiency indicator (0.1.16)
+
+Tokrate gets a third metric next to response speed and turn speed: the **Efficiency indicator**. It is a heuristic *indicator*, not a benchmark, and is labelled that way everywhere. It asks how many output tokens a model spends to finish one request compared with a typical request; higher means fewer tokens. No parser or metric versions change, and turn speed and response speed are unchanged. The new per-turn field is gated by app version 0.1.16.
+
+### `delegatedOutputTokens`
+
+An optional non-negative integer in local history, the UI snapshot and uploads: the output tokens of delegated subagent work started during this primary turn that are not already part of `outputTokens`. `nil`/`null` means the attribution is not final yet, or does not apply (subagent records, history saved before 0.1.16).
+
+| Source | Value |
+| --- | --- |
+| Grok Build primary turns | `0` at emission. Grok's ledger `outputTokens` already includes nested agent output, so these turns are final immediately. |
+| Claude Code primary turns | The sum of the output tokens of the Claude subagent turns attributed to the turn. |
+| Codex primary turns | The sum of the output tokens of the spawned child-session turns attributed to the turn. |
+| Claude Code subagent records (`sourceKind` `subagent`) | Always `nil`. They are recorded, shown and shared exactly as before. |
+
+### Delegated work sources
+
+A delegated work item is one subagent or child turn; parsers report its lifecycle (`started`, `finished` with output tokens, `discarded`) through a side channel beside the live-response one. Work items exist in memory only.
+
+- **Claude Code.** Subagent transcripts `<project>/<sessionId>/subagents/agent-<agentId>.jsonl` carry the parent's `sessionId`. Each subagent turn, from task prompt to terminal response, is one work item: root session `sessionId`, work id the turn's existing identity digest, start the turn start, finish its `completedAt`, tokens the turn's `outputTokens`. An interrupted or stale subagent turn is a discarded item.
+- **Codex.** Child sessions whose first-line `session_meta.payload.source` is `{ "subagent": { "thread_spawn": { … } } }` are delegated work. From 0.1.16 they are read fully from their first line (the live tail shortcut and the archive pass do not apply), only to produce work items: they still emit no `TurnMetric` and no live response sample. Root session is `payload.session_id` when present (the children's `session_id` is the root thread id), else `payload.parent_thread_id`; a child of a child therefore attributes to the root. Each child turn (`task_started` to `task_complete`) is one item with the turn's final `turn_token_usage.output_tokens`. Aborted (`turn_aborted`) or incomplete turns are discarded. Every other subagent kind stays fully skipped: `source.subagent.other` (for example `"guardian"` approval reviews, which are harness overhead rather than the model's choice) and structured sources without `thread_spawn`. Primary Codex sessions use `payload.session_id`, else `payload.id`, as their root (equal for primary sessions).
+- **Grok Build.** No work items: nested output is already in `outputTokens`.
+
+### Attribution (in memory only)
+
+Root-session identifiers are kept in memory only, as a SHA-256 digest of `client|rawRootSessionId`; they are never written to disk or uploaded, and nothing identifier-bearing is logged. The monitor that owns both the primary and the delegated source attributes: `ClaudeSessionMonitor` (its primary and subagent monitors) and `CodexSessionMonitor`.
+
+A work item W belongs to primary turn T when W's root session equals T's and `T.startedAt ≤ W.startedAt ≤ T.completedAt`, where `T.startedAt = completedAt − durationSeconds`.
+
+A primary turn is emitted immediately as before, with `delegatedOutputTokens = nil`, so speeds update without delay, and the monitor keeps a pending entry for it. On every poll a pending entry becomes **final** when all of these hold:
+
+1. `now ≥ completedAt + 30 s` (`DELEGATION_SETTLE_SECONDS`);
+2. the delegated source has no historical backlog (its archive and catch-up readers are done, and no file modification is unread);
+3. no *open* work item (started, neither finished nor discarded) of the root session started inside T's window, or `now ≥ completedAt + 30 min` (`DELEGATION_MAX_WAIT_SECONDS`), in which case open items are ignored.
+
+On finalization the monitor re-emits the same record id with `delegatedOutputTokens = Σ finished W.outputTokens` (0 when none); the store's upsert by id replaces the stored record, and a settled total is never replaced by a pending re-emission of a replay. Memory is bounded: work items older than the 7-day history retention are dropped, pending entries are dropped when final, and hard caps of 20,000 work items and 10,000 pending entries discard the oldest. Every launch re-parses seven days of files, so history is re-attributed after an upgrade; records that never finalize keep `nil` and are excluded from the indicator.
+
+### Sharing and consent notice 3
+
+- `SharedSample` gains `delegatedOutputTokens`, always encoded (explicit `null` when nil). It is shared only when `0 ≤ delegatedOutputTokens ≤ 100,000,000`; a primary turn outside that range, or without a total, builds no sample. Subagent records always share `null`. `appVersion` is `0.1.16`.
+- **Primary turns are enqueued for sharing only once final** (`delegatedOutputTokens != nil`). Subagent records are enqueued as before. The existing rules still apply: future-only `completedAt ≥ consentStartedAt`, the seen-id dedupe and the queue caps. The old "only ids not yet in history" pre-filter is replaced by this readiness rule so the settled re-emission is shared, and each record is shared at most once.
+- **Consent notice version 3.** `SharingPreferences.currentNoticeVersion` is 3 (desktop: `SHARING_NOTICE_VERSION = "2026-10-05-v3"`). Re-consent behaves as for version 2: a saved OFF stays OFF. The notice adds: "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator." The consent example payload includes the new key.
+- **Server rule.** Before 0.1.16 the key is forbidden; from 0.1.16 it is required. For `sourceKind` `primary` it is a non-negative integer ≤ 100,000,000; for `subagent` it is `null`.
+
+### Efficiency indicator definition (`efficiency-v1`)
+
+- **Total tokens of a turn** = `outputTokens + delegatedOutputTokens`. Output includes reasoning tokens in all three tools.
+- **Eligible turn:** `sourceKind` `primary`, known model, supported source tuple, `delegatedOutputTokens != nil`, and total ≥ 200 (`EFFICIENCY_MIN_TOTAL_TOKENS`, the response-speed floor; it drops trivial and automated turns).
+- **Group (row)** = model + reasoning effort (missing effort is `unknown`), combined across coding tools, providers, client versions and parser versions.
+- **Reference median R** = median total tokens over all eligible turns in the same window (all models). **Group median M** = median total tokens over the group's eligible turns. **Indicator** = `round(100 × R / M)`: 100 is typical, 200 means half the tokens, 50 twice the tokens.
+- **Local (Mac and desktop apps).** The window is the whole local history (last 7 days), independent of the 24 h / 7 d chart toggle. A group gets an indicator only with ≥ 20 eligible turns (`EFFICIENCY_MIN_TURNS`); below that the app shows "n of 20 requests" and no value. R needs ≥ 20 eligible turns overall, else there are no indicators.
+- **Local trend chart.** Per bucket of the selected range, indicator = `round(100 × R / median(bucket totals))` for the selected group, using the same 7-day R; a bucket needs ≥ 3 eligible turns, else it is a gap. With "all models" selected the chart shows the reference itself, median total tokens per request (unit "tokens/request").
+- **Details per group:** eligible turns, median total tokens, p25 and p75 total tokens, median reasoning share (`reasoningOutputTokens / outputTokens` where known, "—" otherwise) and delegated share (Σ delegated / Σ total).
+- **Community (tokrate.dev).** Same definition per board window with contributor weighting: group median = median of per-contributor medians, R = median of per-contributor medians over all eligible turns. Floors: normal ≥ 10 contributors and ≥ 50 eligible turns per group; Early data mode ≥ 1 contributor and ≥ 20 eligible turns; R needs the same floors over all eligible turns. p25/p75 and reasoning share are pooled over turns (detail only); delegated share is Σ delegated / Σ total. History points use the window's R and the bucket's group median and need ≥ 3 eligible turns, else `null`.
+
+Copy. Definition: "Fewer output tokens per request scores higher. 100 = a typical request." The metric is **Efficiency indicator** (short label **Efficiency**), always shown with an "Indicator" badge or label, as a unitless integer without "%" or "tok/s", as a bar relative to the row maximum with a thin tick at 100 labelled "typical" where space allows. Empty state: "Not enough requests yet: the efficiency indicator needs 20 eligible requests per model."
+
+### Methodology note
+
+- Subagent work is counted for the request that started it.
+- Background subagents still running 30 minutes after the request ends are not counted.
+- Codex approval-review ("guardian") sessions are not counted.
+- Requires Tokrate 0.1.16 or newer.

@@ -6,6 +6,10 @@ import { Disclosure, useAppStore } from "./primitives";
 export const REGION_NOTICE =
   "From version 0.1.14 the server derives your continent from the country of your connection when it receives a report (through Cloudflare). Only the continent is stored — not the country and not your IP address — and regions are shown publicly only with at least 3 contributors.";
 
+/** From notice version 3: each turn also carries the output of the subagent work it started. */
+export const DELEGATED_NOTICE =
+  "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator.";
+
 /** Obviously fake values in the exact shape of the shared allowlist (see core/src/sharing.rs). */
 export function buildSentExample(): string {
   return JSON.stringify(
@@ -33,6 +37,7 @@ export function buildSentExample(): string {
           responseOutputTokens: 100,
           responseDurationMs: 4321,
           responseCount: 2,
+          delegatedOutputTokens: 0,
         },
       ],
     },
@@ -73,6 +78,7 @@ export function SharingChoice({
           <ul>
             <li>Coding tool, model and effort</li>
             <li>Token counts and turn duration</li>
+            <li>Output tokens of subagent work a turn started</li>
             <li>Response timing within the turn</li>
             <li>First-token time, when available</li>
             <li>Time rounded to 5 minutes</li>
@@ -89,6 +95,7 @@ export function SharingChoice({
         </div>
       </div>
       <p className="detail-fine region-notice">{REGION_NOTICE}</p>
+      <p className="detail-fine region-notice">{DELEGATED_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

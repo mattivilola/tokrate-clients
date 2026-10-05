@@ -7,14 +7,15 @@ final class SharedSampleTests: XCTestCase {
 
     private func claude(
         provider: String? = "anthropic", region: String? = nil, outputTokens: Int = 1_000, durationSeconds: Double = 100,
-        tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil
+        tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil, sourceKind: String = "primary", delegated: Int? = 0
     ) -> TurnMetric {
         TurnMetric(
             id: "LOCAL_PRIVATE_DIGEST", completedAt: now, model: "claude-sonnet-4-5", outputTokens: outputTokens,
             durationSeconds: durationSeconds, codexTTFTSeconds: nil, turnThroughputTPS: Double(outputTokens) / durationSeconds,
             client: "claude-code", clientVersion: "2.1.37", parserVersion: "claude-transcript-v4",
-            metricVersion: "claude-observed-turn-v1", sourceKind: "primary", provider: provider,
-            responseOutputTokens: tokens, responseDurationSeconds: seconds, responseCount: count, providerRegion: region
+            metricVersion: "claude-observed-turn-v1", sourceKind: sourceKind, provider: provider,
+            responseOutputTokens: tokens, responseDurationSeconds: seconds, responseCount: count, providerRegion: region,
+            delegatedOutputTokens: delegated
         )
     }
 
@@ -28,14 +29,37 @@ final class SharedSampleTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), [
             "sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider",
             "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs",
-            "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"
+            "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens"
         ])
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.15")
-        XCTAssertEqual(sample.appVersion, "0.1.15")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.16")
+        XCTAssertEqual(sample.appVersion, "0.1.16")
         for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens"] {
             XCTAssertTrue(object[key] is NSNull, "\(key) is encoded as null when absent")
         }
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(sample), as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
+    }
+
+    func testDelegatedOutputTokensAreSharedForFinalPrimaryTurnsAndNullForSubagents() throws {
+        let primary = try XCTUnwrap(SharedSample(claude(delegated: 4_321)))
+        XCTAssertEqual(primary.delegatedOutputTokens, 4_321)
+        XCTAssertEqual(try json(primary)["delegatedOutputTokens"] as? Int, 4_321)
+        XCTAssertEqual(try XCTUnwrap(SharedSample(claude(delegated: 0))).delegatedOutputTokens, 0)
+
+        // A subagent record is shared as before, with an explicit null whatever the metric holds.
+        for delegated in [nil, 99] as [Int?] {
+            let subagent = try XCTUnwrap(SharedSample(claude(sourceKind: "subagent", delegated: delegated)))
+            XCTAssertNil(subagent.delegatedOutputTokens)
+            XCTAssertTrue(try json(subagent)["delegatedOutputTokens"] is NSNull)
+        }
+        XCTAssertTrue(try json(try XCTUnwrap(SharedSample(claude(sourceKind: "unknown", delegated: nil))))["delegatedOutputTokens"] is NSNull)
+    }
+
+    func testPrimaryTurnWithoutAFinalDelegatedTotalOrOutOfRangeIsNotShared() {
+        XCTAssertNil(SharedSample(claude(delegated: nil)), "attribution is not final yet")
+        XCTAssertNil(SharedSample(claude(delegated: -1)))
+        XCTAssertNotNil(SharedSample(claude(delegated: SharedSample.maximumDelegatedOutputTokens)))
+        XCTAssertNil(SharedSample(claude(delegated: SharedSample.maximumDelegatedOutputTokens + 1)))
+        XCTAssertEqual(SharedSample.maximumDelegatedOutputTokens, 100_000_000)
     }
 
     func testValidResponseSpeedIsSharedInMilliseconds() throws {

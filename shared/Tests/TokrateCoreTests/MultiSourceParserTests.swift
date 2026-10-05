@@ -39,13 +39,14 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertNil(metric.providerRegion)
         XCTAssertNil(parser.consume(line: try claudeAssistant(timestamp: "2026-10-03T20:00:06.000Z", id: "msg-after", model: "claude-sonnet-4", output: 1, stop: "tool_use")))
 
-        let sample = try XCTUnwrap(SharedSample(metric))
+        XCTAssertNil(SharedSample(metric), "a primary turn is shared only once its delegated total is final")
+        let sample = try XCTUnwrap(SharedSample(metric.withDelegatedOutputTokens(0)))
         let bytes = try JSONEncoder().encode(sample)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         XCTAssertEqual(json["client"] as? String, "claude-code")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-turn-v1")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.15")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.16")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         let serialized = try XCTUnwrap(String(data: bytes, encoding: .utf8))
         XCTAssertFalse(serialized.contains("PRIVATE_PROMPT"))
@@ -103,6 +104,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(metric.metricVersion, "grok-observed-work-turn-v1")
         XCTAssertEqual(metric.model, "grok-4")
         XCTAssertEqual(metric.outputTokens, 160)
+        XCTAssertEqual(metric.delegatedOutputTokens, 0, "nested output is already in outputTokens; final at emission")
         XCTAssertEqual(metric.durationSeconds, 5, accuracy: 0.001)
         XCTAssertEqual(metric.turnThroughputTPS, 32, accuracy: 0.001)
         XCTAssertEqual(metric.throughputLabel, "Work-turn speed")
@@ -348,7 +350,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(sample.responseDurationMs), 179_900, accuracy: 1)
         XCTAssertEqual(sample.responseCount, 9)
         XCTAssertEqual(sample.parserVersion, "grok-session-v2")
-        XCTAssertEqual(sample.appVersion, "0.1.15")
+        XCTAssertEqual(sample.appVersion, "0.1.16")
 
         let shorter = try grokMetric(
             try grokTurn(calls: [GrokCall(generating: 33.0), GrokCall(generating: 33.0), GrokCall(generating: 33.2, toolRun: nil)]),

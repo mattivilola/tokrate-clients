@@ -22,7 +22,8 @@ enum SamplePayload {
             reasoningEffort: "medium",
             responseOutputTokens: 1_000,
             responseDurationSeconds: 12.5,
-            responseCount: 3
+            responseCount: 3,
+            delegatedOutputTokens: 0
         )
     }
 

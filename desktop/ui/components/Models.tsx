@@ -25,14 +25,21 @@ import {
   type ModelSpeedRow,
 } from "../response";
 import type { ModelsView } from "../store/types";
+import type { EfficiencySort } from "../efficiency";
+import { EFFICIENCY_SHORT } from "../metrics";
+import { EfficiencyAbout, EfficiencyList } from "./Efficiency";
 import { Chip, ProviderBadge, Segmented, useAppStore } from "./primitives";
 
 const VIEW_OPTIONS: { value: ModelsView; label: string }[] = [
   { value: "response", label: "Response speed" },
   { value: "turn", label: "Turn speed" },
+  { value: "efficiency", label: EFFICIENCY_SHORT },
 ];
 
-/** Response speed ranks models across tools; Turn speed keeps one list per measurement group. */
+/**
+ * Response speed ranks models across tools; Turn speed keeps one list per measurement group;
+ * Efficiency ranks model and effort by the indicator over the last 7 d.
+ */
 function ViewToggle() {
   const store = useAppStore();
   const view = useStore(store, (s) => s.ui.modelsView);
@@ -226,8 +233,14 @@ export function YourModels({ dashboard }: { dashboard: Dashboard }) {
       <div className="view-toggle">
         <ViewToggle />
         {view === "response" && <span className="muted-line">Median over 24 h</span>}
+        {view === "efficiency" && <span className="muted-line">Last 7 d</span>}
       </div>
-      {view === "response" ? (
+      {view === "efficiency" ? (
+        <>
+          <EfficiencyAbout badge />
+          <EfficiencyList efficiency={dashboard.efficiency} sort="efficiency" flush={false} />
+        </>
+      ) : view === "response" ? (
         <div className="model-group">
           <ul className="model-list">
             {rows.map((row) => (
@@ -280,6 +293,10 @@ const RESPONSE_SORTS: { value: ModelSort; label: string }[] = [
   { value: "speed", label: "Higher response speed" },
   { value: "recent", label: "Most recent" },
 ];
+const EFFICIENCY_SORTS: { value: EfficiencySort; label: string }[] = [
+  { value: "efficiency", label: "Higher efficiency" },
+  { value: "recent", label: "Most recent" },
+];
 
 /** "Compare all": the model list becomes the content, with a sort control. */
 export function CompareAll({
@@ -298,18 +315,19 @@ export function CompareAll({
   const responseSort: ModelSort = sort === "recent" ? "recent" : "speed";
   const responseRows = sortModelRows(dashboard.modelRows, responseSort);
   const responseMax = niceMedianMax(responseRows);
+  const efficiencySort: EfficiencySort = sort === "recent" ? "recent" : "efficiency";
   return (
     <section className="card compare" aria-labelledby="compare-title">
       <div className="section-head">
         <h1 id="compare-title">All models</h1>
         <label className="sort">
           <span className="visually-hidden">Sort models by</span>
-          {view === "response" ? (
+          {view === "response" || view === "efficiency" ? (
             <select
-              value={responseSort}
+              value={view === "efficiency" ? efficiencySort : responseSort}
               onChange={(e) => store.setSort(e.target.value === "recent" ? "recent" : "throughput")}
             >
-              {RESPONSE_SORTS.map((s) => (
+              {(view === "efficiency" ? EFFICIENCY_SORTS : RESPONSE_SORTS).map((s) => (
                 <option key={s.value} value={s.value}>
                   {s.label}
                 </option>
@@ -332,9 +350,14 @@ export function CompareAll({
       <p className="muted-line">
         {view === "response"
           ? "Median response speed over the last 24 h."
-          : `Median turn speed over the last ${dayLabel}.`}
+          : view === "efficiency"
+            ? "Efficiency indicator over your last 7 d, whatever the chart range."
+            : `Median turn speed over the last ${dayLabel}.`}
       </p>
-      {view === "response" ? (
+      {view === "efficiency" && <EfficiencyAbout badge />}
+      {view === "efficiency" ? (
+        <EfficiencyList efficiency={dashboard.efficiency} sort={efficiencySort} flush />
+      ) : view === "response" ? (
         responseRows.length ? (
           <div className="model-group">
             <ul className="model-list model-list-flush">
@@ -376,7 +399,9 @@ export function CompareAll({
         <p className="empty">Complete a supported coding-tool turn to compare models.</p>
       )}
       <p className="fine">
-        {view === "response"
+        {view === "efficiency"
+          ? "Each model and reasoning effort counts every coding tool, provider and version. Requests under 200 tokens are left out, and each group needs 20 eligible requests. It depends on what you ask each model to do, and this is not an answer-quality ranking."
+          : view === "response"
           ? "Response speed pools each model's responses across coding tools and Subagent work. Grok Build records output per turn, so its value is an average over all model calls in a turn (hover a row for details). Different workloads affect these numbers, and this is not an answer-quality ranking."
           : "Different workloads and measurement definitions affect these numbers. Subagent, Work-turn and whole-turn speeds are never ranked against each other, and this is not an answer-quality ranking."}
       </p>

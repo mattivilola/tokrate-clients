@@ -3,7 +3,8 @@ import CryptoKit
 import Foundation
 
 /// Folds completed primary work turns with the matching Grok usage ledger snapshot.
-/// Subagent output remains part of the reported root work-turn total. Grok records output tokens per
+/// Subagent output remains part of the reported root work-turn total, so these turns delegate nothing
+/// beyond it and are final at emission (`delegatedOutputTokens` 0). Grok records output tokens per
 /// turn only, so response speed is a whole-turn average over the turn's generation windows
 /// (`loop_started` to the next `tool_started` or `turn_ended`); turns with nested agents carry none.
 struct GrokSessionParser: JSONLMetricParser {
@@ -214,7 +215,8 @@ struct GrokSessionParser: JSONLMetricParser {
                 reasoningEffort: confirmedEffort(eventTurn.start),
                 responseOutputTokens: response?.tokens,
                 responseDurationSeconds: response?.seconds,
-                responseCount: response?.count
+                responseCount: response?.count,
+                delegatedOutputTokens: 0
             ))
             emittedTurnNumbers.insert(number)
         }

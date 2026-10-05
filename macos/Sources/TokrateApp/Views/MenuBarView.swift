@@ -261,7 +261,22 @@ struct MenuBarView: View {
     private func definitions(snapshot: DashboardSnapshot) -> some View {
         let showsGrokBuild = snapshot.selectedCohort?.client == ResponseSpeedCopy.grokBuildClient
             || snapshot.responseSummaries.contains { $0.clients.contains(ResponseSpeedCopy.grokBuildClient) }
-        return definitionsText(grokBuild: showsGrokBuild)
+        return VStack(alignment: .leading, spacing: 10) {
+            definitionsText(grokBuild: showsGrokBuild)
+            efficiencyDefinition
+        }
+    }
+
+    private var efficiencyDefinition: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("How Tokrate measures efficiency")
+                .font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.ink)
+            Text(EfficiencyCopy.explanation)
+                .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .dashboardInset(padding: 10)
     }
 
     private func definitionsText(grokBuild: Bool) -> some View {

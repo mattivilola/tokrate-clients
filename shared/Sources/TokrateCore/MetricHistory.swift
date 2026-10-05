@@ -17,7 +17,11 @@ public struct MetricHistory: Sendable {
         prune(now: now)
         guard record.completedAt >= now.addingTimeInterval(-Self.retention), record.completedAt <= now else { return }
         if let index = records.firstIndex(where: { $0.id == record.id }) {
-            records[index] = record
+            // A replay re-emits a turn before its delegated work is attributed again; the settled
+            // total is never replaced by a pending one.
+            let known = records[index].delegatedOutputTokens
+            records[index] = record.delegatedOutputTokens == nil && known != nil
+                ? record.withDelegatedOutputTokens(known) : record
         } else {
             records.append(record)
         }

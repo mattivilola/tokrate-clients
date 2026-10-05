@@ -17,7 +17,7 @@ import type {
 } from "./types";
 
 /** Bump together with the notice text in docs and the Rust constant. */
-export const SHARING_NOTICE_VERSION = "2026-10-05-v2";
+export const SHARING_NOTICE_VERSION = "2026-10-05-v3";
 const MONITOR_UNREACHABLE =
   "Cannot reach the local monitor. Restart Tokrate to reconnect.";
 const AUTOMATIC_UPDATE_REVISIT_MS = 60 * 60 * 1000;

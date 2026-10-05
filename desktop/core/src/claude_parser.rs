@@ -1,3 +1,4 @@
+use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
     bedrock_region_or_unknown, response_qualifies, ReportedReasoningEffort, ResponseMetric,
     ResponseTotals, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
@@ -75,6 +76,8 @@ struct TurnState {
     region: ProviderEvidence,
     /// Qualifying API responses closed while this turn was active.
     responses: ResponseTotals,
+    /// Id of the delegated work item reported as started for this subagent turn.
+    work_id: Option<String>,
 }
 
 /// The API response (one unique `message.id`) whose records are currently being read.
@@ -146,6 +149,7 @@ pub(crate) struct ClaudeTranscriptParser {
     closed_responses: HashSet<String>,
     closed_order: VecDeque<String>,
     responses: Vec<ResponseMetric>,
+    delegation_events: Vec<DelegationEvent>,
 }
 
 impl ClaudeTranscriptParser {
@@ -194,6 +198,7 @@ impl ClaudeTranscriptParser {
             closed_responses: HashSet::new(),
             closed_order: VecDeque::new(),
             responses: Vec::new(),
+            delegation_events: Vec::new(),
         }
     }
 
@@ -254,7 +259,7 @@ impl ClaudeTranscriptParser {
                 if is_interruption(content) {
                     // An interrupted turn has no trustworthy completion: drop it and
                     // do not treat the marker as the start of another turn.
-                    self.turn = None;
+                    self.drop_turn();
                     return None;
                 }
                 if !is_human_user(content) {
@@ -295,6 +300,14 @@ impl ClaudeTranscriptParser {
                     .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
                     .map(str::to_owned);
                 self.next_serial += 1;
+                // A turn replaced by a new prompt was abandoned.
+                self.drop_turn();
+                let work_id = self.report_work_started(
+                    session_identity.as_deref(),
+                    agent_identity.as_deref(),
+                    &identity,
+                    timestamp,
+                );
                 self.turn = Some(TurnState {
                     serial: self.next_serial,
                     started_at: Some(timestamp),
@@ -302,6 +315,7 @@ impl ClaudeTranscriptParser {
                     private_identity: identity,
                     session_identity,
                     agent_identity,
+                    work_id,
                     ..TurnState::default()
                 });
                 return None;
@@ -699,8 +713,80 @@ impl ClaudeTranscriptParser {
         }
     }
 
+    /// Settles the active turn: a measured turn is emitted (and reported as a primary turn or as
+    /// finished delegated work), anything else is discarded.
     fn finish_turn(&mut self, completed_at: Option<DateTime<Utc>>) -> Option<TurnMetric> {
         let turn = self.turn.take()?;
+        let work_id = turn.work_id.clone();
+        let root_session = turn
+            .session_identity
+            .clone()
+            .unwrap_or_else(|| self.source_identity.clone());
+        let started_at = turn.started_at;
+        let metric = self.measure_turn(turn, completed_at);
+        match (&metric, work_id) {
+            (Some(metric), Some(work_id)) => {
+                self.delegation_events.push(DelegationEvent::Finished {
+                    work_id,
+                    output_tokens: metric.output_tokens,
+                    finished_at: metric.completed_at,
+                });
+            }
+            (None, Some(work_id)) => {
+                self.delegation_events
+                    .push(DelegationEvent::Discarded { work_id });
+            }
+            _ => {}
+        }
+        if let (RecordScope::Primary, Some(metric), Some(started_at)) =
+            (self.scope, &metric, started_at)
+        {
+            self.delegation_events.push(DelegationEvent::Turn {
+                turn_id: metric.id.clone(),
+                root_session: root_session_key(CLAUDE_CLIENT, &root_session),
+                started_at,
+            });
+        }
+        metric
+    }
+
+    /// Abandons the active turn (interrupted, replaced or cut off by a mid-file start).
+    fn drop_turn(&mut self) {
+        if let Some(work_id) = self.turn.take().and_then(|turn| turn.work_id) {
+            self.delegation_events
+                .push(DelegationEvent::Discarded { work_id });
+        }
+    }
+
+    /// Reports the start of a subagent turn as delegated work of the session it belongs to.
+    /// Returns the work id, which is the id of the turn's metric.
+    fn report_work_started(
+        &mut self,
+        session_identity: Option<&str>,
+        agent_identity: Option<&str>,
+        private_identity: &str,
+        started_at: DateTime<Utc>,
+    ) -> Option<String> {
+        if self.scope != RecordScope::Subagent {
+            return None;
+        }
+        let (Some(session), Some(agent)) = (session_identity, agent_identity) else {
+            return None;
+        };
+        let work_id = digest_id(&[session, agent, private_identity]);
+        self.delegation_events.push(DelegationEvent::Started {
+            work_id: work_id.clone(),
+            root_session: root_session_key(CLAUDE_CLIENT, session),
+            started_at,
+        });
+        Some(work_id)
+    }
+
+    fn measure_turn(
+        &mut self,
+        turn: TurnState,
+        completed_at: Option<DateTime<Utc>>,
+    ) -> Option<TurnMetric> {
         let completed_at = completed_at?;
         let started_at = turn.started_at?;
         let duration = (completed_at - started_at).num_nanoseconds()? as f64 / 1e9;
@@ -782,6 +868,7 @@ impl ClaudeTranscriptParser {
             response_count,
             provider_region: (turn.provider.provider() == "amazon-bedrock")
                 .then(|| turn.region.provider().to_owned()),
+            delegated_output_tokens: None,
         })
     }
 
@@ -801,7 +888,11 @@ impl ClaudeTranscriptParser {
 
 impl JsonlEventParser for ClaudeTranscriptParser {
     fn reset(&mut self, source_identity: String) {
+        // Work this parser started will never be finished by it: settle it as discarded.
+        self.drop_turn();
+        let events = std::mem::take(&mut self.delegation_events);
         *self = Self::with_scope(source_identity, self.scope);
+        self.delegation_events = events;
     }
 
     fn consume(&mut self, line: &[u8]) -> Option<TurnMetric> {
@@ -818,8 +909,14 @@ impl JsonlEventParser for ClaudeTranscriptParser {
 
     fn begin_mid_file(&mut self) {
         // The header record was read, but the records between it and the tail were not, so
-        // anything it started cannot be completed faithfully.
-        self.turn = None;
+        // anything it started cannot be completed faithfully. The turn was never really seen, so
+        // its work is withdrawn rather than discarded: a replay reader of the whole file reports
+        // its true outcome.
+        if let Some(work_id) = self.turn.take().and_then(|turn| turn.work_id) {
+            self.delegation_events.retain(|event| {
+                !matches!(event, DelegationEvent::Started { work_id: started, .. } if *started == work_id)
+            });
+        }
         self.synchronized = false;
         self.latest_trigger = None;
         self.record_times.clear();
@@ -829,6 +926,10 @@ impl JsonlEventParser for ClaudeTranscriptParser {
 
     fn take_responses(&mut self) -> Vec<ResponseMetric> {
         std::mem::take(&mut self.responses)
+    }
+
+    fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
+        std::mem::take(&mut self.delegation_events)
     }
 
     fn flush_pending(&mut self, now: DateTime<Utc>, final_read: bool) -> Option<TurnMetric> {

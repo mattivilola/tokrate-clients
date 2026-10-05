@@ -14,12 +14,14 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.15";
+pub const APP_VERSION: &str = "0.1.16";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
 const QUEUE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 const MAX_SEEN_LOCAL_IDS: usize = 50_000;
+/// The upper bound the service accepts for delegated subagent output of one turn.
+const MAX_DELEGATED_OUTPUT_TOKENS: i64 = 100_000_000;
 
 /// A strictly allowlisted telemetry row. The local metric pseudonym is never included.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -46,6 +48,9 @@ pub struct SharedSample {
     pub response_count: Option<i64>,
     /// Amazon Bedrock inference-profile region (`us`, `eu`, ... or `unknown`); null otherwise.
     pub provider_region: Option<String>,
+    /// Output tokens of subagent work the turn started (always serialized): a number for
+    /// primary turns, null for every other source kind.
+    pub delegated_output_tokens: Option<i64>,
 }
 
 impl SharedSample {
@@ -85,6 +90,21 @@ impl SharedSample {
         {
             return None;
         }
+        // A primary turn is shared once its delegated output is final; other kinds carry null.
+        let source_kind = match metric.source_kind.as_deref() {
+            Some("primary") => "primary",
+            Some("subagent") => "subagent",
+            _ => "unknown",
+        };
+        let delegated_output_tokens = if source_kind == "primary" {
+            Some(
+                metric
+                    .delegated_output_tokens
+                    .filter(|value| (0..=MAX_DELEGATED_OUTPUT_TOKENS).contains(value))?,
+            )
+        } else {
+            None
+        };
         let observed_bucket = metric.completed_at.timestamp().div_euclid(300) * 300;
         let observed_at = DateTime::<Utc>::from_timestamp(observed_bucket, 0)?;
         let reasoning_output_tokens = metric
@@ -127,12 +147,7 @@ impl SharedSample {
                 .filter(|value| ReportedReasoningEffort::is_allowed(value))
                 .unwrap_or("unknown")
                 .to_owned(),
-            source_kind: match metric.source_kind.as_deref() {
-                Some("primary") => "primary",
-                Some("subagent") => "subagent",
-                _ => "unknown",
-            }
-            .to_owned(),
+            source_kind: source_kind.to_owned(),
             output_tokens: metric.output_tokens,
             reasoning_output_tokens,
             duration_ms,
@@ -142,6 +157,7 @@ impl SharedSample {
             response_count,
             provider_region: (provider == "amazon-bedrock")
                 .then(|| bedrock_region_or_unknown(metric.provider_region.as_deref()).to_owned()),
+            delegated_output_tokens,
         })
     }
 }
@@ -264,6 +280,11 @@ impl SharingQueue {
             if metric.completed_at < enabled_since
                 || metric.completed_at > now
                 || self.seen_local_ids.contains(&metric.id)
+                // A primary turn is re-emitted once its delegated output is final; sharing it
+                // earlier would send an incomplete turn, and marking it seen would drop the
+                // final version.
+                || metric.source_kind.as_deref() == Some("primary")
+                    && metric.delegated_output_tokens.is_none()
             {
                 continue;
             }

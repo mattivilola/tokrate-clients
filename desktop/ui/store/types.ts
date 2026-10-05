@@ -135,9 +135,9 @@ export type ProviderFilter =
   | "google-vertex"
   | "xai"
   | "unknown";
-export type ChartMetric = "response" | "throughput" | "ttft";
-/** Model lists rank by response speed or keep the per-measurement turn groups. */
-export type ModelsView = "response" | "turn";
+export type ChartMetric = "response" | "throughput" | "ttft" | "efficiency";
+/** Model lists rank by response speed, keep the per-measurement turn groups, or rank efficiency. */
+export type ModelsView = "response" | "turn" | "efficiency";
 export type View = "home" | "settings";
 
 export interface UiState {

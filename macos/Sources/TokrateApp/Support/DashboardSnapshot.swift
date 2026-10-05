@@ -8,6 +8,8 @@ enum DashboardRange: String, CaseIterable, Identifiable {
     var shortTitle: String { self == .day ? "24 h" : "7 d" }
     /// Number of chart buckets across the range.
     var bucketCount: Int { self == .day ? 48 : 56 }
+    /// Efficiency buckets are coarser (hourly, six-hourly): each needs 3 eligible requests.
+    var efficiencyBucketCount: Int { self == .day ? 24 : 28 }
     var duration: TimeInterval { self == .day ? 86_400 : MetricHistory.retention }
 }
 
@@ -32,9 +34,15 @@ enum CohortComparisonSort: String, CaseIterable, Identifiable {
 
 /// Which speed the model comparison ranks. Response speed is the primary metric.
 enum ComparisonMetric: String, CaseIterable, Identifiable {
-    case responseSpeed, turnSpeed
+    case responseSpeed, turnSpeed, efficiency
     var id: String { rawValue }
-    var title: String { self == .responseSpeed ? "Response speed" : "Turn speed" }
+    var title: String {
+        switch self {
+        case .responseSpeed: ResponseSpeedCopy.title
+        case .turnSpeed: "Turn speed"
+        case .efficiency: EfficiencyCopy.shortTitle
+        }
+    }
 }
 
 /// Sorting for the response-speed model list.
@@ -480,6 +488,16 @@ struct DashboardSnapshot {
     let personalTrend: PersonalTrend?
     let cohortSummaries: [CohortSummary]
     let responseSummaries: [ResponseSummary]
+    /// R: median total tokens over every eligible turn of the retained history (7 days, whatever the
+    /// range); nil below 20 eligible turns.
+    let efficiencyReference: EfficiencyIndicator.Reference?
+    /// One row per model and effort over the retained history.
+    let efficiencyRows: [EfficiencyIndicator.Row]
+    /// The row of the selected model and effort, when it has eligible turns.
+    let efficiencySelected: EfficiencyIndicator.Row?
+    /// Chart buckets of the selected range: the selected group's indicator, or median total tokens
+    /// per request when all models are compared.
+    let efficiencyPoints: [Bucket]
     let localPeriodComparison: LocalPeriodComparison?
     let records: [TurnMetric]
     let dates: ClosedRange<Date>
@@ -521,6 +539,19 @@ struct DashboardSnapshot {
         cohortSummaries = Self.summaries(in: sortedRange)
         responseSummaries = Self.responseSummaries(in: sortedRange)
         let gaugeMedian = Self.responseGaugeMedian(in: inRetention, now: now)
+        // The indicator spans the whole retained history so it stays stable while the range moves.
+        let reference = EfficiencyIndicator.reference(in: retained)
+        let efficiencyGroup = resolvedCohort.flatMap(EfficiencyIndicator.Key.init)
+        let efficiencyTable = EfficiencyIndicator.rows(in: retained, reference: reference)
+        efficiencyReference = reference
+        efficiencyRows = efficiencyTable
+        efficiencySelected = efficiencyGroup.flatMap { group in efficiencyTable.first { $0.group == group } }
+        efficiencyPoints = selection.isAllModels || efficiencyGroup != nil
+            ? EfficiencyIndicator.points(
+                in: retained, group: efficiencyGroup, reference: reference,
+                start: start, now: now, duration: range.duration, bucketCount: range.efficiencyBucketCount
+            )
+            : []
 
         if selection.isAllModels {
             self.records = sortedRange

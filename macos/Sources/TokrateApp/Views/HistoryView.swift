@@ -149,6 +149,10 @@ struct HistoryView: View {
                     .monospacedDigit()
             }
             .width(min: 110)
+            TableColumn("Tokens/request") { record in
+                requestTokens(record)
+            }
+            .width(min: 110)
             TableColumn("Turn time") { record in
                 Text("\(record.durationSeconds, specifier: "%.1f") s")
                     .monospacedDigit()
@@ -182,6 +186,22 @@ struct HistoryView: View {
         .clipShape(RoundedRectangle(cornerRadius: DashboardStyle.Radius.control, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: DashboardStyle.Radius.control, style: .continuous).strokeBorder(DashboardStyle.line, lineWidth: 1)
+        }
+    }
+
+    /// Output plus delegated subagent tokens of a request. While delegated work is not final the plain
+    /// output count shows muted; a subagent turn is counted in the request that started it.
+    @ViewBuilder
+    private func requestTokens(_ record: TurnMetric) -> some View {
+        if let total = EfficiencyIndicator.totalTokens(record) {
+            Text(total.formatted()).monospacedDigit()
+                .help("Output tokens plus delegated subagent work")
+        } else if record.isSubagentTurn {
+            Text("—").foregroundStyle(DashboardStyle.muted)
+                .help("Counted in the request that started it")
+        } else {
+            Text(record.outputTokens.formatted()).monospacedDigit().foregroundStyle(DashboardStyle.muted)
+                .help("Delegated work not yet counted")
         }
     }
 

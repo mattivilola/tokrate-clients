@@ -43,7 +43,8 @@ fn time(value: &str) -> DateTime<Utc> {
 }
 
 fn metric(id: impl Into<String>, completed_at: DateTime<Utc>) -> TurnMetric {
-    TurnMetric::new(
+    // A primary turn whose delegated output is final (it delegated nothing).
+    let mut turn = TurnMetric::new(
         id.into(),
         completed_at,
         Some("gpt-test".into()),
@@ -57,7 +58,9 @@ fn metric(id: impl Into<String>, completed_at: DateTime<Utc>) -> TurnMetric {
         Some("primary".into()),
         Some("openai".into()),
         Some("high".into()),
-    )
+    );
+    turn.delegated_output_tokens = Some(0);
+    turn
 }
 
 fn event(event_type: &str, payload: Value, timestamp: &str) -> Vec<u8> {
@@ -1145,11 +1148,14 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.15");
+    assert_eq!(sample.app_version, "0.1.16");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
+    // Subagent records are never attributed: the key is present and null.
+    assert_eq!(sample.delegated_output_tokens, None);
     let json = serde_json::to_value(&sample).unwrap();
+    assert!(json["delegatedOutputTokens"].is_null());
     let mut keys: Vec<&str> = json
         .as_object()
         .unwrap()
@@ -1163,6 +1169,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
             "appVersion",
             "client",
             "clientVersion",
+            "delegatedOutputTokens",
             "durationMs",
             "metricVersion",
             "model",
@@ -1912,7 +1919,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.15");
+    assert_eq!(first[0].app_version, "0.1.16");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -1968,6 +1975,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     claude.response_output_tokens = Some(900);
     claude.response_duration_seconds = Some(8.0);
     claude.response_count = Some(2);
+    claude.delegated_output_tokens = Some(350);
     let mut bedrock = TurnMetric::new_observed(
         "local-bedrock-digest".into(),
         completed,
@@ -1987,6 +1995,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     bedrock.response_duration_seconds = Some(9.0);
     bedrock.response_count = Some(3);
     bedrock.provider_region = Some("eu".into());
+    bedrock.delegated_output_tokens = Some(0);
     let subagent = TurnMetric::new_observed(
         "local-subagent-digest".into(),
         completed,
@@ -2020,6 +2029,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     grok.response_output_tokens = Some(1200);
     grok.response_duration_seconds = Some(10.0);
     grok.response_count = Some(4);
+    grok.delegated_output_tokens = Some(0);
     let samples = [
         crate::SharedSample::from_metric(
             &claude,
@@ -2054,7 +2064,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.15-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.16-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2062,7 +2072,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.15-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.16-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2084,7 +2094,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.15");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.16");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2101,6 +2111,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][2]["responseCount"], Value::Null);
     assert_eq!(actual["samples"][3]["responseDurationMs"], 9000.0);
     assert_eq!(actual["samples"][3]["providerRegion"], "eu");
+    // Delegated output is always present: a number for primary turns, null for subagents.
+    assert_eq!(actual["samples"][0]["delegatedOutputTokens"], 350);
+    assert_eq!(actual["samples"][1]["delegatedOutputTokens"], 0);
+    assert_eq!(actual["samples"][2]["delegatedOutputTokens"], Value::Null);
+    assert_eq!(actual["samples"][3]["delegatedOutputTokens"], 0);
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2480,7 +2495,7 @@ fn claude_model_consistency_compares_normalized_names_across_routes() {
 fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
     let completed = time("2026-10-03T10:03:47Z");
     let build = |client: &str, parser: &str, metric_version: &str, provider: &str| {
-        TurnMetric::new_observed(
+        let mut turn = TurnMetric::new_observed(
             "local-digest".into(),
             completed,
             Some("claude-sonnet-4-5-20250929".into()),
@@ -2494,7 +2509,9 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
             client,
             parser,
             metric_version,
-        )
+        );
+        turn.delegated_output_tokens = Some(0);
+        turn
     };
     let shared = |metric: &TurnMetric| {
         crate::SharedSample::from_metric(metric, Uuid::new_v4())
@@ -2568,7 +2585,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.15");
+    assert_eq!(crate::APP_VERSION, "0.1.16");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -3816,6 +3833,7 @@ fn response_metric(tokens: i64, seconds: f64, count: i64) -> TurnMetric {
     turn.response_output_tokens = Some(tokens);
     turn.response_duration_seconds = Some(seconds);
     turn.response_count = Some(count);
+    turn.delegated_output_tokens = Some(0);
     turn
 }
 
@@ -3910,12 +3928,16 @@ fn history_without_response_fields_still_decodes() {
         "responseDurationSeconds",
         "responseCount",
         "providerRegion",
+        "delegatedOutputTokens",
     ] {
         object.remove(key);
     }
     let restored: TurnMetric = serde_json::from_value(legacy).unwrap();
     assert_eq!(restored.response_count, None);
     assert_eq!(restored.provider_region, None);
+    // Records saved before 0.1.16 decode with attribution not final, and serialize it as null.
+    assert_eq!(restored.delegated_output_tokens, None);
+    assert!(serde_json::to_value(&restored).unwrap()["delegatedOutputTokens"].is_null());
 }
 
 fn block_message(at: &str, id: &str, stop: &str, tokens: i64, block: &str) -> Vec<u8> {
@@ -4796,4 +4818,884 @@ fn grok_parser_v1_history_is_not_shared_by_this_version() {
     let decoded: TurnMetric =
         serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
     assert_eq!(decoded.parser_version, "grok-session-v1");
+}
+
+// --- Delegated output attribution (0.1.16) -----------------------------------------------------
+
+#[test]
+fn grok_turns_are_final_at_emission_with_zero_delegated_output() {
+    let steps = grok_call_steps(&[20_000]);
+    let record = grok_single_record(&steps, 2_000, json!(1));
+    // Grok's ledger output already includes nested agent output.
+    assert_eq!(record.delegated_output_tokens, Some(0));
+    let sample = crate::SharedSample::from_metric(&record, Uuid::new_v4()).unwrap();
+    assert_eq!(sample.delegated_output_tokens, Some(0));
+}
+
+#[test]
+fn delegated_output_is_validated_and_null_for_every_source_kind_but_primary() {
+    let now = time("2026-10-03T10:00:00Z");
+    let share = |turn: &TurnMetric| crate::SharedSample::from_metric(turn, Uuid::new_v4());
+    let mut primary = metric("primary", now);
+
+    primary.delegated_output_tokens = Some(0);
+    assert_eq!(share(&primary).unwrap().delegated_output_tokens, Some(0));
+    primary.delegated_output_tokens = Some(100_000_000);
+    assert_eq!(
+        serde_json::to_value(share(&primary).unwrap()).unwrap()["delegatedOutputTokens"],
+        100_000_000
+    );
+    // Out of range or not yet final: no sample at all.
+    for invalid in [Some(100_000_001), Some(-1), None] {
+        primary.delegated_output_tokens = invalid;
+        assert!(share(&primary).is_none(), "{invalid:?}");
+    }
+
+    // Subagent turns carry an explicit null, whatever the record holds.
+    let mut subagent = metric("subagent", now);
+    subagent.client = CLAUDE_CLIENT.into();
+    subagent.parser_version = CLAUDE_PARSER_VERSION.into();
+    subagent.metric_version = CLAUDE_SUBAGENT_METRIC_VERSION.into();
+    subagent.source_kind = Some("subagent".into());
+    for held in [None, Some(5)] {
+        subagent.delegated_output_tokens = held;
+        let json = serde_json::to_value(share(&subagent).unwrap()).unwrap();
+        assert!(json
+            .as_object()
+            .unwrap()
+            .contains_key("delegatedOutputTokens"));
+        assert!(json["delegatedOutputTokens"].is_null());
+    }
+}
+
+#[test]
+fn sharing_queue_waits_for_final_primary_turns_and_shares_each_turn_once() {
+    let now = time("2026-10-03T10:00:00Z");
+    let mut queue = SharingQueue::new();
+    queue.enable(now);
+    let at = now + Duration::seconds(10);
+    let mut provisional = metric("turn", at);
+    provisional.delegated_output_tokens = None;
+    let settled = provisional.with_delegated_output_tokens(40);
+
+    // A primary turn whose attribution is not final is held back and not remembered as seen.
+    queue.enqueue(&[provisional.clone()], at + Duration::seconds(1));
+    assert!(queue.is_empty());
+    // A subagent turn is shared as today, without waiting.
+    let mut subagent = provisional.clone();
+    subagent.id = "subagent".into();
+    subagent.source_kind = Some("subagent".into());
+    subagent.client = CLAUDE_CLIENT.into();
+    subagent.parser_version = CLAUDE_PARSER_VERSION.into();
+    subagent.metric_version = CLAUDE_SUBAGENT_METRIC_VERSION.into();
+    queue.enqueue(&[subagent], at + Duration::seconds(1));
+    assert_eq!(queue.len(), 1);
+
+    // The finalized re-emission of the same id is shared, once.
+    queue.enqueue(std::slice::from_ref(&settled), at + Duration::seconds(40));
+    assert_eq!(queue.len(), 2);
+    queue.enqueue(
+        &[provisional.clone(), settled.clone()],
+        at + Duration::seconds(41),
+    );
+    assert_eq!(queue.len(), 2);
+    let batch = queue.batch(at + Duration::seconds(42));
+    let delegated: Vec<Option<i64>> = batch
+        .iter()
+        .map(|sample| sample.delegated_output_tokens)
+        .collect();
+    assert_eq!(delegated, vec![None, Some(40)]);
+    // Acknowledged samples are not shared again by a later re-emission.
+    queue.ack(
+        &batch
+            .iter()
+            .map(|sample| sample.sample_id)
+            .collect::<Vec<_>>(),
+    );
+    queue.enqueue(&[settled], at + Duration::seconds(50));
+    assert!(queue.is_empty());
+
+    // A final turn that completed before sharing was enabled is still never backfilled.
+    queue.disable();
+    queue.enable(at + Duration::seconds(100));
+    queue.enqueue(
+        &[provisional.with_delegated_output_tokens(1)],
+        at + Duration::seconds(101),
+    );
+    assert!(queue.is_empty());
+}
+
+// Claude Code: subagent transcripts are joined to the primary turn of the same session.
+
+const DELEGATION_SESSION: &str = "session-delegation";
+
+struct ClaudeDelegation {
+    _temp: TestDir,
+    project: PathBuf,
+    monitor: SourceMonitor,
+    latest: std::collections::HashMap<String, TurnMetric>,
+}
+
+impl ClaudeDelegation {
+    fn new() -> Self {
+        let temp = TestDir::new();
+        let codex = temp.path().join("codex");
+        let claude = temp.path().join("claude-projects");
+        let grok = temp.path().join("grok-sessions");
+        let project = claude.join("project-a");
+        for directory in [&codex, &grok, &project] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        Self {
+            monitor: SourceMonitor::new(codex, claude, grok),
+            project,
+            latest: Default::default(),
+            _temp: temp,
+        }
+    }
+
+    fn primary(&self, start: &str, end: &str, tokens: i64) {
+        let with_session = |line| with_fields(line, json!({"sessionId": DELEGATION_SESSION}));
+        fs::write(
+            self.project.join(format!("{DELEGATION_SESSION}.jsonl")),
+            jsonl(&[
+                with_session(claude_user(start, "main-user", json!("synthetic"))),
+                with_session(assistant(end, "main-call", "end_turn", tokens)),
+            ]),
+        )
+        .unwrap();
+    }
+
+    fn subagent_path(&self, session: &str, agent: &str) -> PathBuf {
+        let directory = self.project.join(session).join("subagents");
+        fs::create_dir_all(&directory).unwrap();
+        directory.join(format!("agent-{agent}.jsonl"))
+    }
+
+    fn write(&self, session: &str, agent: &str, lines: &[Vec<u8>]) {
+        fs::write(self.subagent_path(session, agent), jsonl(lines)).unwrap();
+    }
+
+    fn append(&self, session: &str, agent: &str, lines: &[Vec<u8>]) {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(self.subagent_path(session, agent))
+            .unwrap();
+        file.write_all(&jsonl(lines)).unwrap();
+    }
+
+    /// Polls until the monitors are idle at `now`; the latest version of each id wins, as in history.
+    fn poll(&mut self, now: &str) {
+        let now = time(now);
+        for _ in 0..6 {
+            for record in self.monitor.poll(now).unwrap() {
+                self.latest.insert(record.id.clone(), record);
+            }
+        }
+    }
+
+    fn primary_turn(&self) -> &TurnMetric {
+        let mut turns = self
+            .latest
+            .values()
+            .filter(|record| record.source_kind.as_deref() == Some("primary"));
+        let turn = turns.next().expect("a primary turn was emitted");
+        assert!(turns.next().is_none());
+        turn
+    }
+
+    fn subagent_turns(&self) -> Vec<&TurnMetric> {
+        self.latest
+            .values()
+            .filter(|record| record.source_kind.as_deref() == Some("subagent"))
+            .collect()
+    }
+}
+
+/// A finished subagent turn: one prompt and one terminal response of `tokens` output tokens.
+fn finished_subagent(
+    session: &str,
+    agent: &str,
+    start: &str,
+    end: &str,
+    tokens: i64,
+) -> Vec<Vec<u8>> {
+    vec![
+        as_subagent(
+            claude_user(start, &format!("{agent}-user"), json!("synthetic")),
+            session,
+            agent,
+        ),
+        as_subagent(
+            assistant(end, &format!("{agent}-call"), "end_turn", tokens),
+            session,
+            agent,
+        ),
+    ]
+}
+
+/// A subagent turn that has started and produced a tool call but not ended.
+fn running_subagent(
+    session: &str,
+    agent: &str,
+    start: &str,
+    at: &str,
+    tokens: i64,
+) -> Vec<Vec<u8>> {
+    vec![
+        as_subagent(
+            claude_user(start, &format!("{agent}-user"), json!("synthetic")),
+            session,
+            agent,
+        ),
+        as_subagent(
+            assistant(at, &format!("{agent}-step"), "tool_use", tokens),
+            session,
+            agent,
+        ),
+    ]
+}
+
+#[test]
+fn claude_subagent_that_ends_before_the_parent_is_counted_after_the_settle_time() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    fixture.write(
+        DELEGATION_SESSION,
+        "sync",
+        &finished_subagent(
+            DELEGATION_SESSION,
+            "sync",
+            "2026-10-03T10:00:10Z",
+            "2026-10-03T10:00:40Z",
+            300,
+        ),
+    );
+
+    // Emitted at once so speeds update, without waiting for attribution.
+    fixture.poll("2026-10-03T10:01:10Z");
+    assert_eq!(fixture.primary_turn().output_tokens, 500);
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, None);
+    let provisional_id = fixture.primary_turn().id.clone();
+
+    // 30 s after the parent ended the same record is re-emitted with the sum.
+    fixture.poll("2026-10-03T10:01:29Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, None);
+    fixture.poll("2026-10-03T10:01:30Z");
+    let turn = fixture.primary_turn();
+    assert_eq!(turn.id, provisional_id);
+    assert_eq!(turn.delegated_output_tokens, Some(300));
+    assert_eq!(turn.output_tokens, 500);
+    // Subagent records are still recorded as before and never attributed.
+    let subagents = fixture.subagent_turns();
+    assert_eq!(subagents.len(), 1);
+    assert_eq!(subagents[0].output_tokens, 300);
+    assert_eq!(subagents[0].delegated_output_tokens, None);
+}
+
+#[test]
+fn claude_turn_without_subagents_settles_to_zero() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    fixture.poll("2026-10-03T10:00:50Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, None);
+    fixture.poll("2026-10-03T10:02:00Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(0));
+}
+
+#[test]
+fn claude_background_subagent_is_awaited_and_counted_when_it_finishes_after_the_parent() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    fixture.write(
+        DELEGATION_SESSION,
+        "background",
+        &running_subagent(
+            DELEGATION_SESSION,
+            "background",
+            "2026-10-03T10:00:30Z",
+            "2026-10-03T10:00:31Z",
+            100,
+        ),
+    );
+    // The parent has been over for 30 s but its background agent still runs: not final.
+    fixture.poll("2026-10-03T10:01:45Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, None);
+    fixture.poll("2026-10-03T10:20:00Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, None);
+
+    // It finishes long after the parent: the record is re-emitted with the sum.
+    fixture.append(
+        DELEGATION_SESSION,
+        "background",
+        &[as_subagent(
+            assistant("2026-10-03T10:21:00Z", "background-end", "end_turn", 200),
+            DELEGATION_SESSION,
+            "background",
+        )],
+    );
+    fixture.poll("2026-10-03T10:21:30Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(300));
+    assert_eq!(fixture.subagent_turns()[0].output_tokens, 300);
+}
+
+#[test]
+fn claude_discarded_subagent_work_is_not_counted_and_does_not_block_the_turn() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    let mut interrupted = running_subagent(
+        DELEGATION_SESSION,
+        "stopped",
+        "2026-10-03T10:00:10Z",
+        "2026-10-03T10:00:12Z",
+        5_000,
+    );
+    interrupted.push(as_subagent(
+        claude_user(
+            "2026-10-03T10:00:20Z",
+            "stopped-interrupt",
+            json!("[Request interrupted by user]"),
+        ),
+        DELEGATION_SESSION,
+        "stopped",
+    ));
+    fixture.write(DELEGATION_SESSION, "stopped", &interrupted);
+    fixture.write(
+        DELEGATION_SESSION,
+        "done",
+        &finished_subagent(
+            DELEGATION_SESSION,
+            "done",
+            "2026-10-03T10:00:30Z",
+            "2026-10-03T10:00:50Z",
+            200,
+        ),
+    );
+    fixture.poll("2026-10-03T10:02:00Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(200));
+}
+
+#[test]
+fn claude_work_still_open_after_the_maximum_wait_is_ignored() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    fixture.write(
+        DELEGATION_SESSION,
+        "stuck",
+        &running_subagent(
+            DELEGATION_SESSION,
+            "stuck",
+            "2026-10-03T10:00:30Z",
+            "2026-10-03T10:00:31Z",
+            700,
+        ),
+    );
+    fixture.write(
+        DELEGATION_SESSION,
+        "done",
+        &finished_subagent(
+            DELEGATION_SESSION,
+            "done",
+            "2026-10-03T10:00:10Z",
+            "2026-10-03T10:00:20Z",
+            100,
+        ),
+    );
+    fixture.poll("2026-10-03T10:30:59Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, None);
+    // 30 minutes after the parent ended the open work no longer holds the turn back.
+    fixture.poll("2026-10-03T10:31:00Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(100));
+}
+
+#[test]
+fn claude_work_outside_the_turn_window_or_session_is_not_counted() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    let add = |agent: &str, session: &str, start: &str, end: &str, tokens: i64| {
+        fixture.write(
+            session,
+            agent,
+            &finished_subagent(session, agent, start, end, tokens),
+        );
+    };
+    add(
+        "before",
+        DELEGATION_SESSION,
+        "2026-10-03T09:59:00Z",
+        "2026-10-03T10:00:30Z",
+        500,
+    );
+    add(
+        "after",
+        DELEGATION_SESSION,
+        "2026-10-03T10:01:01Z",
+        "2026-10-03T10:01:20Z",
+        400,
+    );
+    add(
+        "other",
+        "session-other",
+        "2026-10-03T10:00:20Z",
+        "2026-10-03T10:00:40Z",
+        900,
+    );
+    // Both window edges are inclusive.
+    add(
+        "first",
+        DELEGATION_SESSION,
+        "2026-10-03T10:00:00Z",
+        "2026-10-03T10:00:05Z",
+        11,
+    );
+    add(
+        "last",
+        DELEGATION_SESSION,
+        "2026-10-03T10:01:00Z",
+        "2026-10-03T10:01:10Z",
+        13,
+    );
+    fixture.poll("2026-10-03T10:03:00Z");
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(24));
+}
+
+#[test]
+fn claude_turns_are_not_final_while_subagent_history_is_still_being_read() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    // The finished subagent turn comes first; filler pushes the file past the replay threshold.
+    let mut lines = finished_subagent(
+        DELEGATION_SESSION,
+        "large",
+        "2026-10-03T10:00:10Z",
+        "2026-10-03T10:00:40Z",
+        300,
+    );
+    let filler =
+        serde_json::to_vec(&json!({"type": "summary", "padding": "x".repeat(8_000)})).unwrap();
+    lines.extend(std::iter::repeat_n(filler, 100));
+    fixture.write(DELEGATION_SESSION, "large", &lines);
+
+    // Far past the settle time, but the subagent file is still being replayed.
+    let now = time("2026-10-03T11:00:00Z");
+    let mut polls = 0;
+    loop {
+        polls += 1;
+        for record in fixture.monitor.poll(now).unwrap() {
+            fixture.latest.insert(record.id.clone(), record);
+        }
+        let primary = fixture
+            .latest
+            .values()
+            .find(|record| record.source_kind.as_deref() == Some("primary"));
+        if primary.is_some_and(|turn| turn.delegated_output_tokens.is_some()) {
+            break;
+        }
+        assert!(polls < 80, "the turn never became final");
+    }
+    assert!(
+        polls > 3,
+        "finalized after {polls} polls, before the replay was done"
+    );
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(300));
+}
+
+// Codex: child sessions spawned with `thread_spawn` are delegated work of their root session.
+
+fn codex_turn_lines(meta: Value, turn: &str, start: &str, end: &str, tokens: i64) -> Vec<Vec<u8>> {
+    let usage_at = end.replace("Z", ".000Z");
+    vec![
+        codex_line("session_meta", meta, start),
+        codex_line(
+            "event_msg",
+            json!({"type": "task_started", "turn_id": turn, "started_at": start}),
+            start,
+        ),
+        codex_line(
+            "turn_context",
+            json!({"turn_id": turn, "model": "gpt-test", "effort": "high"}),
+            start,
+        ),
+        codex_item(json!({"type": "message", "role": "user"}), start),
+        codex_item(json!({"type": "reasoning"}), start),
+        codex_line(
+            "token_usage_record",
+            json!({
+                "turn_id": turn,
+                "response_id": format!("response-{turn}"),
+                "usage": {"output_tokens": tokens},
+                "turn_token_usage": {"output_tokens": tokens}
+            }),
+            &usage_at,
+        ),
+        codex_line(
+            "event_msg",
+            json!({"type": "task_complete", "turn_id": turn, "started_at": start, "completed_at": end}),
+            end,
+        ),
+    ]
+}
+
+fn thread_spawn_meta(id: &str, session_id: Option<&str>, parent: &str) -> Value {
+    let mut meta = json!({
+        "id": id,
+        "parent_thread_id": parent,
+        "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}},
+        "model_provider": "openai"
+    });
+    if let Some(session_id) = session_id {
+        meta["session_id"] = session_id.into();
+    }
+    meta
+}
+
+fn primary_codex_meta(id: &str) -> Value {
+    json!({"id": id, "source": "cli", "model_provider": "openai", "cli_version": "0.159.2"})
+}
+
+#[test]
+fn codex_thread_spawn_children_attribute_to_their_root_session_turn() {
+    let temp = TestDir::new();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(sessions.join("2026/10/03")).unwrap();
+    let write = |name: &str, lines: Vec<Vec<u8>>| {
+        fs::write(sessions.join("2026/10/03").join(name), jsonl(&lines)).unwrap();
+    };
+    write(
+        "rollout-root.jsonl",
+        codex_turn_lines(
+            primary_codex_meta("root-1"),
+            "root-turn",
+            "2026-10-03T10:00:00Z",
+            "2026-10-03T10:02:00Z",
+            500,
+        ),
+    );
+    // A child names its root through `session_id`; a nested child names the root as well.
+    write(
+        "rollout-child.jsonl",
+        codex_turn_lines(
+            thread_spawn_meta("child-1", Some("root-1"), "root-1"),
+            "child-turn",
+            "2026-10-03T10:00:20Z",
+            "2026-10-03T10:00:50Z",
+            300,
+        ),
+    );
+    write(
+        "rollout-nested.jsonl",
+        codex_turn_lines(
+            thread_spawn_meta("nested-1", Some("root-1"), "child-1"),
+            "nested-turn",
+            "2026-10-03T10:00:30Z",
+            "2026-10-03T10:01:00Z",
+            250,
+        ),
+    );
+    // Without `session_id` the parent thread is the root.
+    write(
+        "rollout-parented.jsonl",
+        codex_turn_lines(
+            thread_spawn_meta("child-2", None, "root-1"),
+            "parented-turn",
+            "2026-10-03T10:00:50Z",
+            "2026-10-03T10:01:10Z",
+            100,
+        ),
+    );
+    // Not counted: an aborted child turn, other roots, work outside the window, and approval
+    // reviews (guardian), which are harness overhead.
+    let mut aborted = codex_turn_lines(
+        thread_spawn_meta("child-3", Some("root-1"), "root-1"),
+        "aborted-turn",
+        "2026-10-03T10:00:55Z",
+        "2026-10-03T10:01:05Z",
+        5_000,
+    );
+    aborted.pop();
+    aborted.push(codex_line(
+        "event_msg",
+        json!({"type": "turn_aborted", "turn_id": "aborted-turn"}),
+        "2026-10-03T10:01:05Z",
+    ));
+    write("rollout-aborted.jsonl", aborted);
+    write(
+        "rollout-other-root.jsonl",
+        codex_turn_lines(
+            thread_spawn_meta("child-4", Some("root-other"), "root-other"),
+            "other-turn",
+            "2026-10-03T10:00:30Z",
+            "2026-10-03T10:00:50Z",
+            777,
+        ),
+    );
+    write(
+        "rollout-late.jsonl",
+        codex_turn_lines(
+            thread_spawn_meta("child-5", Some("root-1"), "root-1"),
+            "late-turn",
+            "2026-10-03T10:02:30Z",
+            "2026-10-03T10:02:50Z",
+            888,
+        ),
+    );
+    write(
+        "rollout-guardian.jsonl",
+        codex_turn_lines(
+            json!({"id": "guardian-1", "session_id": "root-1", "parent_thread_id": "root-1", "source": {"subagent": {"other": "guardian"}}}),
+            "guardian-turn",
+            "2026-10-03T10:00:40Z",
+            "2026-10-03T10:00:45Z",
+            900,
+        ),
+    );
+
+    let mut monitor = Monitor::new(sessions);
+    let mut latest = std::collections::HashMap::new();
+    let mut live = Vec::new();
+    let mut poll = |monitor: &mut Monitor,
+                    latest: &mut std::collections::HashMap<String, TurnMetric>,
+                    now: &str| {
+        for _ in 0..6 {
+            for record in monitor.poll(time(now)).unwrap() {
+                latest.insert(record.id.clone(), record);
+            }
+            live.extend(monitor.take_live_responses());
+        }
+    };
+    poll(&mut monitor, &mut latest, "2026-10-03T10:02:10Z");
+    // Children emit no turn of their own, only the root session's turn is recorded.
+    assert_eq!(latest.len(), 1);
+    assert_eq!(
+        latest.values().next().unwrap().delegated_output_tokens,
+        None
+    );
+    poll(&mut monitor, &mut latest, "2026-10-03T10:02:30Z");
+    let turn = latest.values().next().unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(turn.output_tokens, 500);
+    assert_eq!(turn.delegated_output_tokens, Some(650));
+    // Only the root session's response reaches the live stream.
+    assert!(!live.is_empty());
+    assert!(live.iter().all(|response| response.output_tokens == 500));
+}
+
+#[test]
+fn codex_child_sessions_report_work_only_and_other_agents_stay_skipped() {
+    let new_parser = || crate::parser::CodexEventParser::new("file".into());
+    let feed = |parser: &mut crate::parser::CodexEventParser, lines: Vec<Vec<u8>>| {
+        let mut turns = Vec::new();
+        for line in lines {
+            turns.extend(parser.consume(&line));
+        }
+        turns
+    };
+
+    // A thread_spawn child is read, but produces no TurnMetric and no live response.
+    let mut child = new_parser();
+    let turns = feed(
+        &mut child,
+        codex_turn_lines(
+            thread_spawn_meta("child-1", Some("root-1"), "parent-1"),
+            "t",
+            "2026-10-03T10:00:00Z",
+            "2026-10-03T10:00:30Z",
+            300,
+        ),
+    );
+    assert!(turns.is_empty());
+    assert!(!crate::parser::JsonlEventParser::excludes_session(&child));
+    assert!(child.take_responses().is_empty());
+    let root = crate::delegation::root_session_key("codex", "root-1");
+    let events = crate::parser::JsonlEventParser::take_delegation_events(&mut child);
+    assert_eq!(events.len(), 2);
+    let crate::delegation::DelegationEvent::Started {
+        work_id,
+        root_session,
+        started_at,
+    } = &events[0]
+    else {
+        panic!("expected the start of work, got {events:?}");
+    };
+    assert_eq!(root_session, &root);
+    assert_eq!(*started_at, time("2026-10-03T10:00:00Z"));
+    assert_eq!(
+        events[1],
+        crate::delegation::DelegationEvent::Finished {
+            work_id: work_id.clone(),
+            output_tokens: 300,
+            finished_at: time("2026-10-03T10:00:30Z"),
+        }
+    );
+
+    // The primary turn reports the same root, so the join key is `client|session_id`.
+    let mut primary = new_parser();
+    let turns = feed(
+        &mut primary,
+        codex_turn_lines(
+            primary_codex_meta("root-1"),
+            "t",
+            "2026-10-03T10:00:00Z",
+            "2026-10-03T10:00:30Z",
+            300,
+        ),
+    );
+    let events = crate::parser::JsonlEventParser::take_delegation_events(&mut primary);
+    assert_eq!(
+        events,
+        vec![crate::delegation::DelegationEvent::Turn {
+            turn_id: turns[0].id.clone(),
+            root_session: root.clone(),
+            started_at: time("2026-10-03T10:00:00Z"),
+        }]
+    );
+    // `session_id`, when present on a primary session, is its root.
+    let mut keyed = new_parser();
+    let mut meta = primary_codex_meta("root-1");
+    meta["session_id"] = "root-1".into();
+    feed(
+        &mut keyed,
+        codex_turn_lines(
+            meta,
+            "t",
+            "2026-10-03T10:00:00Z",
+            "2026-10-03T10:00:30Z",
+            300,
+        ),
+    );
+    assert_eq!(
+        crate::parser::JsonlEventParser::take_delegation_events(&mut keyed),
+        vec![crate::delegation::DelegationEvent::Turn {
+            turn_id: turns[0].id.clone(),
+            root_session: root,
+            started_at: time("2026-10-03T10:00:00Z"),
+        }]
+    );
+
+    // An aborted or never-completed child turn is discarded or stays open, never finished.
+    let mut aborted = new_parser();
+    let mut lines = codex_turn_lines(
+        thread_spawn_meta("child-2", None, "root-1"),
+        "t",
+        "2026-10-03T10:00:00Z",
+        "2026-10-03T10:00:30Z",
+        300,
+    );
+    lines.pop();
+    lines.push(codex_line(
+        "event_msg",
+        json!({"type": "turn_aborted", "turn_id": "t"}),
+        "2026-10-03T10:00:10Z",
+    ));
+    feed(&mut aborted, lines);
+    let events = crate::parser::JsonlEventParser::take_delegation_events(&mut aborted);
+    assert!(matches!(
+        events[0],
+        crate::delegation::DelegationEvent::Started { .. }
+    ));
+    assert!(matches!(
+        events[1],
+        crate::delegation::DelegationEvent::Discarded { .. }
+    ));
+    assert_eq!(events.len(), 2);
+    let mut cut_off = new_parser();
+    let mut lines = codex_turn_lines(
+        thread_spawn_meta("child-3", None, "root-1"),
+        "t",
+        "2026-10-03T10:00:00Z",
+        "2026-10-03T10:00:30Z",
+        300,
+    );
+    lines.pop();
+    feed(&mut cut_off, lines);
+    let events = crate::parser::JsonlEventParser::take_delegation_events(&mut cut_off);
+    assert_eq!(events.len(), 1);
+    // A reader reset settles what the parser started as discarded.
+    crate::parser::JsonlEventParser::reset(&mut cut_off, "file".into());
+    assert!(matches!(
+        crate::parser::JsonlEventParser::take_delegation_events(&mut cut_off)[..],
+        [crate::delegation::DelegationEvent::Discarded { .. }]
+    ));
+
+    // Other agent kinds are skipped entirely, as before.
+    for source in [
+        json!({"subagent": {"other": "guardian"}}),
+        json!({"subagent": null}),
+        json!({"subagent": {"review": null}}),
+    ] {
+        let mut skipped = new_parser();
+        let turns = feed(
+            &mut skipped,
+            codex_turn_lines(
+                json!({"id": "other-1", "session_id": "root-1", "parent_thread_id": "root-1", "source": source}),
+                "t",
+                "2026-10-03T10:00:00Z",
+                "2026-10-03T10:00:30Z",
+                300,
+            ),
+        );
+        assert!(turns.is_empty());
+        assert!(crate::parser::JsonlEventParser::excludes_session(&skipped));
+        assert!(crate::parser::JsonlEventParser::take_delegation_events(&mut skipped).is_empty());
+    }
+}
+
+#[test]
+fn claude_parsers_report_primary_turns_and_subagent_work_through_the_side_channel() {
+    use crate::delegation::{root_session_key, DelegationEvent};
+    let session = "session-events";
+    let mut primary = claude_parser();
+    let turn = {
+        let mut turn = None;
+        for line in [
+            with_fields(
+                claude_user("2026-10-03T10:00:00Z", "turn", json!("synthetic")),
+                json!({"sessionId": session}),
+            ),
+            with_fields(
+                assistant("2026-10-03T10:00:30Z", "call", "end_turn", 50),
+                json!({"sessionId": session}),
+            ),
+        ] {
+            turn = turn.or(primary.consume_settled(&line));
+        }
+        turn.unwrap()
+    };
+    assert_eq!(
+        crate::parser::JsonlEventParser::take_delegation_events(&mut primary),
+        vec![DelegationEvent::Turn {
+            turn_id: turn.id,
+            root_session: root_session_key(CLAUDE_CLIENT, session),
+            started_at: time("2026-10-03T10:00:00Z"),
+        }]
+    );
+
+    let mut subagent = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    let mut finished = None;
+    for line in finished_subagent(
+        session,
+        "agent",
+        "2026-10-03T10:00:10Z",
+        "2026-10-03T10:00:20Z",
+        40,
+    ) {
+        finished = finished.or(subagent.consume_settled(&line));
+    }
+    let finished = finished.unwrap();
+    let events = crate::parser::JsonlEventParser::take_delegation_events(&mut subagent);
+    assert_eq!(
+        events,
+        vec![
+            DelegationEvent::Started {
+                work_id: finished.id.clone(),
+                root_session: root_session_key(CLAUDE_CLIENT, session),
+                started_at: time("2026-10-03T10:00:10Z"),
+            },
+            DelegationEvent::Finished {
+                work_id: finished.id,
+                output_tokens: 40,
+                finished_at: time("2026-10-03T10:00:20Z"),
+            },
+        ]
+    );
 }

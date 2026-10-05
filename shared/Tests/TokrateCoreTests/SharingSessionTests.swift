@@ -35,8 +35,8 @@ private actor MockTransport: SharingTransport {
 @MainActor
 final class SharingSessionTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_791_020_401)
-    private func metric(id: String = "LOCAL_PRIVATE_DIGEST", date: Date? = nil, model: String? = "gpt-test", reasoningEffort: String? = nil) -> TurnMetric {
-        TurnMetric(id: id, completedAt: date ?? now, model: model, outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary", provider: "openai", reasoningEffort: reasoningEffort)
+    private func metric(id: String = "LOCAL_PRIVATE_DIGEST", date: Date? = nil, model: String? = "gpt-test", reasoningEffort: String? = nil, delegated: Int? = 0) -> TurnMetric {
+        TurnMetric(id: id, completedAt: date ?? now, model: model, outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary", provider: "openai", reasoningEffort: reasoningEffort, delegatedOutputTokens: delegated)
     }
 
     func testLocalOnlyDoesNotCreateIdentityOrContactServer() async {
@@ -114,8 +114,8 @@ final class SharingSessionTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
-        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"]))
-        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.15")
+        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens"]))
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.16")
         XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
@@ -131,12 +131,37 @@ final class SharingSessionTests: XCTestCase {
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
         let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
-        XCTAssertEqual(reported.appVersion, "0.1.15")
+        XCTAssertEqual(reported.appVersion, "0.1.16")
         XCTAssertEqual(reported.reasoningEffort, "ultra")
         let missing = try XCTUnwrap(SharedSample(metric()))
         XCTAssertEqual(missing.reasoningEffort, "unknown")
         let invalidMetric = TurnMetric(id: "bad-effort", completedAt: now, model: "gpt-test", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10, reasoningEffort: "automatic")
         XCTAssertEqual(try XCTUnwrap(SharedSample(invalidMetric)).reasoningEffort, "unknown")
+    }
+
+    func testPrimaryTurnIsSharedExactlyOnceAndOnlyOnceItsDelegatedTotalIsFinal() async throws {
+        let transport = MockTransport(), identity = MemoryIdentity()
+        let session = SharingSession(identity: identity, transport: transport)
+        session.enable(now: now, startPolling: false)
+        session.enqueue([metric(id: "turn", delegated: nil)], now: now)
+        XCTAssertEqual(session.pendingCount, 0, "a primary turn waits for its delegated total")
+        session.enqueue([metric(id: "turn", delegated: nil)], now: now)
+        XCTAssertEqual(session.pendingCount, 0)
+
+        // The settled re-emission under the same id is the one that is shared, once.
+        session.enqueue([metric(id: "turn", delegated: 250)], now: now)
+        XCTAssertEqual(session.pendingCount, 1)
+        session.enqueue([metric(id: "turn", delegated: 250), metric(id: "turn", delegated: 300), metric(id: "turn", delegated: nil)], now: now)
+        XCTAssertEqual(session.pendingCount, 1)
+
+        await session.refresh(now: now)
+        let requests = await transport.snapshot()
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests[0].httpBody)) as? [String: Any])
+        let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
+        XCTAssertEqual(samples.count, 1)
+        XCTAssertEqual(samples[0]["delegatedOutputTokens"] as? Int, 250)
+        session.enqueue([metric(id: "turn", delegated: 250)], now: now)
+        XCTAssertEqual(session.pendingCount, 0, "already shared in this session")
     }
 
     func testRetryKeepsRandomSampleIDAndRefreshIsRateLimited() async throws {
@@ -192,7 +217,7 @@ final class SharingSessionTests: XCTestCase {
 
     func testLegacyClaudeParserRecordsAreNeverShared() {
         func claude(_ parser: String) -> TurnMetric {
-            TurnMetric(id: parser, completedAt: now, model: "claude-test", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10, client: "claude-code", parserVersion: parser, metricVersion: "claude-observed-turn-v1", sourceKind: "primary", provider: "unknown")
+            TurnMetric(id: parser, completedAt: now, model: "claude-test", outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: nil, turnThroughputTPS: 10, client: "claude-code", parserVersion: parser, metricVersion: "claude-observed-turn-v1", sourceKind: "primary", provider: "unknown", delegatedOutputTokens: 0)
         }
         XCTAssertNil(SharedSample(claude("claude-transcript-v1")))
         XCTAssertNil(SharedSample(claude("claude-transcript-v2")))

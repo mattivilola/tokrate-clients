@@ -19,6 +19,8 @@ protocol JSONLMetricParser: Sendable {
     mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric?
     /// Qualifying responses completed since the last call (see `ResponseSpeed`).
     mutating func drainCompletedResponses() -> [LiveResponse]
+    /// Delegated-work lifecycle events since the last call (see `DelegationEvent`).
+    mutating func drainDelegationEvents() -> [DelegationEvent]
 }
 
 extension JSONLMetricParser {
@@ -29,6 +31,7 @@ extension JSONLMetricParser {
     var hasPendingWork: Bool { false }
     mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { nil }
     mutating func drainCompletedResponses() -> [LiveResponse] { [] }
+    mutating func drainDelegationEvents() -> [DelegationEvent] { [] }
 }
 
 /// Incremental, bounded JSONL input for the additional local transcript formats.
@@ -131,6 +134,8 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
 
     mutating func drainResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
 
+    mutating func drainDelegation() -> [DelegationEvent] { parser.drainDelegationEvents() }
+
     private mutating func resetForReplacement(size: UInt64) {
         offset = 0
         pending.removeAll(keepingCapacity: true)
@@ -179,6 +184,12 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private(set) var rootIsAvailable = false
     private(set) var watchedFileCount = 0
 
+    /// True while any watched file still has history to read: an archive reader in progress, a live
+    /// reader short of its file's end, or a modification not read yet.
+    var hasHistoricalBacklog: Bool {
+        files.values.contains { $0.archive != nil || !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification }
+    }
+
     init(
         root: URL,
         liveSince: Date = .now,
@@ -198,6 +209,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
 
         var result: [TurnMetric] = []
         var responses: [String: LiveResponse] = [:]
+        var delegation: [DelegationEvent] = []
         func collect(_ completed: [LiveResponse]) {
             for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
         }
@@ -215,6 +227,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             do {
                 let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget), now: now)
                 collect(file.live.drainResponses())
+                delegation += file.live.drainDelegation()
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
                 let consumed = file.live.bytesReadLastPoll
                 liveBudget -= consumed
@@ -239,6 +252,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 do {
                     let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget), now: now)
                     collect(archive.drainResponses())
+                    delegation += archive.drainDelegation()
                     result += historical
                     if !file.live.isCaughtUp {
                         for record in historical where file.archiveIDsWhileLiveCatchesUp.count < 8_192 {
@@ -256,10 +270,12 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
 
         var unique: [String: TurnMetric] = [:]
         for record in result { unique[record.id] = record }
-        return MonitorUpdate(
+        var update = MonitorUpdate(
             metrics: unique.values.sorted { $0.completedAt > $1.completedAt },
             responses: responses.values.sorted { $0.completedAt > $1.completedAt }
         )
+        update.delegation = delegation
+        return update
     }
 
     private func discoverFiles(now: Date) throws {

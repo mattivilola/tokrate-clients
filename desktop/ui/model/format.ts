@@ -49,10 +49,23 @@ export const modelName = (m: Metric | undefined) =>
   m?.model ?? "Unknown model";
 
 /** "high effort", "effort unknown": the vocabulary word is part of the chip. */
-export const effortChip = (m: Metric) =>
-  m.reasoningEffort && m.reasoningEffort !== "unknown"
-    ? `${m.reasoningEffort} effort`
-    : "effort unknown";
+export const effortText = (effort: string | null | undefined) =>
+  effort && effort !== "unknown" ? `${effort} effort` : "effort unknown";
+export const effortChip = (m: Metric) => effortText(m.reasoningEffort);
+
+/** Token counts compactly: 950, 4.9k, 12k, 1.2M. */
+export function compactTokens(v: number | null | undefined): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  const n = Math.round(v);
+  if (Math.abs(n) < 1000) return String(n);
+  const [value, suffix] = Math.abs(n) < 999500 ? [n / 1e3, "k"] : [n / 1e6, "M"];
+  const rounded = Math.abs(value) < 9.95 ? value.toFixed(1) : String(Math.round(value));
+  return `${rounded.replace(/\.0$/, "")}${suffix}`;
+}
+
+/** "42%" from a 0..1 share; an em dash without a value. */
+export const percentText = (share: number | null | undefined) =>
+  typeof share === "number" && Number.isFinite(share) ? `${Math.round(share * 100)}%` : "—";
 
 /** "Claude Code · v2.1.0" style secondary line; qualifier only when entries would look identical. */
 export const cohortSubtitle = (m: Metric, qualifier: string | null) =>

@@ -74,6 +74,10 @@ interface Series {
   offset: number;
   /** Response speed relative to the whole-turn speed; tools and waiting dilute the turn. */
   responseFactor: number;
+  /** Scales the synthetic output tokens so models differ in tokens per request. */
+  tokenFactor: number;
+  /** Share of primary turns that started subagent work (its tokens come on top of the output). */
+  delegates: number;
 }
 
 const SERIES: Series[] = [
@@ -91,6 +95,8 @@ const SERIES: Series[] = [
     ttft: true,
     offset: 4,
     responseFactor: 2.3,
+    tokenFactor: 1,
+    delegates: 0.15,
   },
   {
     model: "Example model B",
@@ -106,6 +112,8 @@ const SERIES: Series[] = [
     ttft: true,
     offset: 19,
     responseFactor: 1.9,
+    tokenFactor: 0.6,
+    delegates: 0.0,
   },
   {
     model: "Example Claude model",
@@ -121,6 +129,8 @@ const SERIES: Series[] = [
     ttft: false,
     offset: 33,
     responseFactor: 2.1,
+    tokenFactor: 1.8,
+    delegates: 0.4,
   },
   {
     model: "Example Claude model",
@@ -136,6 +146,8 @@ const SERIES: Series[] = [
     ttft: false,
     offset: 52,
     responseFactor: 3.0,
+    tokenFactor: 0.5,
+    delegates: 0.0,
   },
 ];
 
@@ -152,7 +164,15 @@ export function previewRecords(now: number): Metric[] {
           (random() - 0.5) * s.spread * 2 +
           Math.sin(i / 5 + index) * s.spread * 0.4,
       );
-      const outputTokens = Math.round(250 + jitter * 900);
+      const outputTokens = Math.round((250 + jitter * 900) * s.tokenFactor);
+      // Subagent records never carry delegated tokens; a primary turn is final with 0 or the
+      // output of the subagent work it started.
+      const delegatedOutputTokens =
+        s.sourceKind === "subagent"
+          ? null
+          : random() < s.delegates
+            ? Math.round(outputTokens * (0.4 + random() * 1.2))
+            : 0;
       const responseCount = 2 + Math.floor(random() * 4);
       const responseTokens = Math.round(outputTokens * (0.7 + random() * 0.25));
       const responseTps = tps * s.responseFactor * (0.85 + random() * 0.3);
@@ -170,6 +190,8 @@ export function previewRecords(now: number): Metric[] {
         clientVersion: "example",
         reasoningEffort: s.effort,
         outputTokens,
+        reasoningOutputTokens: Math.round(outputTokens * (0.2 + random() * 0.4)),
+        delegatedOutputTokens,
         durationSeconds: outputTokens / tps,
         codexTTFTSeconds: s.ttft ? 1.2 + random() * 2.4 : null,
         turnThroughputTPS: tps,

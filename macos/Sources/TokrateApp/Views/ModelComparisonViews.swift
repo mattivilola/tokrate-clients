@@ -551,12 +551,21 @@ private struct CohortRow: View {
 struct CohortComparisonView: View {
     let snapshot: DashboardSnapshot
     @Binding var range: DashboardRange
-    @State private var metric: ComparisonMetric = .responseSpeed
+    @State private var metric: ComparisonMetric
     @State private var sort: CohortComparisonSort = .recent
     @State private var responseSort: ResponseComparisonSort = .faster
+    @State private var efficiencySort: EfficiencyComparisonSort = .higher
     var compact = true
     /// When present, selecting a row switches the dashboard to that model.
     var onSelect: ((ModelCohort) -> Void)?
+
+    init(snapshot: DashboardSnapshot, range: Binding<DashboardRange>, initialMetric: ComparisonMetric = .responseSpeed, compact: Bool = true, onSelect: ((ModelCohort) -> Void)? = nil) {
+        self.snapshot = snapshot
+        _range = range
+        _metric = State(initialValue: initialMetric)
+        self.compact = compact
+        self.onSelect = onSelect
+    }
 
     var body: some View {
         if compact {
@@ -568,33 +577,47 @@ struct CohortComparisonView: View {
 
     private var sortMenu: some View {
         Menu {
-            if metric == .responseSpeed {
+            switch metric {
+            case .responseSpeed:
                 Picker("Sort model comparisons", selection: $responseSort) {
                     ForEach(ResponseComparisonSort.allCases) { option in Text(option.title).tag(option) }
                 }
                 .pickerStyle(.inline).labelsHidden()
-            } else {
+            case .turnSpeed:
                 Picker("Sort model comparisons", selection: $sort) {
                     ForEach(CohortComparisonSort.allCases) { option in Text(option.title).tag(option) }
                 }
                 .pickerStyle(.inline).labelsHidden()
+            case .efficiency:
+                Picker("Sort model comparisons", selection: $efficiencySort) {
+                    ForEach(EfficiencyComparisonSort.allCases) { option in Text(option.title).tag(option) }
+                }
+                .pickerStyle(.inline).labelsHidden()
             }
         } label: {
-            MenuFieldLabel(text: "Sort: \(metric == .responseSpeed ? responseSort.title : sort.title)")
+            MenuFieldLabel(text: "Sort: \(sortTitle)")
         }
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-        .accessibilityLabel("Sort model comparisons by speed metric")
+        .accessibilityLabel("Sort model comparisons by the ranked metric")
         .help("Sort model comparisons")
     }
 
+    private var sortTitle: String {
+        switch metric {
+        case .responseSpeed: responseSort.title
+        case .turnSpeed: sort.title
+        case .efficiency: efficiencySort.title
+        }
+    }
+
     private var metricPicker: some View {
-        Picker("Speed ranked", selection: $metric) {
+        Picker("Metric ranked", selection: $metric) {
             ForEach(ComparisonMetric.allCases) { option in Text(option.title).tag(option) }
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .accessibilityLabel("Speed ranked")
-        .help("Response speed excludes tools and your time and merges a model across coding tools. Turn speed covers the whole turn, per coding tool.")
+        .accessibilityLabel("Metric ranked")
+        .help("Response speed excludes tools and your time and merges a model across coding tools. Turn speed covers the whole turn, per coding tool. Efficiency compares the output tokens a model spends per request, by model and effort.")
     }
 
     private var content: some View {
@@ -611,18 +634,26 @@ struct CohortComparisonView: View {
                 Text("Completed turns from each model will appear here.")
                     .font(DashboardStyle.Typography.footnote).foregroundStyle(DashboardStyle.muted)
                     .frame(maxWidth: .infinity, minHeight: compact ? 72 : 130)
-            } else if metric == .responseSpeed {
-                ResponseListView(summaries: snapshot.responseSummaries, sort: responseSort, selected: nil, onSelect: onSelect)
             } else {
-                CohortListView(summaries: snapshot.cohortSummaries, sort: sort, selected: nil, onSelect: onSelect)
+                switch metric {
+                case .responseSpeed:
+                    ResponseListView(summaries: snapshot.responseSummaries, sort: responseSort, selected: nil, onSelect: onSelect)
+                case .turnSpeed:
+                    CohortListView(summaries: snapshot.cohortSummaries, sort: sort, selected: nil, onSelect: onSelect)
+                case .efficiency:
+                    EfficiencyListView(rows: snapshot.efficiencyRows, reference: snapshot.efficiencyReference, sort: efficiencySort)
+                }
             }
-            if range == .week {
+            if metric == .efficiency {
+                Text(EfficiencyCopy.rangeNote)
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
+            } else if range == .week {
                 Text("Previous 7 days unavailable · local history retains 7 days.")
                     .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
             }
             Text(footnote)
                 .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
-                .help("Speed ordering is not a quality ranking · effort shown when reported; speed tier and workload are uncontrolled.")
+                .help(metric == .efficiency ? EfficiencyCopy.explanation : "Speed ordering is not a quality ranking · effort shown when reported; speed tier and workload are uncontrolled.")
         }
     }
 
@@ -632,6 +663,7 @@ struct CohortComparisonView: View {
         case (.responseSpeed, false): ResponseSpeedCopy.definition + " Merged across coding tools · speed ordering is not a quality ranking · speed tier/workload uncontrolled"
         case (.turnSpeed, true): "Speed ordering is not a quality ranking."
         case (.turnSpeed, false): "Each group has its own definition and scale · speed ordering is not a quality ranking · effort shown when reported; speed tier/workload uncontrolled"
+        case (.efficiency, _): EfficiencyCopy.comparisonFootnote
         }
     }
 }

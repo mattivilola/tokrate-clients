@@ -630,6 +630,13 @@ time,
 .segment[aria-disabled="true"] {
   opacity: 0.5;
 }
+/* Four chart metrics must fit the narrow flyout card. */
+.metric-toggle {
+  max-width: 100%;
+}
+.metric-toggle .segment {
+  padding-inline: 7px;
+}
 .picker-filters .segmented {
   display: flex;
 }
@@ -972,6 +979,84 @@ time,
   background: linear-gradient(90deg, var(--arc-start), var(--arc-end));
   border-radius: 2px;
   transition: width 400ms var(--ease);
+}
+/* ---- efficiency indicator --------------------------------------------------- */
+.eff-about {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.eff-about-text {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.trend-details .eff-about {
+  margin: 0;
+}
+.eff-row {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.eff-row .model-main {
+  flex: 1 1 0;
+}
+.eff-row .model-value {
+  align-items: flex-end;
+}
+.eff-bar {
+  position: relative;
+  flex-basis: 100%;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
+}
+.eff-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--arc-start), var(--arc-end));
+  border-radius: 3px;
+  transition: width 400ms var(--ease);
+}
+.eff-bar-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ink);
+  border-radius: 1px;
+  opacity: 0.55;
+}
+.eff-scale {
+  position: relative;
+  height: 16px;
+  margin: 0 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.compare .eff-scale {
+  margin: 0;
+}
+.eff-scale span {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+}
+.eff-scale .eff-scale-end {
+  transform: translateX(-100%);
+}
+.eff-detail {
+  padding: 0 14px 12px;
+}
+.eff-note {
+  margin-bottom: 6px;
+}
+.muted-value {
+  color: var(--muted);
 }
 .view-toggle {
   display: flex;

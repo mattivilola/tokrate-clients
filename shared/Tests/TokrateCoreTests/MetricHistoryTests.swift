@@ -31,6 +31,7 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertNil(decoded.responseDurationSeconds)
         XCTAssertNil(decoded.responseCount)
         XCTAssertNil(decoded.providerRegion)
+        XCTAssertNil(decoded.delegatedOutputTokens, "records saved before 0.1.16 carry no delegated total")
         XCTAssertNil(decoded.responseSpeedTPS)
         XCTAssertTrue(decoded.isSupportedSourceTuple)
 
@@ -40,6 +41,37 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertTrue(TurnMetric.isSupportedSourceTuple(client: "codex", parserVersion: "codex-rollout-v2", metricVersion: "turn-v1"))
         XCTAssertTrue(TurnMetric.isSupportedSourceTuple(client: "claude-code", parserVersion: "claude-transcript-v4", metricVersion: "claude-observed-turn-v1"))
         XCTAssertTrue(TurnMetric.isSupportedSourceTuple(client: "claude-code", parserVersion: "claude-transcript-v4", metricVersion: "claude-observed-subagent-turn-v1"))
+    }
+
+    func testDelegatedOutputTokensRoundTripAndAreEncodedOnlyWhenPresent() throws {
+        let base = metric(id: "primary", at: Date(timeIntervalSince1970: 1_800_000_000))
+        XCTAssertNil(try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any])["delegatedOutputTokens"])
+        let settled = base.withDelegatedOutputTokens(1_234)
+        XCTAssertEqual(settled.id, base.id)
+        XCTAssertEqual(settled.outputTokens, base.outputTokens)
+        XCTAssertEqual(settled.delegatedOutputTokens, 1_234)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(settled)) as? [String: Any])
+        XCTAssertEqual(object["delegatedOutputTokens"] as? Int, 1_234)
+        XCTAssertEqual(try JSONDecoder().decode(TurnMetric.self, from: JSONEncoder().encode(settled)), settled)
+        XCTAssertEqual(settled.withDelegatedOutputTokens(nil), base)
+    }
+
+    func testASettledDelegatedTotalIsNeverReplacedByAPendingOne() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let pending = metric(id: "turn", at: now.addingTimeInterval(-60))
+        var history = MetricHistory()
+        history.upsert(pending.withDelegatedOutputTokens(900), now: now)
+        // A replay re-emits the turn before its delegated work is attributed again.
+        history.upsert(pending, now: now)
+        XCTAssertEqual(history.records.first?.delegatedOutputTokens, 900)
+        // A settled re-emission replaces it, and a pending record replaces a pending one.
+        history.upsert(pending.withDelegatedOutputTokens(0), now: now)
+        XCTAssertEqual(history.records.first?.delegatedOutputTokens, 0)
+        var fresh = MetricHistory()
+        fresh.upsert(pending, now: now)
+        fresh.upsert(pending.withDelegatedOutputTokens(50), now: now)
+        XCTAssertEqual(fresh.records.map(\.delegatedOutputTokens), [50])
+        XCTAssertEqual(fresh.records.count, 1)
     }
 
     func testResponseFieldsRoundTripAndAreEncodedOnlyWhenPresent() throws {

@@ -86,6 +86,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     private var turn: TurnState?
     private var emittedUserTurnIDs: Set<String> = []
     private var completedResponses: [LiveResponse] = []
+    /// Delegated-work lifecycle events since the last drain: a primary scope reports each emitted turn's
+    /// root session; a subagent scope reports each turn as one delegated work item.
+    private var delegationEvents: [DelegationEvent] = []
     /// Timestamp of the latest user-type record (human prompt, tool result, notification or meta
     /// record): the request for the next response is sent after it.
     private var lastTriggerAt: Date?
@@ -112,7 +115,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
 
     mutating func reset(sourceIdentity: String) {
         self.sourceIdentity = sourceIdentity
-        turn = nil
+        dropTurn()
         isSynchronised = true
         emittedUserTurnIDs.removeAll(keepingCapacity: true)
         completedResponses.removeAll(keepingCapacity: true)
@@ -128,7 +131,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     /// first terminal assistant record or a conversation-root prompt (`parentUuid` null), prompts
     /// are ignored so no partial turn is measured.
     mutating func markStartedMidFile() {
-        turn = nil
+        dropTurn()
         isSynchronised = false
     }
 
@@ -219,6 +222,27 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         return completedResponses
     }
 
+    mutating func drainDelegationEvents() -> [DelegationEvent] {
+        defer { delegationEvents.removeAll(keepingCapacity: true) }
+        return delegationEvents
+    }
+
+    /// The attribution key of the session this turn belongs to; nil when the records name none.
+    private func rootKey(of state: TurnState) -> String? {
+        state.sessionID.map { DelegationRoot.key(client: "claude-code", rawSessionID: $0) }
+    }
+
+    /// Abandons the active turn. A subagent turn is a delegated work item that will never finish.
+    private mutating func dropTurn() {
+        if let state = turn { reportDiscarded(state) }
+        turn = nil
+    }
+
+    private mutating func reportDiscarded(_ state: TurnState) {
+        guard scope == .subagent, state.sessionID != nil else { return }
+        delegationEvents.append(.workDiscarded(id: identityDigest(for: state)))
+    }
+
     private mutating func consumeUser(_ root: [String: Any]) {
         // Any user-type record is a trigger: the next request is sent after it.
         if let triggered = parseDate(root["timestamp"]) { lastTriggerAt = max(lastTriggerAt ?? triggered, triggered) }
@@ -246,7 +270,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         if isInterruption(content) {
             // A response that was still streaming is cut off and never reported; a complete one is final.
             if openResponse?.hasStopReason == true { finalizeOpenResponse() } else { openResponse = nil }
-            turn = nil
+            dropTurn()
             return
         }
         if !isSynchronised {
@@ -258,7 +282,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             turn = state
             return
         }
-        turn = nil
+        dropTurn()
         guard let userID = safeIdentifier(root["uuid"] as? String, maximum: 120),
               !emittedUserTurnIDs.contains(userID)
         else { return }
@@ -272,6 +296,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         if let version = validatedVersion(root["version"]) { state.clientVersion = version }
         updateEffort(root, message: nil, in: &state)
         turn = state
+        if scope == .subagent, let rootKey = rootKey(of: state) {
+            delegationEvents.append(.workStarted(id: identityDigest(for: state), root: rootKey, startedAt: timestamp))
+        }
     }
 
     private mutating func consumeAssistant(_ root: [String: Any]) {
@@ -287,7 +314,12 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             if var state = turn {
                 if let timestamp { state.lastActivityAt = max(state.lastActivityAt, timestamp) }
                 state.hasSyntheticMessage = true
-                turn = isTerminal ? nil : state
+                if isTerminal {
+                    reportDiscarded(state)
+                    turn = nil
+                } else {
+                    turn = state
+                }
             }
             return
         }
@@ -406,11 +438,25 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         ))
     }
 
-    /// Emits the pending turn once its terminal message is complete.
+    /// Emits the pending turn once its terminal message is complete, and reports it to the delegation
+    /// side channel: a finished work item (subagent scope) or a primary turn with its root session.
     private mutating func closeTurn() -> TurnMetric? {
         finalizeOpenResponse()
         guard let state = turn, let terminalID = state.terminalMessageID else { return nil }
         turn = nil
+        guard let metric = makeMetric(from: state, terminalID: terminalID) else {
+            reportDiscarded(state)
+            return nil
+        }
+        if let rootKey = rootKey(of: state) {
+            delegationEvents.append(scope == .subagent
+                ? .workFinished(id: metric.id, outputTokens: metric.outputTokens, finishedAt: metric.completedAt)
+                : .primaryTurn(turnID: metric.id, root: rootKey))
+        }
+        return metric
+    }
+
+    private mutating func makeMetric(from state: TurnState, terminalID: String) -> TurnMetric? {
         guard !state.hasSyntheticMessage,
               !state.hasIncompleteUsage,
               !state.messages.isEmpty,
@@ -607,6 +653,7 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
     mutating func consume(line: Data) -> TurnMetric? { parser.consume(line: line) }
     mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { parser.pollEnded(now: now, isFinal: isFinal) }
     mutating func drainCompletedResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
+    mutating func drainDelegationEvents() -> [DelegationEvent] { parser.drainDelegationEvents() }
     mutating func reset(sourceIdentity: String) { parser.reset(sourceIdentity: sourceIdentity) }
     mutating func markStartedMidFile() { parser.markStartedMidFile() }
 }
@@ -616,9 +663,14 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
 /// consume the primary byte budget, live-file slots or 2,000-file cap (and vice versa); each set
 /// keeps the full existing recent-tail/archive fairness and byte limits. The path predicates are
 /// disjoint, so no transcript is counted twice.
+///
+/// The monitor attributes each subagent turn to the primary turn of the same session that started it
+/// (see `DelegationAttributor`): a primary turn is emitted at once and re-emitted under the same id
+/// once its delegated output tokens are final.
 public actor ClaudeSessionMonitor {
     private let primary: JSONLSourceSessionMonitor<ClaudeTranscriptParser>
     private let subagents: JSONLSourceSessionMonitor<ClaudeSubagentTranscriptParser>
+    private var attributor = DelegationAttributor()
 
     /// `liveSince` is the moment from which completed responses count as live; earlier responses are
     /// history and never reach the live stream.
@@ -637,9 +689,15 @@ public actor ClaudeSessionMonitor {
         let primaryUpdate = try await primary.poll(now: now)
         // Discovery is the only throwing step and runs before any bytes are consumed, so a failed
         // subagent poll loses nothing and is retried on the next cycle.
-        let subagentUpdate = (try? await subagents.poll(now: now)) ?? MonitorUpdate()
+        let subagentPoll = try? await subagents.poll(now: now)
+        let subagentUpdate = subagentPoll ?? MonitorUpdate()
+        attributor.ingest(events: primaryUpdate.delegation + subagentUpdate.delegation, metrics: primaryUpdate.metrics)
+        // Without a successful subagent poll nothing is known about delegated work: finalize nothing.
+        let backlog = subagentPoll == nil ? true : await subagents.hasHistoricalBacklog
+        let finals = attributor.finalize(now: now, hasHistoricalBacklog: backlog)
+        let primaryMetrics = DelegationAttributor.merging(primaryUpdate.metrics, finals: finals)
         return MonitorUpdate(
-            metrics: (primaryUpdate.metrics + subagentUpdate.metrics).sorted { $0.completedAt > $1.completedAt },
+            metrics: (primaryMetrics + subagentUpdate.metrics).sorted { $0.completedAt > $1.completedAt },
             responses: (primaryUpdate.responses + subagentUpdate.responses).sorted { $0.completedAt > $1.completedAt }
         )
     }

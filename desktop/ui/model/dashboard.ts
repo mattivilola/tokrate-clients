@@ -21,6 +21,7 @@ import {
   type Metric,
   type SortKey,
 } from "../metrics";
+import { efficiencyDashboard } from "../efficiency";
 import {
   autoSelection,
   fallbackModel,
@@ -170,6 +171,8 @@ export function buildDashboard(input: DashboardInput) {
     groups: groupCohortRows(cohorts, "recent"),
     compareGroups: groupCohortRows(cohorts, sort),
     modelRows,
+    /** Efficiency indicator over the whole 7-day history, independent of the chart range. */
+    efficiency: efficiencyDashboard(filtered, now, days, sample, isAll),
     gaugeMax,
     turnGaugeMax: niceScaleMax(
       Math.max(latest?.turnThroughputTPS ?? 0, groupMedian24h),

@@ -1,6 +1,7 @@
 //! Portable, content-free metrics processing shared by the Tokrate desktop hosts.
 
 mod claude_parser;
+mod delegation;
 mod grok;
 mod history;
 mod live;

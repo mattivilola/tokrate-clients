@@ -84,6 +84,11 @@ pub struct TurnMetric {
     /// `None` for every other route.
     #[serde(default)]
     pub provider_region: Option<String>,
+    /// Output tokens of delegated subagent work started during this primary turn that
+    /// `output_tokens` does not already include. `None` while attribution is not final and for
+    /// records it does not apply to (subagent turns, records saved before the field existed).
+    #[serde(default)]
+    pub delegated_output_tokens: Option<i64>,
 }
 
 /// Per-turn totals over qualifying responses, accumulated by the parsers.
@@ -177,6 +182,15 @@ impl TurnMetric {
             response_duration_seconds: None,
             response_count: None,
             provider_region: None,
+            delegated_output_tokens: None,
+        }
+    }
+
+    /// The same record with its delegated subagent output attribution settled.
+    pub fn with_delegated_output_tokens(&self, delegated_output_tokens: i64) -> Self {
+        Self {
+            delegated_output_tokens: Some(delegated_output_tokens),
+            ..self.clone()
         }
     }
 
@@ -222,6 +236,7 @@ impl TurnMetric {
             response_duration_seconds: None,
             response_count: None,
             provider_region: None,
+            delegated_output_tokens: None,
         }
     }
 }

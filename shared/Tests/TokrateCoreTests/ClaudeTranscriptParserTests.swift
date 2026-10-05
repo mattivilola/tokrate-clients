@@ -193,11 +193,11 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let metric = try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "s1", output: 200, stop: "end_turn", sidechain: true)))
         let sample = try XCTUnwrap(SharedSample(metric))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"])
+        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens"])
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.15")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.16")
         XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         // The only response (200 tokens in 10 s from the task prompt) qualifies.
@@ -324,9 +324,14 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let third = try await monitor.poll(now: start.addingTimeInterval(31))
         XCTAssertEqual(third.metrics.map(\.outputTokens), [300])
         XCTAssertEqual(third.responses.map(\.outputTokens), [300])
+        XCTAssertNil(third.metrics.first?.delegatedOutputTokens, "emitted at once; the delegated total settles later")
         let fourth = try await monitor.poll(now: start.addingTimeInterval(42))
-        XCTAssertTrue(fourth.metrics.isEmpty)
+        XCTAssertEqual(fourth.metrics.map(\.id), third.metrics.map(\.id), "the settled re-emission replaces the record")
+        XCTAssertEqual(fourth.metrics.first?.delegatedOutputTokens, 0)
         XCTAssertTrue(fourth.responses.isEmpty)
+        let fifth = try await monitor.poll(now: start.addingTimeInterval(53))
+        XCTAssertTrue(fifth.metrics.isEmpty)
+        XCTAssertTrue(fifth.responses.isEmpty)
     }
 
     // MARK: Origin-aware prompts (claude-transcript-v3)
@@ -595,7 +600,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
 
     func testBedrockSharedSampleCarriesProviderAndNormalisedModel() throws {
         let result = try XCTUnwrap(metric(records: [(bedrockMessage, nil, "global.anthropic.claude-opus-4-6-v1")]))
-        let sample = try XCTUnwrap(SharedSample(result))
+        let sample = try XCTUnwrap(SharedSample(result.withDelegatedOutputTokens(0)))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
         XCTAssertEqual(json["provider"] as? String, "amazon-bedrock")
         XCTAssertEqual(json["model"] as? String, "claude-opus-4-6")
@@ -611,7 +616,8 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             return SharedSample(TurnMetric(
                 id: "id", completedAt: base, model: "m", outputTokens: 10, durationSeconds: 2, codexTTFTSeconds: nil,
                 turnThroughputTPS: 5, client: client, clientVersion: client == "grok-build" ? nil : "1.0",
-                parserVersion: parser, metricVersion: metricVersion, sourceKind: "primary", provider: provider
+                parserVersion: parser, metricVersion: metricVersion, sourceKind: "primary", provider: provider,
+                delegatedOutputTokens: 0
             ))
         }
         for provider in ["openai", "anthropic", "xai", "unknown"] {
@@ -625,7 +631,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             XCTAssertNil(sample(client: "grok-build", provider: provider))
         }
         XCTAssertNil(sample(client: "claude-code", provider: "azure"))
-        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])))?.appVersion, "0.1.15")
+        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.16")
     }
 
     // MARK: Response speed (response-v1)
@@ -1128,7 +1134,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
 
     func testBedrockRegionReachesTheSharedSample() throws {
         let result = try XCTUnwrap(metric(records: [(bedrockMessage, nil, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")]))
-        let sample = try XCTUnwrap(SharedSample(result))
+        let sample = try XCTUnwrap(SharedSample(result.withDelegatedOutputTokens(0)))
         XCTAssertEqual(sample.providerRegion, "eu")
         XCTAssertEqual(sample.provider, "amazon-bedrock")
     }

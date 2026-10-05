@@ -363,6 +363,34 @@ enum ResponseSpeedCopy {
     static let grokBuildExplanation = "Grok Build records output tokens per turn, not per response, so its response speed is the turn's output tokens divided by the time its model calls spent generating (tool runs and permission waits excluded). Short calls are included, which can make it read lower than per-response measurements from Codex and Claude Code. Turns with nested agents are not counted."
 }
 
+// MARK: - Efficiency indicator vocabulary
+
+/// The words for the efficiency indicator (efficiency-v1): a heuristic indicator, never a benchmark.
+enum EfficiencyCopy {
+    static let title = "Efficiency indicator"
+    static let shortTitle = "Efficiency"
+    /// The badge shown next to the value in comparison lists.
+    static let badge = "Indicator"
+    static let tick = "typical"
+    /// Unit of the all-models chart, which plots the reference itself.
+    static let tokensPerRequest = "tokens/request"
+    static let definition = "Fewer output tokens per request scores higher. 100 = a typical request."
+    static let explanation = "The efficiency indicator compares the median output tokens a model spends to finish one of your requests (reasoning and delegated subagent work included) with the median across all your requests in the last 7 days. 100 is typical; 200 means half the tokens. It is an indicator, not a benchmark: it depends on what you ask each model to do, requests under 200 tokens are left out, and answer quality is not measured."
+    static let insufficient = "Not enough requests yet: the efficiency indicator needs 20 eligible requests per model."
+    static let comparisonFootnote = "Each model and reasoning effort counts every coding tool, provider and version. Requests under 200 tokens are left out, and each group needs 20 eligible requests. It depends on what you ask each model to do, and this is not an answer-quality ranking."
+    static let rangeNote = "The efficiency indicator always covers your last 7 days, whatever the range."
+    static let chartHelp = "Efficiency indicator of the selected model and effort in each time interval, against your typical request over the last 7 days. An interval needs 3 eligible requests, otherwise it stays blank. " + explanation
+
+    /// "12 of 20 requests" for a group that has not reached the floor yet.
+    static func requestsOfFloor(_ turns: Int) -> String { "\(turns) of \(EfficiencyIndicator.minimumTurns) requests" }
+    /// "1 request", "87 requests".
+    static func requestCount(_ turns: Int) -> String { "\(turns) \(turns == 1 ? "request" : "requests")" }
+    /// Chip text next to a model, like the other model rows: "high", but "effort unknown" for none.
+    static func effortChip(_ effort: String) -> String { effort == "unknown" ? "effort unknown" : effort }
+    /// "high effort", "effort unknown".
+    static func effortText(_ effort: String) -> String { effort == "unknown" ? "effort unknown" : "\(effort) effort" }
+}
+
 // MARK: - Menu-bar readout
 
 /// What the menu-bar item shows: the live response speed of the followed model and its maker.

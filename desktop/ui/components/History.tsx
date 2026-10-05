@@ -7,6 +7,7 @@ import {
   GROK_RESPONSE_EXPLANATION,
   clientLabel,
   isGrokBuild,
+  isSubagent,
   measurementChip,
   measurementTitle,
   providerRoute,
@@ -15,9 +16,31 @@ import {
 } from "../metrics";
 import type { Dashboard } from "../model/dashboard";
 import { effortChip, exactTime, modelName, num } from "../model/format";
+import { totalTokens } from "../efficiency";
 import { useStore } from "../store/store";
+import type { Metric } from "../metrics";
 
 const MAX_ROWS = 500;
+
+/**
+ * Output plus delegated subagent tokens of a request. While delegated work is not final the plain
+ * output count is shown muted; subagent turns are counted in the request that started them.
+ */
+function RequestTokens({ m }: { m: Metric }) {
+  const total = totalTokens(m);
+  if (total !== null) return <>{total}</>;
+  if (isSubagent(m))
+    return (
+      <span className="muted-value" title="Counted in the request that started it">
+        —
+      </span>
+    );
+  return (
+    <span className="muted-value" title="Delegated work not yet counted">
+      {m.outputTokens}
+    </span>
+  );
+}
 
 /** The full-history window: larger chart, the numbers behind it and the bounded 500-row table. */
 export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
@@ -63,6 +86,8 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                 height={260}
                 emptyMessage={copy.empty}
                 ariaLabel={`${copy.title} over the last ${dayLabel}`}
+                digits={copy.digits}
+                noun={copy.noun}
               />
             </section>
             <section className="card history-details" aria-label="Details">
@@ -82,6 +107,9 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                   <th scope="col">Completed</th>
                   <th scope="col">Coding tool and model</th>
                   <th scope="col" className="num">Tokens</th>
+                  <th scope="col" className="num" title="Output tokens plus delegated subagent work">
+                    Tokens/request
+                  </th>
                   <th scope="col" className="num">Response speed</th>
                   <th scope="col" className="num">Turn speed</th>
                   <th scope="col" className="num">First token</th>
@@ -106,6 +134,9 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                       </span>
                     </td>
                     <td className="num">{m.outputTokens}</td>
+                    <td className="num">
+                      <RequestTokens m={m} />
+                    </td>
                     <td className="num" title={isGrokBuild(m) ? GROK_RESPONSE_EXPLANATION : undefined}>
                       {responseSpeed(m) === null ? (
                         "—"

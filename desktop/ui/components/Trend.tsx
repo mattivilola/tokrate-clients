@@ -1,5 +1,9 @@
 import { useMemo } from "react";
 import {
+  EFFICIENCY_DEFINITION,
+  EFFICIENCY_INSUFFICIENT,
+  EFFICIENCY_NAME,
+  EFFICIENCY_SHORT,
   GROK_RESPONSE_EXPLANATION,
   buckets,
   client,
@@ -12,6 +16,8 @@ import type { Dashboard } from "../model/dashboard";
 import { num, signedPercent } from "../model/format";
 import { useStore } from "../store/store";
 import type { ChartMetric } from "../store/types";
+import { EFFICIENCY_MIN_TURNS } from "../efficiency";
+import { EfficiencyAbout, EfficiencyDetailRows, requestsOfFloor } from "./Efficiency";
 import { Disclosure, Segmented, useAppStore } from "./primitives";
 import { TrendChart } from "./TrendChart";
 
@@ -19,15 +25,21 @@ import { TrendChart } from "./TrendChart";
 export const supportsFirstToken = (sample: Metric | undefined) =>
   !sample || client(sample) === "codex";
 
-/** Response speed pools the model's turns across tools; turn speed and first token stay on one cohort. */
+/**
+ * Response speed pools the model's turns across tools; turn speed and first token stay on one
+ * cohort. Efficiency buckets come precomputed: they need the 7-day reference.
+ */
 export function useTrendBuckets(
   dashboard: Dashboard,
   metric: ChartMetric,
   source: Metric[] = metric === "response" ? dashboard.responseInRange : dashboard.inRange,
 ) {
   return useMemo(
-    () => buckets(source, dashboard.now, dashboard.days, metric),
-    [source, dashboard.now, dashboard.days, metric],
+    () =>
+      metric === "efficiency"
+        ? dashboard.efficiency.buckets
+        : buckets(source, dashboard.now, dashboard.days, metric),
+    [source, dashboard.now, dashboard.days, dashboard.efficiency, metric],
   );
 }
 
@@ -38,24 +50,27 @@ export function MetricToggle({ dashboard }: { dashboard: Dashboard }) {
   const metric = useStore(store, (s) => s.ui.chartMetric);
   const firstToken = supportsFirstToken(dashboard.sample);
   return (
-    <Segmented
-      label="Chart metric"
-      size="sm"
-      value={chartCopy(dashboard, metric).metric}
-      onChange={(v) => store.setChartMetric(v)}
-      options={[
-        { value: "response", label: "Response speed", title: SPEED_HELP },
-        { value: "throughput", label: "Turn speed", title: SPEED_HELP },
-        {
-          value: "ttft",
-          label: "First token",
-          disabled: !firstToken,
-          title: firstToken
-            ? undefined
-            : "First-token time is not captured for this coding tool",
-        },
-      ]}
-    />
+    <div className="metric-toggle">
+      <Segmented
+        label="Chart metric"
+        size="sm"
+        value={chartCopy(dashboard, metric).metric}
+        onChange={(v) => store.setChartMetric(v)}
+        options={[
+          { value: "response", label: "Response speed", title: SPEED_HELP },
+          { value: "throughput", label: "Turn speed", title: SPEED_HELP },
+          {
+            value: "ttft",
+            label: "First token",
+            disabled: !firstToken,
+            title: firstToken
+              ? undefined
+              : "First-token time is not captured for this coding tool",
+          },
+          { value: "efficiency", label: EFFICIENCY_SHORT, title: EFFICIENCY_DEFINITION },
+        ]}
+      />
+    </div>
   );
 }
 
@@ -99,20 +114,41 @@ export function chartCopy(dashboard: Dashboard, metric: ChartMetric | null) {
       : unavailable
         ? "throughput"
         : "response";
+  const efficiency = dashboard.efficiency;
   return {
     metric: effective,
-    unit: effective === "ttft" ? "s" : "tok/s",
-    title: { response: "Response speed", throughput: "Turn speed", ttft: "First token" }[effective],
+    unit:
+      effective === "ttft" ? "s" : effective === "efficiency" ? efficiency.unit : "tok/s",
+    /** Decimals and the word for one observation in the chart tooltip. */
+    digits: effective === "efficiency" ? 0 : 1,
+    noun: effective === "efficiency" ? "request" : "turn",
+    title: {
+      response: "Response speed",
+      throughput: "Turn speed",
+      ttft: "First token",
+      efficiency: EFFICIENCY_NAME,
+    }[effective],
     empty:
       effective === "ttft"
         ? "No first-token times in this range"
         : effective === "response" && unavailable
           ? responseUnavailableText(dashboard.sample)
-          : "Collecting data",
+          : effective === "efficiency"
+            ? efficiency.selected?.indicator != null || dashboard.isAll
+              ? "Not enough requests in this range"
+              : EFFICIENCY_INSUFFICIENT
+            : "Collecting data",
     summary: {
       response: dashboard.responseSummary,
       throughput: dashboard.summary.throughput,
       ttft: dashboard.summary.ttft,
+      // The indicator spans the whole 7-day history, whatever the chart range.
+      efficiency: {
+        median: efficiency.selected?.indicator ?? null,
+        min: null,
+        max: null,
+        count: efficiency.selected?.turns ?? 0,
+      },
     }[effective],
   };
 }
@@ -144,9 +180,22 @@ export function Trend({ dashboard }: { dashboard: Dashboard }) {
         height={112}
         emptyMessage={copy.empty}
         ariaLabel={`${copy.title} over the last ${dayLabel}`}
+        digits={copy.digits}
+        noun={copy.noun}
       />
       <p className="trend-foot">
-        {summary.count ? (
+        {copy.metric === "efficiency" ? (
+          dashboard.efficiency.selected?.indicator != null ? (
+            <>
+              <strong>{dashboard.efficiency.selected.indicator}</strong> indicator ·{" "}
+              {summary.count} {summary.count === 1 ? "request" : "requests"} in 7 d
+            </>
+          ) : dashboard.efficiency.selected ? (
+            <>{requestsOfFloor(summary.count)} in 7 d</>
+          ) : (
+            <>Collecting data</>
+          )
+        ) : summary.count ? (
           <>
             Median <strong>{num(summary.median)}</strong> {copy.unit} · {summary.count}{" "}
             {summary.count === 1 ? "turn" : "turns"} in {dayLabel}
@@ -239,6 +288,27 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
           {...recent15m.throughput}
         />
       </dl>
+      <dl className="stats">
+        <div className="stat-row">
+          <dt>{EFFICIENCY_NAME} · 7 d</dt>
+          <dd>
+            {dashboard.efficiency.selected?.indicator != null ? (
+              <>
+                <strong>{dashboard.efficiency.selected.indicator} indicator</strong>
+                <span>100 = a typical request</span>
+              </>
+            ) : (
+              <span>
+                {dashboard.efficiency.selected
+                  ? requestsOfFloor(dashboard.efficiency.selected.turns)
+                  : `0 of ${EFFICIENCY_MIN_TURNS} requests`}
+              </span>
+            )}
+          </dd>
+        </div>
+        {dashboard.efficiency.selected && <EfficiencyDetailRows row={dashboard.efficiency.selected} />}
+      </dl>
+      <EfficiencyAbout />
       <p className="detail-line">
         <strong>24 h vs previous 24 h</strong>
         <span>
@@ -258,7 +328,8 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
         {isGrokBuild(sample) && ` ${GROK_RESPONSE_EXPLANATION}`} Turn speed:{" "}
         {sample ? measurementLabel(sample) : "Turn speed"}.
         {firstToken && " First token is the wait Codex reports and does not claim first visible text."}{" "}
-        Bucket medians, gaps mean no turns. Different workloads and measurement definitions affect
+        Bucket medians, gaps mean no turns. The efficiency indicator always covers your last 7 d;
+        its chart needs 3 requests per bucket. Different workloads and measurement definitions affect
         these numbers; this is not an answer-quality ranking.
       </p>
     </div>

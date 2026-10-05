@@ -1,7 +1,8 @@
+use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
     response_qualifies, ReportedReasoningEffort, ResponseMetric, ResponseTotals, TurnMetric,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -29,6 +30,21 @@ pub(crate) trait JsonlEventParser: Send {
     fn take_responses(&mut self) -> Vec<ResponseMetric> {
         Vec::new()
     }
+    /// Primary-turn and delegated-work events since the last call (the attribution stream).
+    fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
+        Vec::new()
+    }
+}
+
+/// What a Codex rollout's first line says the session is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionKind {
+    /// A user-facing session (or one whose source is not recognized): measured as turns.
+    Primary,
+    /// A `thread_spawn` child: read only to report delegated work, never measured as turns.
+    DelegatedChild,
+    /// Any other agent session (for example guardian approval reviews): skipped entirely.
+    Excluded,
 }
 
 #[derive(Default)]
@@ -47,6 +63,17 @@ struct TurnState {
     /// Qualifying model responses of this turn (one per token-usage record).
     responses: ResponseTotals,
     response_ids: HashSet<String>,
+    /// A delegated work item was reported as started for this turn.
+    work_started: bool,
+}
+
+/// What `task_complete` measured for a turn.
+struct MeasuredTurn {
+    completed_at: DateTime<Utc>,
+    duration: f64,
+    output_tokens: i64,
+    ttft: Option<f64>,
+    throughput: f64,
 }
 
 /// Parser state is intentionally bounded. Source IDs are held only long enough to derive a digest.
@@ -57,7 +84,11 @@ pub(crate) struct CodexEventParser {
     turn_order: VecDeque<String>,
     emitted_turn_ids: HashSet<String>,
     emitted_order: VecDeque<String>,
-    is_agent_session: bool,
+    session_kind: SessionKind,
+    /// Raw id of the root session: for primary sessions `session_id` else `id`, for delegated
+    /// children `session_id` else `parent_thread_id`. Only ever digested, never kept elsewhere.
+    root_session: Option<String>,
+    delegation_events: Vec<DelegationEvent>,
     client_version: Option<String>,
     source_kind: String,
     provider: String,
@@ -77,7 +108,9 @@ impl CodexEventParser {
             turn_order: VecDeque::new(),
             emitted_turn_ids: HashSet::new(),
             emitted_order: VecDeque::new(),
-            is_agent_session: false,
+            session_kind: SessionKind::Primary,
+            root_session: None,
+            delegation_events: Vec::new(),
             client_version: None,
             source_kind: "unknown".to_owned(),
             provider: "unknown".to_owned(),
@@ -88,11 +121,37 @@ impl CodexEventParser {
     }
 
     pub fn reset(&mut self, source_identity: String) {
+        // Work this parser started will never be finished by it: settle it as discarded.
+        let mut events = std::mem::take(&mut self.delegation_events);
+        let open: Vec<String> = self
+            .turns
+            .iter()
+            .filter(|(_, state)| state.work_started)
+            .map(|(turn_id, _)| turn_id.clone())
+            .collect();
+        events.extend(open.iter().map(|turn_id| DelegationEvent::Discarded {
+            work_id: self.turn_digest(turn_id),
+        }));
         *self = Self::new(source_identity);
+        self.delegation_events = events;
     }
 
+    /// Only sessions that are neither primary nor delegated children stop being read.
     pub fn excludes_session(&self) -> bool {
-        self.is_agent_session
+        self.session_kind == SessionKind::Excluded
+    }
+
+    /// Local identity of one turn: the id of its metric and of its delegated work item.
+    fn turn_digest(&self, turn_id: &str) -> String {
+        let identity = self
+            .session_identity
+            .as_deref()
+            .unwrap_or(&self.source_identity);
+        let mut digest = Sha256::new();
+        digest.update(identity.as_bytes());
+        digest.update(b"|");
+        digest.update(turn_id.as_bytes());
+        format!("{:x}", digest.finalize())
     }
 
     pub fn consume(&mut self, line: &[u8]) -> Option<TurnMetric> {
@@ -137,16 +196,21 @@ impl CodexEventParser {
             return None;
         }
 
-        if event_type != "event_msg"
-            || payload.get("type").and_then(Value::as_str) != Some("task_started")
-                && payload.get("type").and_then(Value::as_str) != Some("task_complete")
-        {
+        if event_type != "event_msg" {
             return None;
         }
-
         let subtype = payload.get("type")?.as_str()?;
+        if !matches!(subtype, "task_started" | "task_complete" | "turn_aborted") {
+            return None;
+        }
         let turn_id = valid_turn_id(payload.get("turn_id")?)?;
         let event_date = parse_date(event.get("timestamp"));
+
+        if subtype == "turn_aborted" {
+            // Only delegated work cares: an aborted child turn is discarded, never counted.
+            self.discard_work(turn_id);
+            return None;
+        }
 
         if subtype == "task_started" {
             if let Some(date) = event_date {
@@ -158,10 +222,15 @@ impl CodexEventParser {
             if state.started_at.is_none() {
                 state.started_at = parse_date(payload.get("started_at")).or(event_date);
             }
+            let started_at = state.started_at;
+            let already_started = state.work_started;
+            if self.session_kind == SessionKind::DelegatedChild && !already_started {
+                self.start_work(turn_id, started_at);
+            }
             return None;
         }
 
-        let is_agent_session = self.is_agent_session;
+        let session_kind = self.session_kind;
         let already_emitted = self.emitted_turn_ids.contains(turn_id);
         let state = self.turn_state_mut(turn_id);
         if state.started_at.is_none() {
@@ -171,64 +240,45 @@ impl CodexEventParser {
             state.duration_milliseconds = Some(duration);
         }
         state.ttft_milliseconds = nonnegative_finite_number(payload.get("time_to_first_token_ms"));
-
-        let completed_at = parse_date(payload.get("completed_at")).or(event_date)?;
-        let duration = state
-            .duration_milliseconds
-            .map(|value| value / 1_000.0)
-            .or_else(|| {
-                state.started_at.and_then(|start| {
-                    (completed_at - start)
-                        .num_nanoseconds()
-                        .map(|nanos| nanos as f64 / 1e9)
-                })
-            })?;
+        let start_observed = state.start_observed;
+        let measured = measure_turn(state, payload, event_date);
 
         // A completion whose start this instance never saw (the reader began mid-turn) lacks its
         // turn context and cannot be measured faithfully.
-        if is_agent_session || already_emitted || !state.start_observed {
+        if session_kind == SessionKind::Excluded || already_emitted || !start_observed {
             return None;
         }
-        let output_tokens = state.output_tokens?;
-        if !duration.is_finite() || duration <= 0.0 || output_tokens < 0 {
+        if session_kind == SessionKind::DelegatedChild {
+            // Children report work only: no TurnMetric, no live responses.
+            self.finish_work(turn_id, measured.as_ref());
             return None;
         }
-        let ttft = state.ttft_milliseconds.map(|value| value / 1_000.0);
-        if ttft.is_some_and(|value| !value.is_finite()) {
-            return None;
-        }
-        let throughput = output_tokens as f64 / duration;
-        if !throughput.is_finite() || throughput < 0.0 {
-            return None;
-        }
+        let measured = measured?;
 
         self.remember_emitted(turn_id);
         self.turn_order.retain(|known| known != turn_id);
         let state = self.turns.remove(turn_id).unwrap_or_default();
         let (response_output_tokens, response_duration_seconds, response_count) =
             state.responses.fields();
-        let identity = self
-            .session_identity
-            .as_deref()
-            .unwrap_or(&self.source_identity);
-        let mut digest = Sha256::new();
-        digest.update(identity.as_bytes());
-        digest.update(b"|");
-        digest.update(turn_id.as_bytes());
-        let id = format!("{:x}", digest.finalize());
+        let id = self.turn_digest(turn_id);
+        let completed_at = measured.completed_at;
+        let started_at = state.started_at.unwrap_or_else(|| {
+            completed_at
+                - Duration::nanoseconds((measured.duration * 1e9).min(i64::MAX as f64) as i64)
+        });
 
-        Some(TurnMetric {
-            id,
+        let metric = TurnMetric {
+            id: id.clone(),
             completed_at,
             model: if state.model_was_ambiguous {
                 None
             } else {
                 state.model
             },
-            output_tokens,
-            duration_seconds: duration,
-            codex_ttft_seconds: ttft,
-            turn_throughput_tps: throughput,
+            output_tokens: measured.output_tokens,
+            duration_seconds: measured.duration,
+            codex_ttft_seconds: measured.ttft,
+            turn_throughput_tps: measured.throughput,
             streaming_tps: None,
             client_version: self.client_version.clone(),
             client: crate::model::CODEX_CLIENT.to_owned(),
@@ -246,7 +296,77 @@ impl CodexEventParser {
             response_duration_seconds,
             response_count,
             provider_region: None,
-        })
+            delegated_output_tokens: None,
+        };
+        if self.source_kind == "primary" {
+            // The root session joins this turn with the delegated work started during it.
+            let root = self
+                .root_session
+                .as_deref()
+                .unwrap_or(&self.source_identity);
+            self.delegation_events.push(DelegationEvent::Turn {
+                turn_id: id,
+                root_session: root_session_key(crate::model::CODEX_CLIENT, root),
+                started_at,
+            });
+        }
+        Some(metric)
+    }
+
+    /// Reports a delegated work item for a turn of a delegated child session. Without a known
+    /// root session the work cannot be attributed and is not reported.
+    fn start_work(&mut self, turn_id: &str, started_at: Option<DateTime<Utc>>) {
+        let (Some(root), Some(started_at)) = (self.root_session.as_deref(), started_at) else {
+            return;
+        };
+        let event = DelegationEvent::Started {
+            work_id: self.turn_digest(turn_id),
+            root_session: root_session_key(crate::model::CODEX_CLIENT, root),
+            started_at,
+        };
+        self.delegation_events.push(event);
+        if let Some(state) = self.turns.get_mut(turn_id) {
+            state.work_started = true;
+        }
+    }
+
+    /// Settles the work item of a completed child turn: finished when it was measured, else
+    /// discarded. The turn state is released either way.
+    fn finish_work(&mut self, turn_id: &str, measured: Option<&MeasuredTurn>) {
+        self.turn_order.retain(|known| known != turn_id);
+        let Some(state) = self.turns.remove(turn_id) else {
+            return;
+        };
+        if !state.work_started {
+            return;
+        }
+        let work_id = self.turn_digest(turn_id);
+        self.remember_emitted(turn_id);
+        self.delegation_events.push(match measured {
+            Some(measured) => DelegationEvent::Finished {
+                work_id,
+                output_tokens: measured.output_tokens,
+                finished_at: measured.completed_at,
+            },
+            None => DelegationEvent::Discarded { work_id },
+        });
+    }
+
+    /// An aborted or otherwise abandoned work item never counts.
+    fn discard_work(&mut self, turn_id: &str) {
+        if self.session_kind != SessionKind::DelegatedChild {
+            return;
+        }
+        self.turn_order.retain(|known| known != turn_id);
+        if self
+            .turns
+            .remove(turn_id)
+            .is_some_and(|state| state.work_started)
+        {
+            let work_id = self.turn_digest(turn_id);
+            self.delegation_events
+                .push(DelegationEvent::Discarded { work_id });
+        }
     }
 
     /// Tracks what triggers each model request. A user message or a tool output starts the next
@@ -316,7 +436,7 @@ impl CodexEventParser {
             return;
         }
         state.responses.add(tokens, duration);
-        if self.is_agent_session {
+        if self.session_kind != SessionKind::Primary {
             return;
         }
         let state = self.turn_state_mut(turn_id);
@@ -383,43 +503,68 @@ impl CodexEventParser {
             "unknown".to_owned()
         };
 
-        if let Some(source) = payload.get("source").and_then(Value::as_object) {
-            if source.contains_key("subagent") {
-                self.is_agent_session = true;
-            }
-        }
-        if let Some(id) = payload
+        let source = payload.get("source").and_then(Value::as_object);
+        let subagent = source.and_then(|source| source.get("subagent"));
+        let id = payload
             .get("id")
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty() && id.len() <= MAX_SESSION_ID_BYTES)
-        {
+            .filter(|id| !id.is_empty() && id.len() <= MAX_SESSION_ID_BYTES);
+        if let Some(id) = id {
             self.session_identity = Some(id.to_owned());
         }
-        if payload
-            .get("parent_thread_id")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-        {
-            self.is_agent_session = true;
-        }
-        if payload
-            .get("agent_path")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+        let text_field = |key: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= MAX_SESSION_ID_BYTES)
+        };
+        let session_id = text_field("session_id");
+        let parent_thread_id = text_field("parent_thread_id");
+        let is_agent_session = subagent.is_some()
+            || payload
+                .get("parent_thread_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+            || payload
+                .get("agent_path")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
             || payload
                 .get("agent_path")
                 .and_then(Value::as_array)
-                .is_some_and(|value| !value.is_empty())
-        {
-            self.is_agent_session = true;
+                .is_some_and(|value| !value.is_empty());
+        // Only spawned child threads are delegated work; every other agent kind, such as the
+        // `other: "guardian"` approval reviews, stays skipped.
+        let is_thread_spawn = subagent.and_then(Value::as_object).is_some_and(|kinds| {
+            kinds.get("thread_spawn").is_some_and(Value::is_object) && !kinds.contains_key("other")
+        });
+        if is_agent_session {
+            self.session_kind = if is_thread_spawn {
+                SessionKind::DelegatedChild
+            } else {
+                SessionKind::Excluded
+            };
         }
+        self.root_session = match self.session_kind {
+            SessionKind::DelegatedChild => session_id.or(parent_thread_id),
+            _ => session_id.or(id),
+        }
+        .map(str::to_owned);
     }
 
     fn turn_state_mut(&mut self, turn_id: &str) -> &mut TurnState {
         if !self.turns.contains_key(turn_id) {
             if self.turns.len() >= MAX_TRACKED_TURNS {
                 if let Some(oldest) = self.turn_order.pop_front() {
-                    self.turns.remove(&oldest);
+                    if self
+                        .turns
+                        .remove(&oldest)
+                        .is_some_and(|state| state.work_started)
+                    {
+                        let work_id = self.turn_digest(&oldest);
+                        self.delegation_events
+                            .push(DelegationEvent::Discarded { work_id });
+                    }
                 }
             }
             self.turn_order.push_back(turn_id.to_owned());
@@ -457,6 +602,48 @@ impl JsonlEventParser for CodexEventParser {
     fn take_responses(&mut self) -> Vec<ResponseMetric> {
         std::mem::take(&mut self.responses)
     }
+
+    fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
+        std::mem::take(&mut self.delegation_events)
+    }
+}
+
+/// The measurements `task_complete` closes a turn with, or `None` when they are not valid.
+fn measure_turn(
+    state: &TurnState,
+    payload: &Map<String, Value>,
+    event_date: Option<DateTime<Utc>>,
+) -> Option<MeasuredTurn> {
+    let completed_at = parse_date(payload.get("completed_at")).or(event_date)?;
+    let duration = state
+        .duration_milliseconds
+        .map(|value| value / 1_000.0)
+        .or_else(|| {
+            state.started_at.and_then(|start| {
+                (completed_at - start)
+                    .num_nanoseconds()
+                    .map(|nanos| nanos as f64 / 1e9)
+            })
+        })?;
+    let output_tokens = state.output_tokens?;
+    if !duration.is_finite() || duration <= 0.0 || output_tokens < 0 {
+        return None;
+    }
+    let ttft = state.ttft_milliseconds.map(|value| value / 1_000.0);
+    if ttft.is_some_and(|value| !value.is_finite()) {
+        return None;
+    }
+    let throughput = output_tokens as f64 / duration;
+    if !throughput.is_finite() || throughput < 0.0 {
+        return None;
+    }
+    Some(MeasuredTurn {
+        completed_at,
+        duration,
+        output_tokens,
+        ttft,
+        throughput,
+    })
 }
 
 fn valid_turn_id(value: &Value) -> Option<&str> {

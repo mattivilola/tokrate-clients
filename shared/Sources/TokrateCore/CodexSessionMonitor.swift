@@ -1,6 +1,11 @@
 import Foundation
 
 /// Recent appended events have their own cursor; historical replay cannot hold them back.
+///
+/// Sessions spawned by a primary session (`thread_spawn` children) are read in full as delegated
+/// work. The monitor attributes their output tokens to the primary turn of the same root session
+/// that started them (see `DelegationAttributor`): a primary turn is emitted at once and re-emitted
+/// under the same id once its delegated output tokens are final.
 public actor CodexSessionMonitor {
     public static let recentTailBytes = 262_144
     public static let maximumPollBytes = 1_048_576
@@ -19,6 +24,7 @@ public actor CodexSessionMonitor {
     private var files: [String: WatchedFile] = [:]
     private var lastDiscovery = Date.distantPast
     private var nextArchiveIndex = 0
+    private var attributor = DelegationAttributor()
 
     private let liveSince: Date
 
@@ -32,6 +38,7 @@ public actor CodexSessionMonitor {
     public func poll(now: Date = .now) throws -> MonitorUpdate {
         bytesReadLastPoll = 0
         var responses: [String: LiveResponse] = [:]
+        var delegation: [DelegationEvent] = []
         func collect(_ completed: [LiveResponse]) {
             for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
         }
@@ -55,6 +62,7 @@ public actor CodexSessionMonitor {
             do {
                 let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget))
                 collect(file.live.drainResponses())
+                delegation += file.live.drainDelegation()
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
                 let consumed = file.live.bytesReadLastPoll
                 liveBudget -= consumed
@@ -63,7 +71,8 @@ public actor CodexSessionMonitor {
                     file.liveServicedModification = file.modifiedAt
                     file.archiveIDsWhileLiveCatchesUp.removeAll(keepingCapacity: false)
                 }
-                if file.live.excludesSessionFromMetrics { file.archive = nil }
+                // The live reader of a spawned child reads it in full, so no archive pass is needed.
+                if file.live.isSkippedSession || file.live.isDelegatedWork { file.archive = nil }
                 files[key] = file
             } catch {
                 // Retry changed/new files on the next pass; one inaccessible file cannot stop others.
@@ -81,6 +90,7 @@ public actor CodexSessionMonitor {
                 do {
                     let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget))
                     collect(archive.drainResponses())
+                    delegation += archive.drainDelegation()
                     result += historical
                     if !file.live.isCaughtUp {
                         for record in historical where file.archiveIDsWhileLiveCatchesUp.count < 8192 {
@@ -88,7 +98,7 @@ public actor CodexSessionMonitor {
                         }
                     }
                     byteBudget -= archive.bytesReadLastPoll
-                    file.archive = archive.isCaughtUp || archive.excludesSessionFromMetrics ? nil : archive
+                    file.archive = archive.isCaughtUp || archive.isSkippedSession ? nil : archive
                     files[key] = file
                 } catch { /* Keep the cursor for a later retry. */ }
                 processed += 1
@@ -103,10 +113,19 @@ public actor CodexSessionMonitor {
             unique[record.id] = record
         }
         bytesReadLastPoll = Self.maximumPollBytes - byteBudget
+        let metrics = unique.values.sorted { $0.completedAt > $1.completedAt }
+        attributor.ingest(events: delegation, metrics: metrics)
+        let finals = attributor.finalize(now: now, hasHistoricalBacklog: hasHistoricalBacklog)
         return MonitorUpdate(
-            metrics: unique.values.sorted { $0.completedAt > $1.completedAt },
+            metrics: DelegationAttributor.merging(metrics, finals: finals),
             responses: responses.values.sorted { $0.completedAt > $1.completedAt }
         )
+    }
+
+    /// True while any watched file still has history to read: an archive reader in progress, a live
+    /// reader short of its file's end, or a modification not read yet.
+    private var hasHistoricalBacklog: Bool {
+        files.values.contains { $0.archive != nil || !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification }
     }
 
     private func discoverFiles(now: Date) throws {

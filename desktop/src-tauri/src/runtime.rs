@@ -15,7 +15,7 @@ use tokrate_core::{
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-05-v2";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-05-v3";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1089,6 +1089,94 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn primary_turns_are_shared_once_and_only_when_their_delegated_output_is_final() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let now = Utc::now();
+        let stamp = |minutes: i64| {
+            (now - chrono::Duration::minutes(minutes))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let line = |kind: &str,
+                    at: String,
+                    id: &str,
+                    agent: Option<&str>,
+                    stop: &str,
+                    tokens: i64| {
+            let mut record = serde_json::json!({
+                "type": kind, "timestamp": at, "isSidechain": agent.is_some(),
+                "userType": "external", "sessionId": "session-shared", "uuid": id,
+                "message": {
+                    "id": id, "role": kind, "model": "claude-model", "stop_reason": stop,
+                    "content": if kind == "user" { serde_json::json!("synthetic") } else { serde_json::json!([]) },
+                    "usage": {"output_tokens": tokens}
+                }
+            });
+            if let Some(agent) = agent {
+                record["agentId"] = agent.into();
+            }
+            record.to_string() + "\n"
+        };
+        let project = dir.join("claude-projects").join("project-a");
+        let subagents = project.join("session-shared").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            project.join("session-shared.jsonl"),
+            line("user", stamp(6), "main-user", None, "", 0)
+                + &line("assistant", stamp(5), "main-call", None, "end_turn", 500),
+        )
+        .unwrap();
+        std::fs::write(
+            subagents.join("agent-helper.jsonl"),
+            line("user", stamp(6), "helper-user", Some("helper"), "", 0)
+                + &line(
+                    "assistant",
+                    stamp(5),
+                    "helper-call",
+                    Some("helper"),
+                    "end_turn",
+                    120,
+                ),
+        )
+        .unwrap();
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        runtime.sharing_active = true;
+
+        let mut queued_before_final = 0;
+        let mut final_polls = 0;
+        for _ in 0..12 {
+            runtime.poll_monitor();
+            let turn = runtime
+                .history
+                .records()
+                .iter()
+                .find(|record| record.source_kind.as_deref() == Some("primary"));
+            match turn.and_then(|turn| turn.delegated_output_tokens) {
+                None => queued_before_final += runtime.queue.len(),
+                Some(_) => final_polls += 1,
+            }
+        }
+        // Nothing is shared while attribution is open; the final record is shared exactly once,
+        // and the subagent turn is shared as before.
+        assert_eq!(queued_before_final, 0);
+        assert!(final_polls > 0, "the turn never became final");
+        let turn = runtime
+            .history
+            .records()
+            .iter()
+            .find(|record| record.source_kind.as_deref() == Some("primary"))
+            .unwrap();
+        assert_eq!(turn.delegated_output_tokens, Some(120));
+        let shared = runtime.queue.batch(Utc::now());
+        let mut kinds: Vec<(&str, Option<i64>)> = shared
+            .iter()
+            .map(|sample| (sample.source_kind.as_str(), sample.delegated_output_tokens))
+            .collect();
+        kinds.sort();
+        assert_eq!(kinds, [("primary", Some(120)), ("subagent", None)]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn corrupt_history_remains_preserved_while_monitoring_continues() {
         let dir = temporary();
         let original = b"{history needing recovery";
@@ -1104,6 +1192,7 @@ mod tests {
         std::fs::write(dir.join("settings.json"), json.to_string()).unwrap();
     }
     const OLD_NOTICE: &str = "2026-10-04-v1";
+    const PREVIOUS_NOTICE: &str = "2026-10-05-v2";
     fn saved_settings(sharing: bool, consent: Option<(&str, &str)>) -> serde_json::Value {
         let mut settings = serde_json::to_value(Settings::default()).unwrap();
         settings["sharing"] = sharing.into();
@@ -1113,18 +1202,21 @@ mod tests {
         settings
     }
     #[test]
-    fn notice_version_two_pauses_sharing_that_was_accepted_under_version_one() {
-        assert_ne!(SHARING_NOTICE_VERSION, OLD_NOTICE);
-        let dir = temporary();
-        write_settings(&dir, saved_settings(true, Some((OLD_NOTICE, "accepted"))));
-        let runtime = Runtime::load(dir.clone()).unwrap();
-        assert!(!runtime.settings.sharing);
-        assert!(!runtime.settings.sharing_authorized());
-        assert!(runtime.consent_prompt_required);
-        assert!(!runtime.sharing_active);
-        assert!(runtime.board.is_none());
-        assert_eq!(runtime.queue.len(), 0);
-        std::fs::remove_dir_all(dir).unwrap();
+    fn notice_version_three_pauses_sharing_that_was_accepted_under_earlier_versions() {
+        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-05-v3");
+        for old in [OLD_NOTICE, PREVIOUS_NOTICE] {
+            assert_ne!(SHARING_NOTICE_VERSION, old);
+            let dir = temporary();
+            write_settings(&dir, saved_settings(true, Some((old, "accepted"))));
+            let runtime = Runtime::load(dir.clone()).unwrap();
+            assert!(!runtime.settings.sharing, "{old}");
+            assert!(!runtime.settings.sharing_authorized());
+            assert!(runtime.consent_prompt_required);
+            assert!(!runtime.sharing_active);
+            assert!(runtime.board.is_none());
+            assert_eq!(runtime.queue.len(), 0);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
     #[test]
     fn saved_off_choices_stay_off_without_a_prompt_when_the_notice_changes() {
@@ -1134,6 +1226,9 @@ mod tests {
             Some((OLD_NOTICE, "declined")),
             Some((OLD_NOTICE, "withdrawn")),
             Some((OLD_NOTICE, "accepted")),
+            Some((PREVIOUS_NOTICE, "declined")),
+            Some((PREVIOUS_NOTICE, "withdrawn")),
+            Some((PREVIOUS_NOTICE, "accepted")),
         ] {
             write_settings(&dir, saved_settings(false, consent));
             let runtime = Runtime::load(dir.clone()).unwrap();

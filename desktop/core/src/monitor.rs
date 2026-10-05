@@ -1,4 +1,5 @@
 use crate::claude_parser::is_subagent_transcript_path;
+use crate::delegation::{extend_bounded, DelegationEvent, DelegationTracker};
 use crate::model::{ResponseMetric, TurnMetric};
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
 use chrono::{DateTime, Duration, Utc};
@@ -45,6 +46,11 @@ pub struct Monitor {
     next_archive_index: usize,
     bytes_read_last_poll: usize,
     live_responses: Vec<ResponseMetric>,
+    /// Primary-turn and delegated-work events from every reader, until drained.
+    delegation_events: Vec<DelegationEvent>,
+    /// Codex rollouts hold primary sessions and their spawned children together, so this
+    /// monitor attributes delegated work itself. Claude's two monitors are joined by their owner.
+    delegation: Option<DelegationTracker>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -90,7 +96,23 @@ impl Monitor {
             next_archive_index: 0,
             bytes_read_last_poll: 0,
             live_responses: Vec::new(),
+            delegation_events: Vec::new(),
+            delegation: (format == JsonlFormat::Codex).then(DelegationTracker::new),
         }
+    }
+
+    /// Delegation events read since the last call. Codex monitors consume their own; this is for
+    /// the owner of a Claude monitor pair.
+    pub(crate) fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
+        std::mem::take(&mut self.delegation_events)
+    }
+
+    /// True while history is still being read (a replay reader or a tail not yet caught up),
+    /// so work of already emitted turns may not have been seen.
+    pub(crate) fn has_delegation_backlog(&self) -> bool {
+        self.files
+            .values()
+            .any(|file| file.archive.is_some() || !file.live.is_caught_up())
     }
 
     /// Qualifying responses the live (recent-tail) readers completed since the last call, in
@@ -144,6 +166,10 @@ impl Monitor {
             }
             let polled = file.live.poll(limit, now);
             self.live_responses.extend(file.live.take_responses());
+            extend_bounded(
+                &mut self.delegation_events,
+                file.live.take_delegation_events(),
+            );
             if let Ok(records) = polled {
                 live_records.extend(
                     records.into_iter().filter(|record| {
@@ -194,6 +220,12 @@ impl Monitor {
                         )
                     })
                 });
+                if let Some(archive) = file.archive.as_mut() {
+                    extend_bounded(
+                        &mut self.delegation_events,
+                        archive.take_delegation_events(),
+                    );
+                }
                 if let Some(Ok((records, bytes_read, is_done))) = archive_result {
                     if !file.live.is_caught_up() {
                         for record in &records {
@@ -226,6 +258,11 @@ impl Monitor {
         }
         self.bytes_read_last_poll = max_bytes - byte_budget;
         let mut records: Vec<TurnMetric> = unique.into_values().collect();
+        let backlog = self.has_delegation_backlog();
+        if let Some(tracker) = self.delegation.as_mut() {
+            let events = std::mem::take(&mut self.delegation_events);
+            records = tracker.apply(records, events, now, backlog);
+        }
         records.sort_by(|left, right| {
             right
                 .completed_at

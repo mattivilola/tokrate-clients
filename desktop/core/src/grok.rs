@@ -751,6 +751,8 @@ impl GrokSession {
             metric.response_output_tokens = response_output_tokens;
             metric.response_duration_seconds = response_duration_seconds;
             metric.response_count = response_count;
+            // Grok's ledger output already includes nested agent output: final at emission.
+            metric.delegated_output_tokens = Some(0);
             // A turn becomes immutable when first accepted. A later usage.json
             // rewrite must not create a second contribution with the same ID;
             // this matches the Swift monitor and backend's first-write dedupe.

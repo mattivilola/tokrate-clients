@@ -6,7 +6,7 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.15"
+    public let appVersion = "0.1.16"
     public let parserVersion: String
     public let metricVersion: String
     public let model: String
@@ -24,6 +24,11 @@ public struct SharedSample: Encodable, Sendable {
     public let responseCount: Int?
     /// Amazon Bedrock inference-profile region; null for every other provider.
     public let providerRegion: String?
+    /// Output tokens of subagent work a primary turn started, beyond `outputTokens`. Always sent, null
+    /// for subagent records. A primary turn is shared only once this total is final.
+    public let delegatedOutputTokens: Int?
+    /// Largest accepted delegated total (the same bound the server enforces).
+    public static let maximumDelegatedOutputTokens = 100_000_000
     /// A response faster than this is a measurement error, not a model.
     public static let maximumResponseTPS = 2_000.0
     public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
@@ -34,7 +39,8 @@ public struct SharedSample: Encodable, Sendable {
         guard metric.isSupportedSourceTuple,
               !["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion),
               Self.isAllowedProvider(metric.provider, client: metric.client),
-              (metric.client != "grok-build" || metric.clientVersion == nil || metric.clientVersion == "unknown")
+              (metric.client != "grok-build" || metric.clientVersion == nil || metric.clientVersion == "unknown"),
+              metric.isDelegationFinal
         else { return nil }
         guard duration.isFinite, (1...86_400_000).contains(duration),
               (0...10_000_000).contains(metric.outputTokens) else { return nil }
@@ -46,6 +52,13 @@ public struct SharedSample: Encodable, Sendable {
         metricVersion = metric.metricVersion
         model = Self.safeIdentifier(metric.model, maximum: 80) ?? "unknown"
         sourceKind = ["primary", "subagent"].contains(metric.sourceKind ?? "") ? metric.sourceKind! : "unknown"
+        if sourceKind == "primary" {
+            guard let delegated = metric.delegatedOutputTokens,
+                  (0...Self.maximumDelegatedOutputTokens).contains(delegated) else { return nil }
+            delegatedOutputTokens = delegated
+        } else {
+            delegatedOutputTokens = nil
+        }
         provider = metric.provider ?? "unknown"
         reasoningEffort = metric.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown"
         outputTokens = metric.outputTokens
@@ -84,7 +97,7 @@ public struct SharedSample: Encodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, reasoningEffort, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
-        case responseOutputTokens, responseDurationMs, responseCount, providerRegion
+        case responseOutputTokens, responseDurationMs, responseCount, providerRegion, delegatedOutputTokens
     }
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -107,6 +120,7 @@ public struct SharedSample: Encodable, Sendable {
         try container.encode(responseDurationMs, forKey: .responseDurationMs)
         try container.encode(responseCount, forKey: .responseCount)
         try container.encode(providerRegion, forKey: .providerRegion)
+        try container.encode(delegatedOutputTokens, forKey: .delegatedOutputTokens)
     }
 
     private static func safeIdentifier(_ value: String?, maximum: Int) -> String? {

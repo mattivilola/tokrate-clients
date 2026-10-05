@@ -69,6 +69,49 @@ final class PreviewRenderTests: XCTestCase {
             render(HistoryView(store: history.store, updates: history.updates).frame(width: 960, height: 1100), dark: dark, to: output, name: "history-compare-all-\(mode)", fixedSize: CGSize(width: 960, height: 1100))
             history.store.stopMonitoring()
 
+            // Efficiency indicator: popover chart, compact comparison and the history window comparison.
+            let efficiencyRecords = PreviewData.records()
+            let efficiencySnapshot = DashboardSnapshot(records: efficiencyRecords, range: .week, selection: .cohort(ModelCohort(efficiencyRecords[0])))
+            let efficiencyDay = DashboardSnapshot(records: efficiencyRecords, range: .day, selection: .cohort(ModelCohort(efficiencyRecords[0])))
+            let allSnapshot = DashboardSnapshot(records: efficiencyRecords, range: .week, selection: .all)
+            let codexRecords = efficiencyRecords.filter { $0.client == "codex" }
+            let codexSnapshot = DashboardSnapshot(records: efficiencyRecords, range: .week, selection: .cohort(ModelCohort(codexRecords[0])))
+            render(
+                VStack(alignment: .leading, spacing: 14) {
+                    TrendChartView(snapshot: efficiencySnapshot, range: .constant(.week), compact: true, initialMetric: .efficiency)
+                    Divider()
+                    TrendChartView(snapshot: efficiencyDay, range: .constant(.day), compact: true, initialMetric: .efficiency)
+                    Divider()
+                    TrendChartView(snapshot: codexSnapshot, range: .constant(.week), compact: true, initialMetric: .responseSpeed)
+                    Divider()
+                    SummaryView(snapshot: efficiencySnapshot, compact: true)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "efficiency-chart-\(mode)"
+            )
+            render(
+                CohortComparisonView(snapshot: allSnapshot, range: .constant(.day), initialMetric: .efficiency, compact: true)
+                    .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "efficiency-compare-\(mode)"
+            )
+            render(
+                CohortComparisonView(snapshot: allSnapshot, range: .constant(.week), initialMetric: .efficiency, compact: false)
+                    .padding(24).frame(width: 720).background(DashboardStyle.bg),
+                dark: dark, to: output, name: "efficiency-compare-window-\(mode)"
+            )
+            render(
+                EfficiencyListView(rows: allSnapshot.efficiencyRows, reference: allSnapshot.efficiencyReference, expanded: Set(allSnapshot.efficiencyRows.map(\.id)))
+                    .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "efficiency-compare-expanded-\(mode)"
+            )
+            // Not enough data: nothing reaches the 20-request reference.
+            let sparse = Array(PreviewData.records().filter { $0.client == "grok-build" || $0.sourceKind == "subagent" })
+            render(
+                CohortComparisonView(snapshot: DashboardSnapshot(records: sparse, range: .day, selection: .all), range: .constant(.day), initialMetric: .efficiency, compact: true)
+                    .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "efficiency-compare-sparse-\(mode)"
+            )
+
             // Gauge states and brand.
             let first = PreviewData.series[0]
             let cohort = ModelCohort(model: first.model, provider: first.provider, clientVersion: first.clientVersion, reasoningEffort: first.effort, client: first.client, parserVersion: first.parser, metricVersion: first.metric)
@@ -186,14 +229,19 @@ enum PreviewData {
         let ttft: Bool
         /// Response speed relative to turn speed; nil for sources without per-response timing.
         var responseFactor: Double? = 1.9
+        /// Output tokens per turn: `tokenFloor` plus up to `tokenSpan`.
+        var tokenFloor = 220
+        var tokenSpan = 1_800
+        /// Share of a primary turn's output that subagents add on top; subagent records carry none.
+        var delegatedShare = 0.0
     }
 
     static let series: [Series] = [
-        Series(model: "claude-opus-4-1", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v4", metric: "claude-observed-turn-v1", sourceKind: "primary", effort: "high", base: 58, spread: 14, turns: 70, ttft: false),
+        Series(model: "claude-opus-4-1", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v4", metric: "claude-observed-turn-v1", sourceKind: "primary", effort: "high", base: 58, spread: 14, turns: 70, ttft: false, tokenFloor: 900, tokenSpan: 3_600, delegatedShare: 0.35),
         Series(model: "claude-sonnet-4-5", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v4", metric: "claude-observed-subagent-turn-v1", sourceKind: "subagent", effort: nil, base: 112, spread: 28, turns: 36, ttft: false),
-        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v2", metric: "turn-v1", sourceKind: "primary", effort: "medium", base: 74, spread: 16, turns: 55, ttft: true),
-        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v2", metric: "turn-v1", sourceKind: "primary", effort: "high", base: 48, spread: 12, turns: 24, ttft: true),
-        Series(model: "grok-code-fast-1", provider: "xai", client: "grok-build", clientVersion: "unknown", parser: "grok-session-v1", metric: "grok-observed-work-turn-v1", sourceKind: "primary", effort: nil, base: 131, spread: 32, turns: 18, ttft: false, responseFactor: nil)
+        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v2", metric: "turn-v1", sourceKind: "primary", effort: "medium", base: 74, spread: 16, turns: 55, ttft: true, tokenFloor: 380, tokenSpan: 1_300),
+        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v2", metric: "turn-v1", sourceKind: "primary", effort: "high", base: 48, spread: 12, turns: 24, ttft: true, tokenFloor: 1_100, tokenSpan: 2_400),
+        Series(model: "grok-code-fast-1", provider: "xai", client: "grok-build", clientVersion: "unknown", parser: "grok-session-v1", metric: "grok-observed-work-turn-v1", sourceKind: "primary", effort: nil, base: 131, spread: 32, turns: 18, ttft: false, responseFactor: nil, delegatedShare: 0.0)
     ]
 
     /// Deterministic synthetic turns spread over seven days. The first series' latest turn lands two
@@ -211,7 +259,7 @@ enum PreviewData {
                 var speed = max(8, item.base + noise)
                 if slowLatest, seriesIndex == 0, hoursAgo < 24 { speed *= 0.5 }
                 if seriesIndex == 0, turn == 0 { speed = slowLatest ? 27.5 : 62.4 }
-                let tokens = 220 + Int(generator.next() * 1_800)
+                let tokens = item.tokenFloor + Int(generator.next() * Double(item.tokenSpan))
                 let responseTokens = item.responseFactor.map { _ in Int(Double(tokens) * 0.9) }
                 let responseSpeed = item.responseFactor.map { speed * $0 }
                 records.append(TurnMetric(
@@ -231,7 +279,9 @@ enum PreviewData {
                     reasoningEffort: item.effort,
                     responseOutputTokens: responseTokens,
                     responseDurationSeconds: responseTokens.flatMap { tokens in responseSpeed.map { Double(tokens) / $0 } },
-                    responseCount: responseTokens == nil ? nil : 1 + turn % 5
+                    responseCount: responseTokens == nil ? nil : 1 + turn % 5,
+                    // Primary turns are final (Grok: always 0); subagent records have nothing to attribute.
+                    delegatedOutputTokens: item.sourceKind == "primary" ? Int(Double(tokens) * item.delegatedShare * (turn % 3 == 0 ? 2 : 0.5)) : nil
                 ))
             }
         }

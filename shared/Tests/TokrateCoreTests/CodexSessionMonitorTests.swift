@@ -96,7 +96,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         let monitor = CodexSessionMonitor(root: directory)
         var emitted: [TurnMetric] = []
         for _ in 0..<10 { emitted += try await monitor.poll().metrics }
-        XCTAssertEqual(emitted.count, 1, "the live tail emitted nothing; only the archive reader measured the turn")
+        XCTAssertEqual(emitted.filter { $0.delegatedOutputTokens == nil }.count, 1, "the live tail emitted nothing; only the archive reader measured the turn")
         XCTAssertEqual(emitted.first?.model, "reported-model")
         XCTAssertEqual(emitted.first?.outputTokens, 555)
     }
@@ -139,7 +139,9 @@ final class CodexSessionMonitorTests: XCTestCase {
             laterMetrics += update.metrics
             laterResponses += update.responses
         }
-        XCTAssertEqual(laterMetrics.map(\.outputTokens), [600])
+        // The settled re-emission carries the turns again (same ids) once their delegated total is final.
+        XCTAssertEqual(Set(laterMetrics.map(\.outputTokens)), [500, 600])
+        XCTAssertEqual(laterMetrics.filter { $0.delegatedOutputTokens == nil }.map(\.outputTokens), [600])
         XCTAssertEqual(laterResponses.map(\.id), ["mon-session|resp-later"])
     }
 

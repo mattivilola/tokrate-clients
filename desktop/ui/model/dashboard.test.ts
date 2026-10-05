@@ -12,6 +12,8 @@ import { pickerLabel } from "../components/Header";
 import { heroCaption } from "../components/Hero";
 import { chartCopy } from "../components/Trend";
 import { buildDashboard, communityLine } from "./dashboard";
+import { DELEGATED_NOTICE, buildSentExample } from "../components/SharingChoice";
+import { EFFICIENCY_EXPLANATION, EFFICIENCY_INSUFFICIENT } from "../metrics";
 import { PROVIDER_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
 import { niceCeil } from "../components/TrendChart";
@@ -390,5 +392,98 @@ describe("response speed model rows", () => {
   it("scales the response gauge by the largest model median", () => {
     const d = buildDashboard(input(records));
     expect(d.gaugeMax).toBe(niceScaleMax(120));
+  });
+});
+
+describe("efficiency indicator", () => {
+  const eff = (id: string, minutesAgo: number, tokens: number, p: Partial<Metric> = {}) =>
+    turn(id, minutesAgo, 50, {
+      sourceKind: "primary",
+      client: "codex",
+      outputTokens: tokens,
+      delegatedOutputTokens: 0,
+      ...p,
+    });
+  const batch = (model: string, tokens: number, count: number, p: Partial<Metric> = {}) =>
+    Array.from({ length: count }, (_, i) => eff(`${model}${i}`, 5 + i * 20, tokens, { model, ...p }));
+  // Newest turn belongs to model-a, which spends twice the tokens of the median.
+  const records = [...batch("model-a", 2000, 20), ...batch("model-b", 1000, 20), ...batch("model-c", 500, 20)];
+
+  it("scores every model against the whole 7-day history and keeps response speed as the hero", () => {
+    const d = buildDashboard(input(records));
+    expect(d.efficiency.reference?.median).toBe(1000);
+    expect(d.efficiency.rows.map((r) => [r.model, r.indicator]).sort()).toEqual([
+      ["model-a", 50],
+      ["model-b", 100],
+      ["model-c", 200],
+    ]);
+    expect(d.efficiency.selected?.model).toBe("model-a");
+    expect(d.hero.source).toBeNull();
+  });
+  it("does not change with the 24 h / 7 d range or the selected model", () => {
+    const day = buildDashboard(input(records, { days: 1 }));
+    const week = buildDashboard(input(records, { days: 7 }));
+    expect(day.efficiency.rows).toEqual(week.efficiency.rows);
+    const pinned = buildDashboard(input(records, { selection: "model:" + JSON.stringify(["model-c", "openai"]) }));
+    expect(pinned.efficiency.selected?.indicator).toBe(200);
+    expect(pinned.efficiency.reference?.median).toBe(1000);
+  });
+  it("applies the coding-tool filter to the population", () => {
+    const mixed = [...records, ...batch("claude-x", 4000, 20, { client: "claude-code", provider: "anthropic" })];
+    expect(buildDashboard(input(mixed, { tool: "codex" })).efficiency.rows).toHaveLength(3);
+    expect(buildDashboard(input(mixed)).efficiency.rows).toHaveLength(4);
+  });
+  it("excludes subagent records, turns without a final delegated value and trivial turns", () => {
+    const noise = [
+      eff("sub", 3, 5000, { sourceKind: "subagent", delegatedOutputTokens: null }),
+      eff("pending", 4, 5000, { delegatedOutputTokens: null }),
+      eff("tiny", 6, 150),
+    ];
+    const d = buildDashboard(input([...records, ...noise]));
+    expect(d.efficiency.reference?.turns).toBe(60);
+  });
+  it("shows progress instead of a value below 20 requests and says so when nothing qualifies", () => {
+    const d = buildDashboard(input(batch("model-a", 1000, 12)));
+    expect(d.efficiency.rows[0]).toMatchObject({ turns: 12, indicator: null });
+    expect(d.efficiency.reference).toBeNull();
+    const copy = chartCopy(d, "efficiency");
+    expect(copy.empty).toBe(EFFICIENCY_INSUFFICIENT);
+    expect(copy.summary).toMatchObject({ median: null, count: 12 });
+  });
+  it("offers Efficiency as a chart metric with an unlabelled unit and whole-number values", () => {
+    const d = buildDashboard(input(records));
+    expect(chartCopy(d, "efficiency")).toMatchObject({
+      metric: "efficiency",
+      title: "Efficiency indicator",
+      unit: "",
+      digits: 0,
+      noun: "request",
+      summary: { median: 50, count: 20 },
+    });
+    expect(chartCopy(d, "response").digits).toBe(1);
+  });
+  it("charts tokens per request for all models", () => {
+    const d = buildDashboard(input(records, { selection: "all", days: 7 }));
+    expect(d.efficiency.unit).toBe("tokens/request");
+    expect(chartCopy(d, "efficiency").unit).toBe("tokens/request");
+    expect(d.efficiency.buckets.some((b) => b.value === 1000)).toBe(true);
+  });
+  it("explains the indicator with the exact local copy", () => {
+    expect(EFFICIENCY_EXPLANATION).toBe(
+      "The efficiency indicator compares the median output tokens a model spends to finish one of your requests (reasoning and delegated subagent work included) with the median across all your requests in the last 7 days. 100 is typical; 200 means half the tokens. It is an indicator, not a benchmark: it depends on what you ask each model to do, requests under 200 tokens are left out, and answer quality is not measured.",
+    );
+    expect(EFFICIENCY_INSUFFICIENT).toBe(
+      "Not enough requests yet: the efficiency indicator needs 20 eligible requests per model.",
+    );
+  });
+});
+
+describe("sharing notice", () => {
+  it("shows delegated output tokens in the example payload and the notice", () => {
+    const sample = JSON.parse(buildSentExample()).samples[0];
+    expect(sample).toHaveProperty("delegatedOutputTokens");
+    expect(DELEGATED_NOTICE).toBe(
+      "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator.",
+    );
   });
 });

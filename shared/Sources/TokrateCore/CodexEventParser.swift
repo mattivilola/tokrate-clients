@@ -4,6 +4,10 @@ import Foundation
 
 /// Reads the observed Codex JSONL event shape and emits completed-turn metrics only.
 /// Message bodies, prompts, account metadata, and session identifiers are never returned.
+///
+/// Sessions spawned by another session (`source.subagent.thread_spawn`) are read only to report their
+/// turns as delegated work (see `DelegationEvent`); they emit no metric and no live response. Every
+/// other agent session is skipped.
 public struct CodexEventParser: Sendable {
     private struct TurnState: Sendable {
         var startedAt: Date?
@@ -29,6 +33,11 @@ public struct CodexEventParser: Sendable {
     private var turns: [String: TurnState] = [:]
     private var emittedTurnIDs: Set<String> = []
     private var isAgentSession = false
+    /// Attribution key of the root session a spawned child session works for, once its metadata names one.
+    private var delegatedRootKey: String?
+    /// Attribution key of this session's own root, set for non-agent sessions.
+    private var primaryRootKey: String?
+    private var delegationEvents: [DelegationEvent] = []
     private var clientVersion: String?
     private var sourceKind = "unknown"
     private var provider = "unknown"
@@ -39,7 +48,10 @@ public struct CodexEventParser: Sendable {
     private var responseStartedAt: Date?
     private var completedResponses: [LiveResponse] = []
 
-    var excludesSessionFromMetrics: Bool { isAgentSession }
+    /// An agent session that is not delegated work has nothing to read at all.
+    var isSkippedSession: Bool { isAgentSession && delegatedRootKey == nil }
+    /// A spawned child session, read in full for its work items only.
+    var isDelegatedWork: Bool { delegatedRootKey != nil }
 
     public init(sourceIdentity: String) {
         self.sourceIdentity = sourceIdentity
@@ -52,6 +64,8 @@ public struct CodexEventParser: Sendable {
         turns.removeAll(keepingCapacity: true)
         emittedTurnIDs.removeAll(keepingCapacity: true)
         isAgentSession = false
+        delegatedRootKey = nil
+        primaryRootKey = nil
         clientVersion = nil
         sourceKind = "unknown"
         provider = "unknown"
@@ -64,6 +78,12 @@ public struct CodexEventParser: Sendable {
     mutating func drainCompletedResponses() -> [LiveResponse] {
         defer { completedResponses.removeAll(keepingCapacity: true) }
         return completedResponses
+    }
+
+    /// Delegated-work events since the last call.
+    mutating func drainDelegationEvents() -> [DelegationEvent] {
+        defer { delegationEvents.removeAll(keepingCapacity: true) }
+        return delegationEvents
     }
 
     /// Consumes one complete JSONL line. Malformed, unsupported, and incomplete events are ignored.
@@ -84,6 +104,16 @@ public struct CodexEventParser: Sendable {
             if let parent = payload["parent_thread_id"] as? String, !parent.isEmpty { isAgentSession = true }
             if let path = payload["agent_path"] as? String, !path.isEmpty { isAgentSession = true }
             if let path = payload["agent_path"] as? [Any], !path.isEmpty { isAgentSession = true }
+            // Children's `session_id` is the root thread; the parent thread is the fallback.
+            let rootID = Self.nonEmpty(payload["session_id"] as? String)
+            if isAgentSession {
+                let spawn = ((payload["source"] as? [String: Any])?["subagent"] as? [String: Any])?["thread_spawn"]
+                if spawn is [String: Any], let root = rootID ?? Self.nonEmpty(payload["parent_thread_id"] as? String) {
+                    delegatedRootKey = DelegationRoot.key(client: TurnMetric.codexClient, rawSessionID: root)
+                }
+            } else if let root = rootID ?? Self.nonEmpty(payload["id"] as? String) {
+                primaryRootKey = DelegationRoot.key(client: TurnMetric.codexClient, rawSessionID: root)
+            }
             return nil
         }
 
@@ -132,6 +162,15 @@ public struct CodexEventParser: Sendable {
             state.startObserved = true
             if state.startedAt == nil { state.startedAt = parseDate(payload["started_at"]) ?? eventDate }
             turns[turnID] = state
+            if let root = delegatedRootKey, let startedAt = state.startedAt {
+                delegationEvents.append(.workStarted(id: workID(turnID), root: root, startedAt: startedAt))
+            }
+            return nil
+        }
+
+        if subtype == "turn_aborted", delegatedRootKey != nil {
+            turns.removeValue(forKey: turnID)
+            delegationEvents.append(.workDiscarded(id: workID(turnID)))
             return nil
         }
 
@@ -148,6 +187,16 @@ public struct CodexEventParser: Sendable {
             ?? state.startedAt.flatMap { start in completedAt.map { $0.timeIntervalSince(start) } }
         // A completion whose start was never observed (the reader began mid-turn) may carry no
         // turn_context, so its model and effort would be wrong; it emits nothing.
+        if delegatedRootKey != nil {
+            turns.removeValue(forKey: turnID)
+            // Only a complete turn with a final output total is work; the rest is discarded.
+            if state.startObserved, let outputTokens = state.outputTokens, let completedAt {
+                delegationEvents.append(.workFinished(id: workID(turnID), outputTokens: outputTokens, finishedAt: completedAt))
+            } else {
+                delegationEvents.append(.workDiscarded(id: workID(turnID)))
+            }
+            return nil
+        }
         guard !isAgentSession,
               state.startObserved,
               !emittedTurnIDs.contains(turnID),
@@ -175,10 +224,10 @@ public struct CodexEventParser: Sendable {
 
         emittedTurnIDs.insert(turnID)
         turns.removeValue(forKey: turnID)
-        let identity = sessionIdentity ?? sourceIdentity
-        let digest = SHA256.hash(data: Data("\(identity)|\(turnID)".utf8))
+        let id = workID(turnID)
+        if let root = primaryRootKey { delegationEvents.append(.primaryTurn(turnID: id, root: root)) }
         return TurnMetric(
-            id: digest.map { String(format: "%02x", $0) }.joined(),
+            id: id,
             completedAt: completedAt,
             model: state.modelWasAmbiguous ? nil : state.model,
             outputTokens: outputTokens,
@@ -198,6 +247,16 @@ public struct CodexEventParser: Sendable {
             responseDurationSeconds: state.responseCount > 0 ? state.responseSeconds : nil,
             responseCount: state.responseCount > 0 ? state.responseCount : nil
         )
+    }
+
+    /// The local pseudonym of one turn: a metric id for a primary turn, a work id for a child's.
+    private func workID(_ turnID: String) -> String {
+        let identity = sessionIdentity ?? sourceIdentity
+        return SHA256.hash(data: Data("\(identity)|\(turnID)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        value.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Tracks which record the next response answers. Model output items fix the response's start;

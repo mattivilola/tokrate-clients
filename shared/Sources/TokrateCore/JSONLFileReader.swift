@@ -13,7 +13,10 @@ public struct JSONLFileReader: Sendable {
 
     public private(set) var bytesReadLastPoll = 0
     public private(set) var isCaughtUp = false
-    var excludesSessionFromMetrics: Bool { parser.excludesSessionFromMetrics }
+    /// The session is an agent session that is not delegated work: nothing in it is read.
+    var isSkippedSession: Bool { parser.isSkippedSession }
+    /// The session is a spawned child, read in full for its delegated work items only.
+    var isDelegatedWork: Bool { parser.isDelegatedWork }
     private enum TailStartup: Sendable { case header, alignment, unavailable }
     private let tailByteLimit: Int?
     private var tailStartup: TailStartup?
@@ -55,14 +58,15 @@ public struct JSONLFileReader: Sendable {
             isCaughtUp = false
         }
         fileNumber = currentNumber
-        if parser.excludesSessionFromMetrics {
+        if parser.isSkippedSession {
             offset = currentSize
             isCaughtUp = true
             return []
         }
         if tailStartup == .unavailable { isCaughtUp = true; return [] }
         guard currentSize > offset else {
-            isCaughtUp = tailStartup == nil
+            // An empty file has no history to wait for, whatever its startup phase.
+            isCaughtUp = tailStartup == nil || currentSize == 0
             return []
         }
         if tailStartup == .header {
@@ -141,10 +145,17 @@ public struct JSONLFileReader: Sendable {
             return
         }
         _ = parser.consume(line: line)
-        if parser.excludesSessionFromMetrics {
+        if parser.isSkippedSession {
             offset = currentSize
             tailStartup = nil
             isCaughtUp = true
+            return
+        }
+        // Delegated work is read from its first line: a turn whose start is missed is not counted.
+        if parser.isDelegatedWork {
+            offset = headerEnd
+            tailStartup = nil
+            isCaughtUp = offset >= currentSize
             return
         }
         let tailStart = currentSize > UInt64(tailByteLimit ?? 0) ? currentSize - UInt64(tailByteLimit ?? 0) : 0
@@ -155,6 +166,9 @@ public struct JSONLFileReader: Sendable {
 
     /// Qualifying responses completed since the last call.
     public mutating func drainResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
+
+    /// Delegated-work events since the last call.
+    mutating func drainDelegation() -> [DelegationEvent] { parser.drainDelegationEvents() }
 
     /// Drops buffered state and restores the configured beginning/tail start position.
     public mutating func reset() {

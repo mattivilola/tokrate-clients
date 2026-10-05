@@ -7,8 +7,8 @@ struct TrendRun: Identifiable, Equatable {
     let id: Int
     let points: [DashboardSnapshot.Bucket]
 
-    static func runs(from points: [DashboardSnapshot.Bucket], range: DashboardRange) -> [TrendRun] {
-        let width = range.duration / Double(range.bucketCount)
+    static func runs(from points: [DashboardSnapshot.Bucket], range: DashboardRange, bucketCount: Int? = nil) -> [TrendRun] {
+        let width = range.duration / Double(bucketCount ?? range.bucketCount)
         var runs: [[DashboardSnapshot.Bucket]] = []
         for point in points.sorted(by: { $0.date < $1.date }) {
             if let last = runs.last?.last, point.date.timeIntervalSince(last.date) <= width * 2.5 {
@@ -27,13 +27,14 @@ extension DashboardSnapshot.Bucket: Equatable {
 
 /// The speed the trend chart plots. Until the user picks one, the chart is automatic.
 enum TrendMetric: String, CaseIterable, Identifiable {
-    case responseSpeed, turnSpeed, firstToken
+    case responseSpeed, turnSpeed, firstToken, efficiency
     var id: String { rawValue }
     var shortTitle: String {
         switch self {
         case .responseSpeed: "Response"
         case .turnSpeed: "Turn"
         case .firstToken: "First token"
+        case .efficiency: EfficiencyCopy.shortTitle
         }
     }
 }
@@ -51,8 +52,32 @@ struct TrendSeries {
     let definition: String
     let help: String
     let accessibilitySubject: String
+    /// Bucket count of the plotted points, when it differs from the range's speed buckets.
+    var bucketCount: Int?
+    /// Replaces the median/min/max line for a series that is not a speed range (the efficiency indicator).
+    var summary: Summary?
+
+    struct Summary {
+        let line: String
+        let accessibility: String
+    }
 
     func value(_ number: Double?) -> String { number.map { String(format: "%.*f", digits, $0) } ?? "—" }
+
+    /// The line under the chart: the range's median, min, max and count, or the definition without data.
+    func statsLine(range: DashboardRange) -> String {
+        if let summary { return summary.line }
+        guard stats.count > 0 else { return definition }
+        return "\(range.shortTitle) median \(value(stats.median)) \(unit) · min \(value(stats.minimum)) · max \(value(stats.maximum)) · n=\(stats.count)"
+    }
+
+    func statsAccessibility(range: DashboardRange) -> String {
+        if let summary { return summary.accessibility }
+        guard stats.count > 0 else { return "No completed measurements in this range" }
+        let spokenUnit = metric == .firstToken ? "seconds" : "tokens per second"
+        func spoken(_ number: Double?) -> String { number.map { String(format: "%.*f", digits, $0) } ?? "unavailable" }
+        return "\(range.title) median \(spoken(stats.median)) \(spokenUnit), minimum \(spoken(stats.minimum)), maximum \(spoken(stats.maximum)), \(stats.count) turns"
+    }
 }
 
 extension DashboardSnapshot {
@@ -123,7 +148,41 @@ extension DashboardSnapshot {
                 help: "Median Codex-reported first-token wait in each time interval. First-visible-text semantics are unverified.",
                 accessibilitySubject: "first-token wait, in seconds"
             )
+        case .efficiency:
+            return efficiencySeries
         }
+    }
+}
+
+extension DashboardSnapshot {
+    /// The indicator of the selected model and effort over the whole 7-day history, plotted per bucket
+    /// of the range. Unitless: no "%" and no "tok/s".
+    fileprivate var efficiencySeries: TrendSeries {
+        let selected = efficiencySelected
+        let summary: TrendSeries.Summary
+        if let selected, let indicator = selected.indicator {
+            summary = .init(
+                line: "\(indicator) indicator · \(EfficiencyCopy.requestCount(selected.turns)) in 7 d",
+                accessibility: "Efficiency indicator \(indicator), 100 is a typical request, \(EfficiencyCopy.requestCount(selected.turns)) in seven days"
+            )
+        } else if let selected {
+            summary = .init(
+                line: "\(EfficiencyCopy.requestsOfFloor(selected.turns)) in 7 d",
+                accessibility: "\(EfficiencyCopy.requestsOfFloor(selected.turns)) in seven days, no indicator yet"
+            )
+        } else {
+            summary = .init(line: EfficiencyCopy.definition, accessibility: "No efficiency indicator yet")
+        }
+        return TrendSeries(
+            metric: .efficiency, title: EfficiencyCopy.title, axisName: EfficiencyCopy.title,
+            points: efficiencyPoints, stats: MetricStats(values: efficiencyPoints.map(\.median)), unit: "", digits: 0,
+            emptyText: selected?.indicator != nil ? "Not enough requests in this range" : EfficiencyCopy.insufficient,
+            definition: EfficiencyCopy.definition,
+            help: EfficiencyCopy.chartHelp,
+            accessibilitySubject: "efficiency indicator, 100 is a typical request",
+            bucketCount: range.efficiencyBucketCount,
+            summary: summary
+        )
     }
 }
 
@@ -133,6 +192,13 @@ struct TrendChartView: View {
     var compact = true
     /// nil until the user picks a metric: the chart then follows what the model has data for.
     @State private var selectedMetric: TrendMetric?
+
+    init(snapshot: DashboardSnapshot, range: Binding<DashboardRange>, compact: Bool = true, initialMetric: TrendMetric? = nil) {
+        self.snapshot = snapshot
+        _range = range
+        self.compact = compact
+        _selectedMetric = State(initialValue: initialMetric)
+    }
 
     var body: some View {
         if compact {
@@ -154,12 +220,12 @@ struct TrendChartView: View {
             }
             metricPicker(series)
             chart(series)
-            Text(statsLine(series))
+            Text(series.statsLine(range: range))
                 .font(DashboardStyle.Typography.caption.monospacedDigit())
                 .foregroundStyle(DashboardStyle.muted)
                 .lineLimit(1).minimumScaleFactor(0.85)
                 .help(series.help)
-                .accessibilityLabel(statsAccessibility(series))
+                .accessibilityLabel(series.statsAccessibility(range: range))
         }
     }
 
@@ -170,7 +236,7 @@ struct TrendChartView: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .accessibilityLabel("Speed shown in the chart")
-        .help("Response speed excludes tools and your time; turn speed covers the whole turn.")
+        .help("Response speed excludes tools and your time; turn speed covers the whole turn; efficiency compares the output tokens a model spends per request.")
     }
 
     @ViewBuilder
@@ -185,7 +251,7 @@ struct TrendChartView: View {
             .frame(maxWidth: .infinity)
             .frame(height: compact ? 64 : 170)
         } else {
-            let runs = TrendRun.runs(from: series.points, range: range)
+            let runs = TrendRun.runs(from: series.points, range: range, bucketCount: series.bucketCount)
             Chart {
                 ForEach(runs) { run in
                     if run.points.count > 1 {
@@ -235,20 +301,8 @@ struct TrendChartView: View {
             }
             .frame(height: height)
             .accessibilityLabel("Local \(series.accessibilitySubject) over \(range == .day ? "24 hours" : "seven days")")
-            .accessibilityValue(statsAccessibility(series))
+            .accessibilityValue(series.statsAccessibility(range: range))
         }
-    }
-
-    private func statsLine(_ series: TrendSeries) -> String {
-        guard series.stats.count > 0 else { return series.definition }
-        return "\(range.shortTitle) median \(series.value(series.stats.median)) \(series.unit) · min \(series.value(series.stats.minimum)) · max \(series.value(series.stats.maximum)) · n=\(series.stats.count)"
-    }
-
-    private func statsAccessibility(_ series: TrendSeries) -> String {
-        guard series.stats.count > 0 else { return "No completed measurements in this range" }
-        let unit = series.metric == .firstToken ? "seconds" : "tokens per second"
-        func value(_ number: Double?) -> String { number.map { String(format: "%.*f", series.digits, $0) } ?? "unavailable" }
-        return "\(range.title) median \(value(series.stats.median)) \(unit), minimum \(value(series.stats.minimum)), maximum \(value(series.stats.maximum)), \(series.stats.count) turns"
     }
 }
 

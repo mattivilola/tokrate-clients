@@ -59,13 +59,20 @@ export function TrendChart({
   height,
   emptyMessage,
   ariaLabel,
+  digits = 1,
+  noun = "turn",
 }: {
   buckets: TrendBucket[];
+  /** Appended to tooltip values; empty for the unitless efficiency indicator. */
   unit: string;
   days: number;
   height: number;
   emptyMessage: string;
   ariaLabel: string;
+  /** Decimals of the tooltip value. */
+  digits?: number;
+  /** What one observation is called in the tooltip ("turn", "request"). */
+  noun?: string;
 }) {
   const [ref, width] = useWidth<HTMLDivElement>(348);
   const gradient = useId();
@@ -135,7 +142,7 @@ export function TrendChart({
   const point = active === null ? null : buckets[active];
   const pointText =
     point && point.value !== null
-      ? `${shortTime(point.at)} · ${num(point.value)} ${unit} · ${point.count} ${point.count === 1 ? "turn" : "turns"}`
+      ? `${shortTime(point.at)} · ${[num(point.value, digits), unit].filter(Boolean).join(" ")} · ${point.count} ${point.count === 1 ? noun : `${noun}s`}`
       : "";
   const labels =
     days === 1

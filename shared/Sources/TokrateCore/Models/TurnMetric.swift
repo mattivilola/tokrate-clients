@@ -35,6 +35,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// Inference-profile region of a Claude model routed through Amazon Bedrock (`us`, `eu`, `apac`,
     /// `global`, `jp`, `au`, `ca`, `us-gov`, or `unknown`). Nil for every other provider.
     public let providerRegion: String?
+    /// Output tokens of delegated subagent work started during this primary turn that are not already
+    /// part of `outputTokens` (contract "Delegated output"). Nil while the attribution is not final
+    /// and for records it does not apply to (subagent records, history saved before 0.1.16).
+    public let delegatedOutputTokens: Int?
     /// Generic name for the source-reported TTFT observation. The stored Codex name remains
     /// for backward compatibility with existing history files.
     /// Output tokens per second while the model was responding: tools and waiting excluded.
@@ -44,6 +48,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         let speed = Double(tokens) / seconds
         return speed.isFinite ? speed : nil
     }
+    /// A primary turn's delegated attribution is settled once its total is known; every other record
+    /// has nothing to wait for.
+    public var isDelegationFinal: Bool { sourceKind != "primary" || delegatedOutputTokens != nil }
     public var isSupportedSourceTuple: Bool {
         Self.isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
     }
@@ -124,7 +131,8 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         responseOutputTokens: Int? = nil,
         responseDurationSeconds: Double? = nil,
         responseCount: Int? = nil,
-        providerRegion: String? = nil
+        providerRegion: String? = nil,
+        delegatedOutputTokens: Int? = nil
     ) {
         // The three response fields travel together: a partial set carries no usable measurement.
         let hasResponse = responseOutputTokens.map { $0 > 0 } == true
@@ -134,6 +142,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         self.responseDurationSeconds = hasResponse ? responseDurationSeconds : nil
         self.responseCount = hasResponse ? responseCount : nil
         self.providerRegion = providerRegion
+        self.delegatedOutputTokens = delegatedOutputTokens
         self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         self.client = client
         self.clientVersion = clientVersion
@@ -156,7 +165,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         case reasoningEffort, id, completedAt, client, model, clientVersion, parserVersion, metricVersion
         case reasoningOutputTokens, sourceKind, provider, outputTokens, durationSeconds, codexTTFTSeconds
         case turnThroughputTPS, streamingTPS
-        case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion
+        case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion, delegatedOutputTokens
     }
 
     public init(from decoder: any Decoder) throws {
@@ -184,6 +193,8 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         responseDurationSeconds = try values.decodeIfPresent(Double.self, forKey: .responseDurationSeconds)
         responseCount = try values.decodeIfPresent(Int.self, forKey: .responseCount)
         providerRegion = try values.decodeIfPresent(String.self, forKey: .providerRegion)
+        // Records saved before 0.1.16 carry no delegated total: the attribution was never made.
+        delegatedOutputTokens = try values.decodeIfPresent(Int.self, forKey: .delegatedOutputTokens)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -208,6 +219,21 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encodeIfPresent(responseDurationSeconds, forKey: .responseDurationSeconds)
         try values.encodeIfPresent(responseCount, forKey: .responseCount)
         try values.encodeIfPresent(providerRegion, forKey: .providerRegion)
+        try values.encodeIfPresent(delegatedOutputTokens, forKey: .delegatedOutputTokens)
+    }
+
+    /// This record with its delegated total settled; the attribution re-emits the same id.
+    public func withDelegatedOutputTokens(_ tokens: Int?) -> TurnMetric {
+        TurnMetric(
+            id: id, completedAt: completedAt, model: model, outputTokens: outputTokens,
+            durationSeconds: durationSeconds, codexTTFTSeconds: codexTTFTSeconds,
+            turnThroughputTPS: turnThroughputTPS, streamingTPS: streamingTPS, client: client,
+            clientVersion: clientVersion, parserVersion: parserVersion, metricVersion: metricVersion,
+            reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
+            reasoningEffort: reasoningEffort, responseOutputTokens: responseOutputTokens,
+            responseDurationSeconds: responseDurationSeconds, responseCount: responseCount,
+            providerRegion: providerRegion, delegatedOutputTokens: tokens
+        )
     }
 }
 

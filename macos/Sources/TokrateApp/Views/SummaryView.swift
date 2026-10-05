@@ -39,10 +39,48 @@ struct SummaryView: View {
                     help: "Median and observed range of source-reported first-token wait; first-visible-text semantics are unverified."
                 )
             }
+            efficiency
             if let comparison = snapshot.localPeriodComparison {
                 localComparison(comparison)
             }
         }
+    }
+
+    /// The selected model and effort's efficiency indicator over the whole 7-day history, whatever
+    /// the range: the value, or how far it is from the 20-request floor.
+    private var efficiency: some View {
+        let selected = snapshot.efficiencySelected
+        return container {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("7 d · \(EfficiencyCopy.title)")
+                        .font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(DashboardStyle.muted)
+                    ChipView(text: EfficiencyCopy.badge, tone: .accent).fixedSize()
+                    Spacer(minLength: 0)
+                }
+                if let indicator = selected?.indicator {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text("\(indicator)")
+                            .font(DashboardStyle.Typography.value(size: 22)).monospacedDigit().foregroundStyle(DashboardStyle.ink)
+                        Text("indicator").font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
+                    }
+                } else {
+                    Text(EfficiencyCopy.requestsOfFloor(selected?.turns ?? 0))
+                        .font(DashboardStyle.Typography.value(size: 15)).monospacedDigit().foregroundStyle(DashboardStyle.ink)
+                }
+                if let selected {
+                    Text("median \(EfficiencyIndicator.compactTokens(selected.medianTokens)) \(EfficiencyCopy.tokensPerRequest) · middle half \(EfficiencyIndicator.compactTokens(selected.p25Tokens))–\(EfficiencyIndicator.compactTokens(selected.p75Tokens)) · n=\(selected.turns) requests")
+                        .font(DashboardStyle.Typography.caption.monospacedDigit()).foregroundStyle(DashboardStyle.muted)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+                Text(selected?.indicator == nil ? EfficiencyCopy.insufficient : EfficiencyCopy.definition)
+                    .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+        .help(EfficiencyCopy.explanation)
     }
 
     @ViewBuilder

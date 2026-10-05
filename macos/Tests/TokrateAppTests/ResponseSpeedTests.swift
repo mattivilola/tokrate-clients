@@ -293,7 +293,7 @@ final class ResponseSpeedTests: XCTestCase {
         XCTAssertEqual(comparison.last24Hours.response.median, 40)
         XCTAssertEqual(comparison.last24Hours.throughput.median, 10)
         XCTAssertEqual(snapshot.trendSeries(for: .responseSpeed).stats.count, snapshot.response.count)
-        XCTAssertEqual(snapshot.availableTrendMetrics, [.responseSpeed, .turnSpeed])
+        XCTAssertEqual(snapshot.availableTrendMetrics, [.responseSpeed, .turnSpeed, .efficiency])
         XCTAssertFalse(snapshot.responsePoints.isEmpty)
     }
 
@@ -340,7 +340,7 @@ final class ResponseSpeedTests: XCTestCase {
         let series = untimed.trendSeries(for: .responseSpeed)
         XCTAssertTrue(series.points.isEmpty)
         XCTAssertEqual(series.emptyText, "No response speed for these Grok Build turns: they were recorded before Tokrate 0.1.15.")
-        XCTAssertEqual(untimed.availableTrendMetrics, [.responseSpeed, .turnSpeed])
+        XCTAssertEqual(untimed.availableTrendMetrics, [.responseSpeed, .turnSpeed, .efficiency])
 
         let other = (0..<3).map { turn("o\($0)", secondsAgo: Double($0 + 1) * 600, responseSpeed: nil) }
         let otherSnapshot = DashboardSnapshot(records: other, range: .day, selection: .cohort(ModelCohort(other[0])), now: now)

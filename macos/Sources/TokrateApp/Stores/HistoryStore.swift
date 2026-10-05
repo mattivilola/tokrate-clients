@@ -274,8 +274,10 @@ final class HistoryStore {
                 let grokStatus = await grokMonitor.status()
                 self.updateSourceStatus(claude: claudeStatus, grok: grokStatus)
                 self.errorMessage = failures.isEmpty ? nil : "Could not read \(failures.joined(separator: ", ")). Check folder access and try again."
-                let existing = Set(self.history.records.map(\.id))
-                self.sharing.enqueue(newRecords.filter { !existing.contains($0.id) })
+                // A record is shared at most once, when it is both new to history and final: a primary
+                // turn arrives first without its delegated total, and its settled re-emission shares it.
+                let known = Dictionary(self.history.records.map { ($0.id, $0.isDelegationFinal) }, uniquingKeysWith: { first, _ in first })
+                self.sharing.enqueue(newRecords.filter { $0.isDelegationFinal && known[$0.id] != true })
                 self.history.prune()
                 for record in newRecords { self.history.upsert(record) }
                 if !newRecords.isEmpty { self.saveHistory() }

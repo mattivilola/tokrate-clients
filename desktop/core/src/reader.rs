@@ -1,4 +1,5 @@
 use crate::claude_parser::ClaudeTranscriptParser;
+use crate::delegation::{extend_bounded, DelegationEvent};
 use crate::model::{ResponseMetric, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
 use chrono::{DateTime, Utc};
@@ -62,6 +63,8 @@ pub(crate) struct IncrementalReader {
     /// Recent-tail readers keep the responses they complete; replay readers discard them.
     collect_responses: bool,
     responses: Vec<ResponseMetric>,
+    /// Every reader (tail and replay) reports delegation events; the monitor deduplicates.
+    delegation_events: Vec<DelegationEvent>,
 }
 
 impl IncrementalReader {
@@ -133,7 +136,13 @@ impl IncrementalReader {
             tail_bytes,
             collect_responses: tail_bytes.is_some(),
             responses: Vec::new(),
+            delegation_events: Vec::new(),
         }
+    }
+
+    /// Delegation events this reader produced since the last call.
+    pub fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
+        std::mem::take(&mut self.delegation_events)
     }
 
     /// Responses completed by this reader since the last call. Only the recent-tail (live)
@@ -151,7 +160,7 @@ impl IncrementalReader {
             let final_read = self.tail_bytes.is_none();
             records.extend(self.parser.flush_pending(now, final_read));
         }
-        self.collect_parser_responses();
+        self.collect_parser_output();
         Ok(records)
     }
 
@@ -302,7 +311,11 @@ impl IncrementalReader {
         Ok(bytes)
     }
 
-    fn collect_parser_responses(&mut self) {
+    fn collect_parser_output(&mut self) {
+        extend_bounded(
+            &mut self.delegation_events,
+            self.parser.take_delegation_events(),
+        );
         let responses = self.parser.take_responses();
         if self.collect_responses {
             self.responses.extend(responses);
