@@ -74,14 +74,21 @@ jobs:
           echo "flavor=unsigned-test-build" >> "$GITHUB_OUTPUT"
         working-directory: desktop
       - name: Linux native webview smoke
+        id: linux_smoke
         if: runner.os == 'Linux'
         env:
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          TOKRATE_SMOKE_DIAGNOSTIC: ${{ runner.temp }}/tokrate-native-smoke-${{ matrix.artifact }}.json
         run: xvfb-run -a dbus-run-session -- python3 desktop/scripts/native-smoke.py desktop/src-tauri/target/release/tokrate-desktop
       - name: Windows native webview smoke
+        id: windows_smoke
         if: runner.os == 'Windows'
+        env:
+          TOKRATE_SMOKE_DIAGNOSTIC: ${{ runner.temp }}/tokrate-native-smoke-${{ matrix.artifact }}.json
         run: python desktop/scripts/native-smoke.py desktop/src-tauri/target/release/tokrate-desktop.exe
-      - uses: actions/upload-artifact@v4
+      - name: Upload native installer packages
+        if: always() && (steps.bundle_release.outcome == 'success' || steps.bundle_pr.outcome == 'success')
+        uses: actions/upload-artifact@v4
         with:
           name: tokrate-0.1.15-${{ matrix.artifact }}-${{ steps.bundle_release.outputs.flavor || steps.bundle_pr.outputs.flavor }}
           path: |
@@ -89,4 +96,12 @@ jobs:
             desktop/src-tauri/target/release/bundle/deb/*
             desktop/src-tauri/target/release/bundle/appimage/*
           if-no-files-found: error
+          retention-days: 7
+      - name: Upload native smoke diagnostics
+        if: always() && (steps.linux_smoke.outcome == 'failure' || steps.windows_smoke.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokrate-native-smoke-diagnostics-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/tokrate-native-smoke-${{ matrix.artifact }}.json
+          if-no-files-found: warn
           retention-days: 7

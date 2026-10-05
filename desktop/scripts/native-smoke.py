@@ -40,6 +40,12 @@ with tempfile.TemporaryDirectory(prefix="tokrate-native-smoke-") as temporary:
                     "model_provider": "openai",
                 },
             },
+            # The parser fails closed unless this incremental reader saw the turn begin.
+            {
+                "type": "event_msg",
+                "timestamp": started_at,
+                "payload": {"type": "task_started", "turn_id": "fixture-turn"},
+            },
             {
                 "type": "turn_context",
                 "payload": {
@@ -113,7 +119,8 @@ with tempfile.TemporaryDirectory(prefix="tokrate-native-smoke-") as temporary:
                 "schema_version": "1.0",
                 "ts": started_at,
                 "session_id": session_id,
-                "turn_number": 1,
+                # Grok event turns are zero-based; the usage ledger below is one-based.
+                "turn_number": 0,
                 "model_id": "grok-fixture-model",
                 "session_relationship": "primary",
             },
@@ -158,11 +165,20 @@ with tempfile.TemporaryDirectory(prefix="tokrate-native-smoke-") as temporary:
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
         diagnostic = root / "smoke-state.json"
+        state = diagnostic.read_text() if diagnostic.exists() else "monitor never started"
         print(
             "Native smoke diagnostics:",
-            diagnostic.read_text() if diagnostic.exists() else "monitor never started",
+            state,
             flush=True,
         )
+        diagnostic_output = os.environ.get("TOKRATE_SMOKE_DIAGNOSTIC")
+        if diagnostic_output:
+            output = pathlib.Path(diagnostic_output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if diagnostic.exists():
+                output.write_text(state)
+            else:
+                output.write_text(json.dumps({"error": state}))
         raise
     result = json.loads((root / "smoke-result.json").read_text())
     assert result == {
