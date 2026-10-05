@@ -18,15 +18,22 @@ pub const RESPONSE_METRIC_VERSION: &str = "response-v1";
 pub const RESPONSE_MIN_OUTPUT_TOKENS: i64 = 200;
 /// Longer request-to-end spans are waits, not generation.
 pub const RESPONSE_MAX_DURATION_SECONDS: f64 = 600.0;
-/// No model streams faster than this; a larger implied response speed is a measurement error.
-pub const RESPONSE_MAX_TOKENS_PER_SECOND: f64 = 2_000.0;
+/// No model streams faster than this; a larger implied speed (of a response or a whole turn) is a
+/// measurement error.
+pub const MAX_TOKENS_PER_SECOND: f64 = 2_000.0;
 
-/// True when one API response is long and fast enough to be measured.
+/// True when `output_tokens` over `duration_seconds` is a physically possible speed.
+pub fn speed_is_plausible(output_tokens: i64, duration_seconds: f64) -> bool {
+    duration_seconds.is_finite()
+        && duration_seconds > 0.0
+        && output_tokens as f64 / duration_seconds <= MAX_TOKENS_PER_SECOND
+}
+
+/// True when one API response is long and fast enough to be measured, and not implausibly fast.
 pub fn response_qualifies(output_tokens: i64, duration_seconds: f64) -> bool {
     output_tokens >= RESPONSE_MIN_OUTPUT_TOKENS
-        && duration_seconds.is_finite()
-        && duration_seconds > 0.0
         && duration_seconds <= RESPONSE_MAX_DURATION_SECONDS
+        && speed_is_plausible(output_tokens, duration_seconds)
 }
 
 fn default_client() -> String {
@@ -144,6 +151,30 @@ impl ResponseMetric {
 }
 
 impl TurnMetric {
+    /// The whole-turn throughput is a possible speed; a record above the bound is a measurement
+    /// error and is neither kept nor shared.
+    pub fn turn_speed_is_plausible(&self) -> bool {
+        speed_is_plausible(self.output_tokens, self.duration_seconds)
+    }
+
+    /// The response fields as one `(tokens, seconds, count)` triple when they are all present and
+    /// consistent with each other and with the turn; `None` otherwise. They travel together or not
+    /// at all.
+    pub fn plausible_response_timing(&self) -> Option<(i64, f64, i64)> {
+        let (tokens, seconds, count) = (
+            self.response_output_tokens?,
+            self.response_duration_seconds?,
+            self.response_count?,
+        );
+        (count >= 1
+            && tokens >= RESPONSE_MIN_OUTPUT_TOKENS.saturating_mul(count)
+            && tokens <= self.output_tokens
+            && seconds <= self.duration_seconds
+            && seconds <= RESPONSE_MAX_DURATION_SECONDS * count as f64
+            && speed_is_plausible(tokens, seconds))
+        .then_some((tokens, seconds, count))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,

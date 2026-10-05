@@ -119,6 +119,78 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(metric.responseCount, 3)
     }
 
+    /// Real shape: Claude Code writes `deferred_tools_record` when the response arrives, in the same
+    /// millisecond as the response's first assistant record, which names it as its parent.
+    func testDeferredToolsRecordIsNotARequestTrigger() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try toolResult(at: 10.262))
+        _ = parser.consume(line: try attachment(at: 10.266, id: "reminder", type: "total_tokens_reminder", parent: "tool-result-10"))
+        _ = parser.consume(line: try attachment(at: 14.257, id: "deferred", type: "deferred_tools_record", parent: "reminder"))
+        _ = parser.consume(line: try assistant(at: 14.257, id: "X", output: 336, stop: "end_turn", blocks: ["thinking"], parent: "deferred"))
+        _ = parser.consume(line: try assistant(at: 14.259, id: "X", output: 336, stop: "end_turn", blocks: ["text"], parent: "record-X"))
+        let metric = try XCTUnwrap(terminal(&parser, Data()))
+        XCTAssertEqual(metric.responseCount, 1)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 3.993, accuracy: 0.001, "start is the reminder, not the deferred record")
+        XCTAssertEqual(try XCTUnwrap(metric.responseSpeedTPS), 336 / 3.993, accuracy: 0.1)
+        let live = try XCTUnwrap(parser.drainCompletedResponses().first)
+        XCTAssertEqual(live.durationSeconds, 3.993, accuracy: 0.001, "the live stream shares the corrected start")
+    }
+
+    func testDeferredToolsRecordWithAnUnknownParentFallsBackToTheLatestUserRecord() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try toolResult(at: 5))
+        _ = parser.consume(line: try attachment(at: 14, id: "deferred", type: "deferred_tools_record", parent: "never-seen"))
+        _ = parser.consume(line: try assistant(at: 14, id: "m1", output: 300, stop: "end_turn", parent: "deferred"))
+        let metric = try XCTUnwrap(terminal(&parser, Data()))
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 9, accuracy: 0.001, "timed from the tool result")
+    }
+
+    func testChainedDeferredToolsRecordsInheritTheFirstRealTrigger() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try attachment(at: 4, id: "reminder", type: "total_tokens_reminder"))
+        _ = parser.consume(line: try attachment(at: 12, id: "deferred-1", type: "deferred_tools_record", parent: "reminder"))
+        _ = parser.consume(line: try attachment(at: 12.001, id: "deferred-2", type: "deferred_tools_record", parent: "deferred-1"))
+        _ = parser.consume(line: try assistant(at: 12.002, id: "m1", output: 400, stop: "end_turn", parent: "deferred-2"))
+        let metric = try XCTUnwrap(terminal(&parser, Data()))
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 8.002, accuracy: 0.001)
+    }
+
+    func testSubagentResponsesIgnoreDeferredToolsRecordsToo() throws {
+        var parser = ClaudeSubagentTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "task", sidechain: true))
+        _ = parser.consume(line: try toolResult(at: 10, sidechain: true))
+        _ = parser.consume(line: try attachment(at: 15, id: "deferred", type: "deferred_tools_record", parent: "tool-result-10", sidechain: true))
+        _ = parser.consume(line: try assistant(at: 15, id: "s1", output: 500, stop: "end_turn", sidechain: true, parent: "deferred"))
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 5, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(parser.drainCompletedResponses().first).durationSeconds, 5, accuracy: 0.001)
+    }
+
+    func testResponseFasterThanTheSpeedBoundNeverQualifiesAndSuchATurnIsNotEmitted() throws {
+        XCTAssertFalse(ResponseSpeed.qualifies(outputTokens: 2_001, durationSeconds: 1))
+        XCTAssertTrue(ResponseSpeed.qualifies(outputTokens: 2_000, durationSeconds: 1))
+        XCTAssertFalse(ResponseSpeed.qualifies(outputTokens: 336, durationSeconds: 0.002))
+        XCTAssertFalse(ResponseSpeed.isPlausibleTurnThroughput(outputTokens: 2_001, durationSeconds: 1))
+        XCTAssertTrue(ResponseSpeed.isPlausibleTurnThroughput(outputTokens: 2_000, durationSeconds: 1))
+        XCTAssertFalse(ResponseSpeed.isPlausibleTurnThroughput(outputTokens: 10, durationSeconds: 0))
+
+        // A fast response inside a slow turn is left out of the response totals; the turn is kept.
+        var slowTurn = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = slowTurn.consume(line: try user(at: 0, id: "prompt"))
+        _ = slowTurn.consume(line: try toolResult(at: 9.9))
+        let kept = try XCTUnwrap(terminal(&slowTurn, assistant(at: 10, id: "m1", output: 300, stop: "end_turn")))
+        XCTAssertNil(kept.responseCount)
+        XCTAssertTrue(slowTurn.drainCompletedResponses().isEmpty)
+
+        // A whole turn above the bound is a measurement error: no record.
+        var fastTurn = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = fastTurn.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(terminal(&fastTurn, try assistant(at: 0.1, id: "m1", output: 500, stop: "end_turn")))
+    }
+
     func testRememberedRecordsAreBoundedAndResetOnReplacement() throws {
         var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         _ = parser.consume(line: try user(at: 0, id: "prompt"))
@@ -1175,13 +1247,15 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 
-    private func attachment(at seconds: Double, id: String) throws -> Data {
-        var value = envelope(sidechain: false)
+    private func attachment(
+        at seconds: Double, id: String, type: String = "PRIVATE_ATTACHMENT", parent: String = "previous-record", sidechain: Bool = false
+    ) throws -> Data {
+        var value = envelope(sidechain: sidechain)
         value["type"] = "attachment"
         value["uuid"] = id
-        value["parentUuid"] = "previous-record"
+        value["parentUuid"] = parent
         value["timestamp"] = timestamp(seconds, origin: base)
-        value["attachment"] = ["type": "PRIVATE_ATTACHMENT"]
+        value["attachment"] = ["type": type]
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 

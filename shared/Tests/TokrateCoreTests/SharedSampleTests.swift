@@ -83,7 +83,8 @@ final class SharedSampleTests: XCTestCase {
             ("tokens above the turn's output tokens", claude(tokens: 1_001, seconds: 10, count: 1)),
             ("duration above the turn duration", claude(tokens: 500, seconds: 100.5, count: 1)),
             ("implied speed above 2000 tokens per second", claude(outputTokens: 5_000, tokens: 2_001, seconds: 1, count: 1)),
-            ("fewer than 200 tokens per counted response", claude(tokens: 999, seconds: 10, count: 5))
+            ("fewer than 200 tokens per counted response", claude(tokens: 999, seconds: 10, count: 5)),
+            ("more than 600 seconds per counted response", claude(outputTokens: 5_000, durationSeconds: 2_000, tokens: 3_000, seconds: 1_201, count: 2))
         ]
         for (reason, metric) in invalid {
             let sample = try XCTUnwrap(SharedSample(metric), reason)
@@ -96,6 +97,18 @@ final class SharedSampleTests: XCTestCase {
             XCTAssertTrue(object["responseCount"] is NSNull, reason)
             XCTAssertEqual(sample.outputTokens, metric.outputTokens, "the turn sample itself is still shared")
         }
+    }
+
+    func testResponseSecondsAreBoundedBySixHundredPerCountedResponse() throws {
+        XCTAssertNotNil(SharedSample(claude(outputTokens: 5_000, durationSeconds: 2_000, tokens: 3_000, seconds: 1_200, count: 2))?.responseCount)
+        XCTAssertNil(SharedSample(claude(outputTokens: 5_000, durationSeconds: 2_000, tokens: 3_000, seconds: 601, count: 1))?.responseCount)
+    }
+
+    func testTurnFasterThanTheSpeedBoundIsNotShared() {
+        XCTAssertEqual(ResponseSpeed.maximumTokensPerSecond, 2_000)
+        XCTAssertNotNil(SharedSample(claude(outputTokens: 2_000, durationSeconds: 1)), "exactly 2,000 tok/s is kept")
+        XCTAssertNil(SharedSample(claude(outputTokens: 2_001, durationSeconds: 1)))
+        XCTAssertNil(SharedSample(claude(outputTokens: 336, durationSeconds: 0.002)))
     }
 
     func testDecodedZeroCountOrNegativeValuesNullAllThreeFields() throws {

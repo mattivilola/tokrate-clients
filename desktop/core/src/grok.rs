@@ -1,6 +1,6 @@
 use crate::model::{
-    ReportedReasoningEffort, ResponseTotals, TurnMetric, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION, RESPONSE_MAX_DURATION_SECONDS, RESPONSE_MAX_TOKENS_PER_SECOND,
+    speed_is_plausible, ReportedReasoningEffort, ResponseTotals, TurnMetric, GROK_CLIENT,
+    GROK_METRIC_VERSION, GROK_PARSER_VERSION, MAX_TOKENS_PER_SECOND, RESPONSE_MAX_DURATION_SECONDS,
     RESPONSE_MIN_OUTPUT_TOKENS,
 };
 use crate::reader::{file_identity, FileIdentity, MAX_LINE_BYTES};
@@ -719,7 +719,11 @@ impl GrokSession {
                 .num_nanoseconds()
                 .unwrap_or(0) as f64
                 / 1e9;
-            if !duration.is_finite() || duration <= 0.0 || duration > 86_400.0 {
+            if !duration.is_finite()
+                || duration <= 0.0
+                || duration > 86_400.0
+                || !speed_is_plausible(output_tokens, duration)
+            {
                 continue;
             }
             let id = digest_id(&self.key, turn.number, turn.completed_at);
@@ -947,7 +951,7 @@ fn response_fields(
         || windows.seconds <= 0.0
         || windows.seconds > turn_duration_seconds
         || output_tokens < RESPONSE_MIN_OUTPUT_TOKENS.saturating_mul(count)
-        || output_tokens as f64 / windows.seconds > RESPONSE_MAX_TOKENS_PER_SECOND
+        || output_tokens as f64 / windows.seconds > MAX_TOKENS_PER_SECOND
     {
         return (None, None, None);
     }

@@ -1,8 +1,8 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
-    bedrock_region_or_unknown, response_qualifies, ReportedReasoningEffort, ResponseMetric,
-    ResponseTotals, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
-    CLAUDE_SUBAGENT_METRIC_VERSION,
+    bedrock_region_or_unknown, response_qualifies, speed_is_plausible, ReportedReasoningEffort,
+    ResponseMetric, ResponseTotals, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
+    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
 };
 use crate::parser::JsonlEventParser;
 use chrono::{DateTime, Duration, Utc};
@@ -25,6 +25,9 @@ const MAX_IDENTIFIER_BYTES: usize = 512;
 const INTERJECTION_CONTINUATION_MINUTES: i64 = 30;
 const INTERRUPTION_MARKER: &str = "[Request interrupted by user";
 const SYNTHETIC_MODEL: &str = "<synthetic>";
+/// `attachment.type` values Claude Code writes when an API response arrives, not when its request
+/// is made. They carry the response's own arrival time, so they never start a response.
+const BOOKKEEPING_ATTACHMENT_TYPES: [&str; 1] = ["deferred_tools_record"];
 
 /// Which transcript records a parser instance measures.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -33,6 +36,16 @@ enum RecordScope {
     Primary,
     /// Records of one subagent transcript (`<session>/subagents/agent-<id>.jsonl`).
     Subagent,
+}
+
+/// True for a record written when a response arrives rather than when it was requested.
+fn is_bookkeeping_attachment(root: &serde_json::Map<String, Value>) -> bool {
+    root.get("type").and_then(Value::as_str) == Some("attachment")
+        && root
+            .get("attachment")
+            .and_then(|attachment| attachment.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| BOOKKEEPING_ATTACHMENT_TYPES.contains(&kind))
 }
 
 /// True only for subagent transcripts: a `subagents` directory component and an `agent-*` file name.
@@ -444,13 +457,29 @@ impl ClaudeTranscriptParser {
     }
 
     fn remember_record_time(&mut self, root: &serde_json::Map<String, Value>) {
-        let (Some(uuid), Some(at)) = (
+        let (Some(uuid), Some(own_at)) = (
             root.get("uuid")
                 .and_then(Value::as_str)
                 .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES)),
             parse_date(root.get("timestamp")),
         ) else {
             return;
+        };
+        // A bookkeeping attachment stands for its parent: the request it was written after. With
+        // an unknown parent it is not remembered, and the response falls back to the latest
+        // user-type record.
+        let at = if is_bookkeeping_attachment(root) {
+            let Some(parent_at) = root
+                .get("parentUuid")
+                .and_then(Value::as_str)
+                .and_then(|parent| self.record_times.get(parent))
+                .copied()
+            else {
+                return;
+            };
+            parent_at
+        } else {
+            own_at
         };
         if self.record_times.insert(uuid.to_owned(), at).is_none() {
             self.record_order.push_back(uuid.to_owned());
@@ -805,7 +834,10 @@ impl ClaudeTranscriptParser {
             .values()
             .try_fold(0_i64, |total, value| total.checked_add((*value)?))?;
         let throughput = output_tokens as f64 / duration;
-        if !throughput.is_finite() || throughput < 0.0 {
+        if !throughput.is_finite()
+            || throughput < 0.0
+            || !speed_is_plausible(output_tokens, duration)
+        {
             return None;
         }
         let (response_output_tokens, response_duration_seconds, response_count) =

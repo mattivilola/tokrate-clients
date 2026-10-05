@@ -2,7 +2,7 @@ use crate::model::{
     bedrock_region_or_unknown, ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT,
     CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT,
     CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION, RESPONSE_MAX_TOKENS_PER_SECOND, RESPONSE_MIN_OUTPUT_TOKENS,
+    GROK_PARSER_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -87,6 +87,7 @@ impl SharedSample {
         if !duration_ms.is_finite()
             || !(1.0..=86_400_000.0).contains(&duration_ms)
             || !(0..=10_000_000).contains(&metric.output_tokens)
+            || !metric.turn_speed_is_plausible()
         {
             return None;
         }
@@ -119,7 +120,7 @@ impl SharedSample {
                     .then_some(milliseconds)
             });
         let (response_output_tokens, response_duration_ms, response_count) =
-            shared_response_fields(metric, duration_ms);
+            shared_response_fields(metric);
         let provider = shared_provider(client, metric.provider.as_deref());
         Some(Self {
             sample_id,
@@ -163,29 +164,11 @@ impl SharedSample {
 }
 
 /// The response fields travel together or not at all: any inconsistency with the turn drops them.
-fn shared_response_fields(
-    metric: &TurnMetric,
-    turn_duration_ms: f64,
-) -> (Option<i64>, Option<f64>, Option<i64>) {
-    let (Some(tokens), Some(seconds), Some(count)) = (
-        metric.response_output_tokens,
-        metric.response_duration_seconds,
-        metric.response_count,
-    ) else {
-        return (None, None, None);
-    };
-    let milliseconds = seconds * 1_000.0;
-    if count < 1
-        || tokens < RESPONSE_MIN_OUTPUT_TOKENS.saturating_mul(count)
-        || tokens > metric.output_tokens
-        || !milliseconds.is_finite()
-        || milliseconds <= 0.0
-        || milliseconds > turn_duration_ms
-        || tokens as f64 / seconds > RESPONSE_MAX_TOKENS_PER_SECOND
-    {
-        return (None, None, None);
+fn shared_response_fields(metric: &TurnMetric) -> (Option<i64>, Option<f64>, Option<i64>) {
+    match metric.plausible_response_timing() {
+        Some((tokens, seconds, count)) => (Some(tokens), Some(seconds * 1_000.0), Some(count)),
+        None => (None, None, None),
     }
-    (Some(tokens), Some(milliseconds), Some(count))
 }
 
 /// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for

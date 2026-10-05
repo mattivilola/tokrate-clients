@@ -9,7 +9,13 @@ public struct MetricHistory: Sendable {
     public init(records: [TurnMetric] = [], now: Date = .now) {
         let cutoff = now.addingTimeInterval(-Self.retention)
         var unique: [String: TurnMetric] = [:]
-        for record in records where record.completedAt >= cutoff && record.completedAt <= now { unique[record.id] = record }
+        for record in records where record.completedAt >= cutoff && record.completedAt <= now {
+            // Earlier builds saved measurement errors (see `ResponseSpeed`): a turn faster than any model
+            // is dropped, response timing that does not add up is cleared. The cleaned state is saved next.
+            guard record.hasPlausibleTurnThroughput else { continue }
+            let hasResponse = record.responseOutputTokens != nil || record.responseDurationSeconds != nil || record.responseCount != nil
+            unique[record.id] = hasResponse && !record.hasPlausibleResponseTiming ? record.withoutResponseTiming() : record
+        }
         self.records = Array(unique.values.sorted { $0.completedAt > $1.completedAt }.prefix(Self.maximumRecords))
     }
 

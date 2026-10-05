@@ -471,7 +471,7 @@ final class MultiSourceParserTests: XCTestCase {
     }
 
     func testGrokTurnWithoutGenerationEventsHasNoResponseSpeed() throws {
-        let noLoops = try grokMetric(try grokTurn(calls: []), output: 500, modelCalls: 1)
+        let noLoops = try grokMetric(try grokTurn(firstLoopDelay: 10, calls: []), output: 500, modelCalls: 1)
         XCTAssertNil(noLoops.responseCount)
         XCTAssertEqual(noLoops.parserVersion, "grok-session-v2")
     }

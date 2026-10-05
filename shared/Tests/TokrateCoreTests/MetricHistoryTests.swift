@@ -129,6 +129,39 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertNil(decoded.responseSpeedTPS, "a zero count is not a measurement")
     }
 
+    func testLoadingHistoryDropsImpossibleTurnsAndClearsImplausibleResponseTiming() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func claude(
+            _ id: String, outputTokens: Int = 1_000, durationSeconds: Double = 100,
+            tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil
+        ) -> TurnMetric {
+            TurnMetric(
+                id: id, completedAt: now.addingTimeInterval(-60), model: "claude-sonnet-5-5", outputTokens: outputTokens,
+                durationSeconds: durationSeconds, codexTTFTSeconds: nil, turnThroughputTPS: Double(outputTokens) / durationSeconds,
+                client: "claude-code", parserVersion: "claude-transcript-v4", metricVersion: "claude-observed-turn-v1",
+                sourceKind: "primary", responseOutputTokens: tokens, responseDurationSeconds: seconds, responseCount: count
+            )
+        }
+        let collapsed = claude("collapsed", outputTokens: 400, durationSeconds: 60, tokens: 336, seconds: 0.002, count: 1)
+        let tooFast = claude("too-fast", outputTokens: 336, durationSeconds: 0.002)
+        let tooManyResponses = claude("few-tokens", tokens: 300, seconds: 10, count: 2)
+        let normal = claude("normal", tokens: 900, seconds: 18, count: 2)
+        let plain = claude("plain")
+        let history = MetricHistory(records: [collapsed, tooFast, tooManyResponses, normal, plain], now: now)
+
+        XCTAssertEqual(Set(history.records.map(\.id)), ["collapsed", "few-tokens", "normal", "plain"], "a turn above 2,000 tok/s is dropped")
+        let byID = Dictionary(uniqueKeysWithValues: history.records.map { ($0.id, $0) })
+        for id in ["collapsed", "few-tokens"] {
+            let record = byID[id]
+            XCTAssertNil(record?.responseOutputTokens, id)
+            XCTAssertNil(record?.responseDurationSeconds, id)
+            XCTAssertNil(record?.responseCount, id)
+            XCTAssertEqual(record?.outputTokens, id == "collapsed" ? 400 : 1_000, "the turn itself is kept")
+        }
+        XCTAssertEqual(byID["normal"], normal)
+        XCTAssertEqual(byID["plain"], plain)
+    }
+
     private func metric(id: String, at date: Date) -> TurnMetric {
         TurnMetric(
             id: id,

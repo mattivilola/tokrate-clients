@@ -9,9 +9,21 @@ public enum ResponseSpeed {
     /// A longer gap is a stalled or resumed request, not one response.
     public static let maximumDurationSeconds: TimeInterval = 600
 
+    /// A rate above this is a measurement error, not a model: it applies to responses and to whole
+    /// turns, at measurement time, when saved history loads and before anything is shared.
+    public static let maximumTokensPerSecond = 2_000.0
+
     public static func qualifies(outputTokens: Int, durationSeconds: TimeInterval) -> Bool {
         outputTokens >= minimumOutputTokens
             && durationSeconds.isFinite && durationSeconds > 0 && durationSeconds <= maximumDurationSeconds
+            && Double(outputTokens) / durationSeconds <= maximumTokensPerSecond
+    }
+
+    /// Whether a whole turn's throughput is physically plausible. A turn that fails is a measurement
+    /// error: parsers emit no record for it, like any other invalid duration.
+    public static func isPlausibleTurnThroughput(outputTokens: Int, durationSeconds: TimeInterval) -> Bool {
+        guard outputTokens >= 0, durationSeconds.isFinite, durationSeconds > 0 else { return false }
+        return Double(outputTokens) / durationSeconds <= maximumTokensPerSecond
     }
 }
 

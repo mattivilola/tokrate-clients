@@ -101,8 +101,17 @@ impl History {
     fn from_records(records: Vec<TurnMetric>, now: DateTime<Utc>) -> Self {
         let cutoff = now - Duration::days(RETENTION_DAYS);
         let mut by_id = HashMap::new();
-        for record in records {
-            if record.completed_at >= cutoff && record.completed_at <= now {
+        for mut record in records {
+            // Saved by an earlier version: drop impossible speeds and unusable response timing.
+            if record.completed_at >= cutoff
+                && record.completed_at <= now
+                && record.turn_speed_is_plausible()
+            {
+                if record.plausible_response_timing().is_none() {
+                    record.response_output_tokens = None;
+                    record.response_duration_seconds = None;
+                    record.response_count = None;
+                }
                 by_id.insert(record.id.clone(), record);
             }
         }

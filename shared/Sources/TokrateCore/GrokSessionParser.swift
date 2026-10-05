@@ -192,8 +192,8 @@ struct GrokSessionParser: JSONLMetricParser {
             else { continue }
             let duration = eventTurn.endedAt.timeIntervalSince(eventTurn.start.startedAt)
             guard duration.isFinite, duration > 0 else { continue }
+            guard ResponseSpeed.isPlausibleTurnThroughput(outputTokens: usage.outputTokens, durationSeconds: duration) else { continue }
             let rate = Double(usage.outputTokens) / duration
-            guard rate.isFinite, rate >= 0 else { continue }
             let response = responseTiming(eventTurn.windows, usage: usage, turnDuration: duration)
             let digest = SHA256.hash(data: Data("\(sessionID)|\(number)".utf8))
             records.append(TurnMetric(
@@ -358,7 +358,7 @@ struct GrokSessionParser: JSONLMetricParser {
         let seconds = windows.durations.reduce(0, +)
         guard tokens >= ResponseSpeed.minimumOutputTokens * count,
               seconds <= turnDuration + 0.000_001,
-              Double(tokens) / seconds <= SharedSample.maximumResponseTPS
+              Double(tokens) / seconds <= ResponseSpeed.maximumTokensPerSecond
         else { return nil }
         return (tokens, min(seconds, turnDuration), count)
     }

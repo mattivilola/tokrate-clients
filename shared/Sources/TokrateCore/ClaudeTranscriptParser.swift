@@ -166,8 +166,23 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         return closed
     }
 
+    /// `attachment.type` values of records Claude Code writes when a response arrives, not when its
+    /// request is sent: `deferred_tools_record` shares its millisecond with the response's first
+    /// assistant record, which names it as parent. Treating it as the request trigger collapses the
+    /// response duration (real data: 336 tokens in 0.002 s, 167,992 tok/s), so such a record is
+    /// remembered under its own parent's timestamp instead.
+    static let bookkeepingAttachmentTypes: Set<String> = ["deferred_tools_record"]
+
     private mutating func rememberRecord(_ root: [String: Any]) {
-        guard let uuid = safeIdentifier(root["uuid"] as? String, maximum: 120), let timestamp = parseDate(root["timestamp"]) else { return }
+        guard let uuid = safeIdentifier(root["uuid"] as? String, maximum: 120), var timestamp = parseDate(root["timestamp"]) else { return }
+        if root["type"] as? String == "attachment",
+           let attachmentType = (root["attachment"] as? [String: Any])?["type"] as? String,
+           Self.bookkeepingAttachmentTypes.contains(attachmentType) {
+            // It inherits its parent's time; a parent this file never showed leaves no trigger at all.
+            guard let parent = safeIdentifier(root["parentUuid"] as? String, maximum: 120),
+                  let parentAt = recordTimestamps[parent] else { return }
+            timestamp = parentAt
+        }
         if recordTimestamps.updateValue(timestamp, forKey: uuid) == nil {
             recordOrder.append(uuid)
             if recordOrder.count > Self.maximumRememberedRecords {
@@ -473,8 +488,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         }
         let duration = completedAt.timeIntervalSince(state.startedAt)
         guard duration.isFinite, duration > 0 else { return nil }
+        guard ResponseSpeed.isPlausibleTurnThroughput(outputTokens: total, durationSeconds: duration) else { return nil }
         let throughput = Double(total) / duration
-        guard throughput.isFinite, throughput >= 0 else { return nil }
         emittedUserTurnIDs.insert(state.userTurnID)
         let provider = state.hasRecordWithoutProviderEvidence || state.providers.count != 1
             ? "unknown" : state.providers.first ?? "unknown"

@@ -29,8 +29,6 @@ public struct SharedSample: Encodable, Sendable {
     public let delegatedOutputTokens: Int?
     /// Largest accepted delegated total (the same bound the server enforces).
     public static let maximumDelegatedOutputTokens = 100_000_000
-    /// A response faster than this is a measurement error, not a model.
-    public static let maximumResponseTPS = 2_000.0
     public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
 
     public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
@@ -43,7 +41,8 @@ public struct SharedSample: Encodable, Sendable {
               metric.isDelegationFinal
         else { return nil }
         guard duration.isFinite, (1...86_400_000).contains(duration),
-              (0...10_000_000).contains(metric.outputTokens) else { return nil }
+              (0...10_000_000).contains(metric.outputTokens),
+              metric.hasPlausibleTurnThroughput else { return nil }
         self.sampleId = sampleId
         observedAt = Date(timeIntervalSince1970: floor(metric.completedAt.timeIntervalSince1970 / 300) * 300)
         client = metric.client
@@ -68,11 +67,8 @@ public struct SharedSample: Encodable, Sendable {
             let ms = value * 1_000
             return ms.isFinite && (0...duration).contains(ms) ? ms : nil
         }
-        if let tokens = metric.responseOutputTokens, let seconds = metric.responseDurationSeconds,
-           let count = metric.responseCount,
-           count > 0, (1...metric.outputTokens).contains(tokens), tokens >= ResponseSpeed.minimumOutputTokens * count,
-           seconds.isFinite, seconds > 0, seconds * 1_000 <= duration,
-           Double(tokens) / seconds <= Self.maximumResponseTPS {
+        if metric.hasPlausibleResponseTiming, let tokens = metric.responseOutputTokens,
+           let seconds = metric.responseDurationSeconds, let count = metric.responseCount {
             responseOutputTokens = tokens
             responseDurationMs = seconds * 1_000
             responseCount = count

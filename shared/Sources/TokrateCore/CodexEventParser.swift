@@ -217,7 +217,7 @@ public struct CodexEventParser: Sendable {
             return nil
         }
         let throughput = Double(outputTokens) / duration
-        guard throughput.isFinite, throughput >= 0 else {
+        guard ResponseSpeed.isPlausibleTurnThroughput(outputTokens: outputTokens, durationSeconds: duration) else {
             turns[turnID] = state
             return nil
         }

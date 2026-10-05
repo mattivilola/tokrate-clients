@@ -3892,6 +3892,50 @@ fn shared_samples_carry_valid_response_fields_and_drop_inconsistent_ones() {
 }
 
 #[test]
+fn shared_response_fields_follow_the_shared_timing_rule() {
+    let share = |turn: &TurnMetric| crate::SharedSample::from_metric(turn, Uuid::new_v4());
+    let long_turn = |tokens: i64, seconds: f64, count: i64| {
+        let mut turn = response_metric(tokens, seconds, count);
+        turn.output_tokens = 5_000;
+        turn.duration_seconds = 5_000.0;
+        turn
+    };
+    // At most 600 s per counted response.
+    assert_eq!(
+        share(&long_turn(1_000, 600.0, 1)).unwrap().response_count,
+        Some(1)
+    );
+    assert_eq!(
+        share(&long_turn(1_000, 700.0, 2)).unwrap().response_count,
+        Some(2)
+    );
+    for turn in [
+        long_turn(1_000, 601.0, 1), // longer than count * 600 s
+        long_turn(1_000, 0.0, 1),   // no duration
+        long_turn(1_000, -1.0, 1),  // negative duration
+        long_turn(399, 10.0, 2),    // fewer than 200 tokens per counted response
+        long_turn(1_000, f64::NAN, 1),
+    ] {
+        let sample = share(&turn).unwrap();
+        assert_eq!(
+            (
+                sample.response_output_tokens,
+                sample.response_duration_ms,
+                sample.response_count
+            ),
+            (None, None, None)
+        );
+    }
+    // A turn above the speed bound is a measurement error: nothing is shared.
+    let mut too_fast = response_metric(900, 20.0, 1);
+    too_fast.output_tokens = 1_000;
+    too_fast.duration_seconds = 0.4;
+    assert!(share(&too_fast).is_none());
+    too_fast.duration_seconds = 0.5;
+    assert!(share(&too_fast).is_some());
+}
+
+#[test]
 fn shared_provider_region_is_present_only_for_bedrock() {
     let mut bedrock = response_metric(900, 20.0, 1);
     bedrock.provider = Some("amazon-bedrock".into());
@@ -3917,6 +3961,59 @@ fn shared_provider_region_is_present_only_for_bedrock() {
             .unwrap();
     assert!(json["providerRegion"].is_null());
     assert!(json.as_object().unwrap().contains_key("providerRegion"));
+}
+
+#[test]
+fn history_load_sanitizes_implausible_speeds_and_response_timing() {
+    let temp = TestDir::new();
+    let path = temp.path().join("history-v1.json");
+    let now = time("2026-10-04T10:00:00Z");
+    // The real defect: 336 tokens "in" 2 ms, inside a normal 14 s turn.
+    let mut inflated = metric("inflated", now - Duration::hours(1));
+    inflated.output_tokens = 336;
+    inflated.duration_seconds = 14.0;
+    inflated.response_output_tokens = Some(336);
+    inflated.response_duration_seconds = Some(0.002);
+    inflated.response_count = Some(1);
+    // A whole turn above the bound is dropped.
+    let mut impossible = metric("impossible", now - Duration::hours(2));
+    impossible.output_tokens = 5_000;
+    impossible.duration_seconds = 1.0;
+    // Valid response timing and plain turns are untouched.
+    let mut valid = metric("valid", now - Duration::hours(3));
+    valid.output_tokens = 900;
+    valid.duration_seconds = 30.0;
+    valid.response_output_tokens = Some(900);
+    valid.response_duration_seconds = Some(20.0);
+    valid.response_count = Some(2);
+    let plain = metric("plain", now - Duration::hours(4));
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "records": [inflated, impossible, valid.clone(), plain.clone()]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let loaded = History::load(&path, now).unwrap();
+    let ids: Vec<_> = loaded.records().iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["inflated", "valid", "plain"]);
+    let cleaned = &loaded.records()[0];
+    assert_eq!(cleaned.output_tokens, 336);
+    assert_eq!(cleaned.response_output_tokens, None);
+    assert_eq!(cleaned.response_duration_seconds, None);
+    assert_eq!(cleaned.response_count, None);
+    assert_eq!(loaded.records()[1], valid);
+    assert_eq!(loaded.records()[2], plain);
+
+    // The cleaned state is what gets saved next.
+    loaded.save(&path).unwrap();
+    assert_eq!(
+        History::load(&path, now).unwrap().records(),
+        loaded.records()
+    );
+    assert!(!fs::read_to_string(&path).unwrap().contains("impossible"));
 }
 
 #[test]
@@ -4481,6 +4578,226 @@ fn claude_missing_or_later_parent_falls_back_to_the_latest_user_record() {
     assert_eq!(parser.take_responses()[0].duration_seconds, 8.0);
 }
 
+fn attachment(at: &str, uuid: &str, parent: &str, kind: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "type": "attachment",
+        "timestamp": at,
+        "isSidechain": false,
+        "userType": "external",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "attachment": { "type": kind }
+    }))
+    .unwrap()
+}
+
+/// Real shape: Claude Code writes `deferred_tools_record` when the response arrives, and the
+/// response's first assistant record names it as its parent.
+fn claude_deferred_tools_sequence(deferred_parent: &str) -> Vec<Vec<u8>> {
+    vec![
+        claude_user("2026-10-03T08:39:40.000Z", "human", json!("go")),
+        tool_result("2026-10-03T08:39:50.262Z", "result-1"),
+        attachment(
+            "2026-10-03T08:39:50.266Z",
+            "reminder-1",
+            "result-1",
+            "total_tokens_reminder",
+        ),
+        attachment(
+            "2026-10-03T08:39:54.257Z",
+            "deferred-1",
+            deferred_parent,
+            "deferred_tools_record",
+        ),
+        with_parent(
+            block_message(
+                "2026-10-03T08:39:54.257Z",
+                "msg-x",
+                "end_turn",
+                336,
+                "thinking",
+            ),
+            "deferred-1",
+        ),
+        with_parent(
+            block_message("2026-10-03T08:39:54.259Z", "msg-x", "end_turn", 336, "text"),
+            "deferred-1",
+        ),
+    ]
+}
+
+/// Feeds records as a live read would and settles the pending terminal turn at the end.
+fn claude_play(
+    parser: &mut crate::claude_parser::ClaudeTranscriptParser,
+    lines: Vec<Vec<u8>>,
+) -> Option<TurnMetric> {
+    let mut turn = None;
+    for line in lines {
+        turn = turn.or(parser.consume(&line));
+    }
+    turn.or_else(|| parser.flush_pending(DateTime::<Utc>::MAX_UTC, true))
+}
+
+#[test]
+fn claude_deferred_tools_record_does_not_start_a_response_it_precedes() {
+    let mut parser = claude_parser();
+    let turn = claude_play(&mut parser, claude_deferred_tools_sequence("reminder-1")).unwrap();
+    // The deferred_tools_record stands for its parent (50.266), not its own arrival time.
+    let seconds = turn.response_duration_seconds.unwrap();
+    assert!((seconds - 3.993).abs() < 1e-6, "{seconds}");
+    assert_eq!(turn.response_output_tokens, Some(336));
+    assert_eq!(turn.response_count, Some(1));
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 1);
+    assert!((live[0].duration_seconds - 3.993).abs() < 1e-6);
+    assert!(live[0].speed() < 100.0);
+
+    // Chains of bookkeeping attachments resolve to the first real record.
+    let mut chained = claude_parser();
+    let mut lines = claude_deferred_tools_sequence("reminder-1");
+    lines.insert(
+        4,
+        attachment(
+            "2026-10-03T08:39:54.257Z",
+            "deferred-2",
+            "deferred-1",
+            "deferred_tools_record",
+        ),
+    );
+    for line in lines.iter_mut().skip(5) {
+        *line = with_parent(std::mem::take(line), "deferred-2");
+    }
+    claude_play(&mut chained, lines);
+    let live = chained.take_responses();
+    assert!((live[0].duration_seconds - 3.993).abs() < 1e-6);
+}
+
+#[test]
+fn claude_deferred_tools_record_with_an_unknown_parent_falls_back_to_the_latest_user_record() {
+    let mut parser = claude_parser();
+    let turn = claude_play(&mut parser, claude_deferred_tools_sequence("never-seen"));
+    // Not remembered at all, so the response starts at the tool result (50.262).
+    let seconds = turn.unwrap().response_duration_seconds.unwrap();
+    assert!((seconds - 3.997).abs() < 1e-6, "{seconds}");
+    let live = parser.take_responses();
+    assert!((live[0].duration_seconds - 3.997).abs() < 1e-6);
+}
+
+#[test]
+fn claude_other_attachments_remain_request_triggers() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&attachment(
+        "2026-10-03T10:00:08Z",
+        "att-1",
+        "human",
+        "skill_listing",
+    ));
+    parser.consume(&with_parent(
+        assistant("2026-10-03T10:00:14Z", "msg-a", "tool_use", 600),
+        "att-1",
+    ));
+    parser.flush_pending(time("2026-10-03T10:00:15Z"), true);
+    assert_eq!(parser.take_responses()[0].duration_seconds, 6.0);
+}
+
+#[test]
+fn claude_turns_and_responses_above_the_speed_bound_are_not_emitted() {
+    // 5,000 tokens in one second is a measurement error: no turn, no live response.
+    let mut parser = claude_parser();
+    parser.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    assert!(parser
+        .consume_settled(&assistant(
+            "2026-10-03T10:00:01Z",
+            "fast",
+            "end_turn",
+            5_000
+        ))
+        .is_none());
+    assert!(parser.take_responses().is_empty());
+
+    // The same output over 3 s (1,667 tok/s) is kept.
+    let mut plausible = claude_parser();
+    plausible.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    let turn = plausible
+        .consume_settled(&assistant("2026-10-03T10:00:03Z", "ok", "end_turn", 5_000))
+        .unwrap();
+    assert_eq!(turn.response_count, Some(1));
+
+    // A fast response inside a slower turn is left out of the response fields and live list.
+    let mut mixed = claude_parser();
+    mixed.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    mixed.consume_settled(&assistant(
+        "2026-10-03T10:00:09Z",
+        "slow-tool",
+        "tool_use",
+        300,
+    ));
+    mixed.consume_settled(&tool_result("2026-10-03T10:00:10Z", "r"));
+    let turn = mixed
+        .consume_settled(&assistant(
+            "2026-10-03T10:00:10.100Z",
+            "fast",
+            "end_turn",
+            900,
+        ))
+        .unwrap();
+    assert_eq!(turn.response_count, Some(1));
+    assert_eq!(turn.response_output_tokens, Some(300));
+    assert_eq!(mixed.take_responses().len(), 1);
+}
+
+#[test]
+fn response_qualifies_rejects_implausibly_fast_responses() {
+    use crate::response_qualifies;
+    assert!(response_qualifies(2_000, 1.0));
+    assert!(!response_qualifies(2_001, 1.0));
+    assert!(!response_qualifies(336, 0.002));
+    assert!(!response_qualifies(336, 0.0));
+    assert!(!response_qualifies(336, f64::NAN));
+}
+
+#[test]
+fn codex_turns_above_the_speed_bound_are_not_emitted() {
+    let run = |tokens: i64| {
+        let mut parser = crate::parser::CodexEventParser::new("file".into());
+        let mut turn = None;
+        for line in [
+            codex_line(
+                "session_meta",
+                json!({"id": "session-1", "cli_version": "0.159.2", "source": "cli", "model_provider": "openai"}),
+                "2026-10-03T10:00:00Z",
+            ),
+            codex_line(
+                "event_msg",
+                json!({"type": "task_started", "turn_id": "turn-1"}),
+                "2026-10-03T10:00:00Z",
+            ),
+            codex_line(
+                "turn_context",
+                json!({"turn_id": "turn-1", "model": "gpt-test", "effort": "high"}),
+                "2026-10-03T10:00:00.100Z",
+            ),
+            codex_item(json!({"type": "reasoning"}), "2026-10-03T10:00:00.500Z"),
+            codex_usage("2026-10-03T10:00:01Z", "resp-1", tokens, tokens),
+            codex_line(
+                "event_msg",
+                json!({"type": "task_complete", "turn_id": "turn-1", "duration_ms": 1000}),
+                "2026-10-03T10:00:01.100Z",
+            ),
+        ] {
+            turn = turn.or(parser.consume(&line));
+        }
+        (turn, parser.take_responses())
+    };
+    let (turn, live) = run(5_000);
+    assert!(turn.is_none());
+    assert!(live.is_empty());
+    let (turn, live) = run(2_000);
+    assert_eq!(turn.unwrap().output_tokens, 2_000);
+    assert_eq!(live.len(), 1);
+}
+
 #[test]
 fn claude_remembered_record_times_are_bounded_per_file() {
     let mut parser = claude_parser();
@@ -4609,6 +4926,13 @@ fn grok_poll_all(root: &Path) -> Vec<TurnMetric> {
 
 /// Runs a built turn through the monitor and returns the single emitted record.
 fn grok_single_record(steps: &[(i64, &str)], output_tokens: i64, model_calls: Value) -> TurnMetric {
+    let mut found = grok_records(steps, output_tokens, model_calls);
+    assert_eq!(found.len(), 1, "the work turn itself is still recorded");
+    found.remove(0)
+}
+
+/// Runs a built turn through the monitor and returns every emitted record.
+fn grok_records(steps: &[(i64, &str)], output_tokens: i64, model_calls: Value) -> Vec<TurnMetric> {
     let temp = TestDir::new();
     write_grok_session(
         temp.path(),
@@ -4622,9 +4946,7 @@ fn grok_single_record(steps: &[(i64, &str)], output_tokens: i64, model_calls: Va
             grok_turn_end_ms(steps),
         ),
     );
-    let mut found = grok_poll_all(temp.path());
-    assert_eq!(found.len(), 1, "the work turn itself is still recorded");
-    found.remove(0)
+    grok_poll_all(temp.path())
 }
 
 fn assert_no_grok_response_timing(record: &TurnMetric) {
@@ -4784,13 +5106,24 @@ fn grok_needs_at_least_the_response_minimum_output_tokens_per_model_call_on_aver
 
 #[test]
 fn grok_implausibly_fast_or_unwindowed_turns_have_no_response_timing() {
-    // 60,000 tokens in 20 s of generation is 3,000 tok/s, above the shared limit.
+    // 60,000 tokens in a 21 s turn is 2,857 tok/s: a measurement error, so no record at all.
     let steps = grok_call_steps(&[20_000]);
-    assert_no_grok_response_timing(&grok_single_record(&steps, 60_000, json!(1)));
+    assert!(grok_records(&steps, 60_000, json!(1)).is_empty());
     assert_eq!(
         grok_single_record(&steps, 40_000, json!(1)).response_count,
         Some(1)
     );
+
+    // 30,000 tokens in 10 s of generation is 3,000 tok/s, above the shared limit, inside a 42 s
+    // turn (714 tok/s): the turn is recorded without response timing.
+    let slow_tool = vec![
+        (0, "turn_started"),
+        (1_000, "loop_started"),
+        (11_000, "tool_started"),
+        (41_000, "tool_completed"),
+        (42_000, "turn_ended"),
+    ];
+    assert_no_grok_response_timing(&grok_single_record(&slow_tool, 30_000, json!(1)));
 
     // No loop events: nothing to time.
     let bare = vec![(0, "turn_started"), (20_000, "turn_ended")];

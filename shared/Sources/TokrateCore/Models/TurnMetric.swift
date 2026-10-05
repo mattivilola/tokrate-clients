@@ -48,6 +48,23 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         let speed = Double(tokens) / seconds
         return speed.isFinite ? speed : nil
     }
+    /// Whether the turn's throughput is physically plausible (see `ResponseSpeed`).
+    public var hasPlausibleTurnThroughput: Bool {
+        ResponseSpeed.isPlausibleTurnThroughput(outputTokens: outputTokens, durationSeconds: durationSeconds)
+    }
+    /// Whether the three response fields are present and add up, the one rule behind sharing them and
+    /// keeping them in loaded history: at least 200 tokens per response, no more than the turn's
+    /// output, 600 s per response at most, inside the turn's duration and at most the speed bound.
+    public var hasPlausibleResponseTiming: Bool {
+        guard let tokens = responseOutputTokens, let seconds = responseDurationSeconds, let count = responseCount,
+              count > 0, tokens <= outputTokens,
+              tokens >= ResponseSpeed.minimumOutputTokens * count,
+              seconds.isFinite, seconds > 0,
+              seconds <= Double(count) * ResponseSpeed.maximumDurationSeconds,
+              seconds <= durationSeconds
+        else { return false }
+        return Double(tokens) / seconds <= ResponseSpeed.maximumTokensPerSecond
+    }
     /// A primary turn's delegated attribution is settled once its total is known; every other record
     /// has nothing to wait for.
     public var isDelegationFinal: Bool { sourceKind != "primary" || delegatedOutputTokens != nil }
@@ -220,6 +237,19 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encodeIfPresent(responseCount, forKey: .responseCount)
         try values.encodeIfPresent(providerRegion, forKey: .providerRegion)
         try values.encodeIfPresent(delegatedOutputTokens, forKey: .delegatedOutputTokens)
+    }
+
+    /// This record without response timing, for a measurement that failed `hasPlausibleResponseTiming`.
+    public func withoutResponseTiming() -> TurnMetric {
+        TurnMetric(
+            id: id, completedAt: completedAt, model: model, outputTokens: outputTokens,
+            durationSeconds: durationSeconds, codexTTFTSeconds: codexTTFTSeconds,
+            turnThroughputTPS: turnThroughputTPS, streamingTPS: streamingTPS, client: client,
+            clientVersion: clientVersion, parserVersion: parserVersion, metricVersion: metricVersion,
+            reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
+            reasoningEffort: reasoningEffort, providerRegion: providerRegion,
+            delegatedOutputTokens: delegatedOutputTokens
+        )
     }
 
     /// This record with its delegated total settled; the attribution re-emits the same id.

@@ -1,6 +1,7 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
-    response_qualifies, ReportedReasoningEffort, ResponseMetric, ResponseTotals, TurnMetric,
+    response_qualifies, speed_is_plausible, ReportedReasoningEffort, ResponseMetric,
+    ResponseTotals, TurnMetric,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Number, Value};
@@ -253,7 +254,8 @@ impl CodexEventParser {
             self.finish_work(turn_id, measured.as_ref());
             return None;
         }
-        let measured = measured?;
+        let measured = measured
+            .filter(|measured| speed_is_plausible(measured.output_tokens, measured.duration))?;
 
         self.remember_emitted(turn_id);
         self.turn_order.retain(|known| known != turn_id);
