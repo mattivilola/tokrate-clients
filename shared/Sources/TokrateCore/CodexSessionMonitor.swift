@@ -17,6 +17,8 @@ public actor CodexSessionMonitor {
         var archive: JSONLFileReader?
         var modifiedAt: Date
         var liveServicedModification = Date.distantPast
+        /// The `now` of the poll that positioned the live reader.
+        var liveStartedAt: Date?
         var archiveIDsWhileLiveCatchesUp: Set<String> = []
     }
     public private(set) var bytesReadLastPoll = 0
@@ -61,6 +63,7 @@ public actor CodexSessionMonitor {
             guard liveBudget > 0, var file = files[key] else { break }
             do {
                 let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget))
+                if file.liveStartedAt == nil { file.liveStartedAt = now }
                 collect(file.live.drainResponses())
                 delegation += file.live.drainDelegation()
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
@@ -115,17 +118,24 @@ public actor CodexSessionMonitor {
         bytesReadLastPoll = Self.maximumPollBytes - byteBudget
         let metrics = unique.values.sorted { $0.completedAt > $1.completedAt }
         attributor.ingest(events: delegation, metrics: metrics)
-        let finals = attributor.finalize(now: now, hasHistoricalBacklog: hasHistoricalBacklog)
+        let finals = attributor.finalize(now: now, backlog: delegationBacklog)
         return MonitorUpdate(
             metrics: DelegationAttributor.merging(metrics, finals: finals),
             responses: responses.values.sorted { $0.completedAt > $1.completedAt }
         )
     }
 
-    /// True while any watched file still has history to read: an archive reader in progress, a live
-    /// reader short of its file's end, or a modification not read yet.
-    private var hasHistoricalBacklog: Bool {
-        files.values.contains { $0.archive != nil || !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification }
+    /// The files that still have history to read: an archive reader in progress, a live reader short of
+    /// its file's end, or a modification not read yet.
+    private var delegationBacklog: DelegationBacklog {
+        DelegationBacklog(files: files.values.map {
+            DelegationSourceFile(
+                modifiedAt: $0.modifiedAt,
+                livePending: !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification,
+                archivePending: $0.archive != nil,
+                liveStartedAt: $0.liveStartedAt
+            )
+        })
     }
 
     private func discoverFiles(now: Date) throws {

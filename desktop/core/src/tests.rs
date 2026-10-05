@@ -1148,7 +1148,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.16");
+    assert_eq!(sample.app_version, "0.1.17");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1919,7 +1919,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.16");
+    assert_eq!(first[0].app_version, "0.1.17");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2064,7 +2064,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.16-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.17-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2072,7 +2072,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.16-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.17-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2094,7 +2094,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.16");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.17");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2585,7 +2585,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.16");
+    assert_eq!(crate::APP_VERSION, "0.1.17");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -5309,6 +5309,15 @@ impl ClaudeDelegation {
         fs::write(self.subagent_path(session, agent), jsonl(lines)).unwrap();
     }
 
+    fn set_modified(&self, session: &str, agent: &str, modified: &str) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(self.subagent_path(session, agent))
+            .unwrap()
+            .set_modified(SystemTime::from(time(modified)))
+            .unwrap();
+    }
+
     fn append(&self, session: &str, agent: &str, lines: &[Vec<u8>]) {
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -5608,6 +5617,8 @@ fn claude_turns_are_not_final_while_subagent_history_is_still_being_read() {
         serde_json::to_vec(&json!({"type": "summary", "padding": "x".repeat(8_000)})).unwrap();
     lines.extend(std::iter::repeat_n(filler, 100));
     fixture.write(DELEGATION_SESSION, "large", &lines);
+    // Modified while the turn ran, so the unread history can hold its work.
+    fixture.set_modified(DELEGATION_SESSION, "large", "2026-10-03T10:00:50Z");
 
     // Far past the settle time, but the subagent file is still being replayed.
     let now = time("2026-10-03T11:00:00Z");
@@ -5631,6 +5642,153 @@ fn claude_turns_are_not_final_while_subagent_history_is_still_being_read() {
         "finalized after {polls} polls, before the replay was done"
     );
     assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(300));
+}
+
+#[test]
+fn claude_turn_is_final_while_unrelated_older_subagent_history_is_still_replayed() {
+    let mut fixture = ClaudeDelegation::new();
+    fixture.primary("2026-10-03T10:00:00Z", "2026-10-03T10:01:00Z", 500);
+    fixture.write(
+        DELEGATION_SESSION,
+        "mine",
+        &finished_subagent(
+            DELEGATION_SESSION,
+            "mine",
+            "2026-10-03T10:00:10Z",
+            "2026-10-03T10:00:40Z",
+            300,
+        ),
+    );
+    fixture.set_modified(DELEGATION_SESSION, "mine", "2026-10-03T10:00:50Z");
+    // A large older session: last modified before the turn started, replay far from done.
+    let mut history = finished_subagent(
+        "session-older",
+        "history",
+        "2026-10-03T08:00:10Z",
+        "2026-10-03T08:00:40Z",
+        900,
+    );
+    let filler =
+        serde_json::to_vec(&json!({"type": "summary", "padding": "x".repeat(8_000)})).unwrap();
+    history.extend(std::iter::repeat_n(filler, 130));
+    fixture.write("session-older", "history", &history);
+    fixture.set_modified("session-older", "history", "2026-10-03T09:00:00Z");
+
+    fixture.poll("2026-10-03T10:02:00Z");
+    assert!(
+        fixture.monitor.bytes_read_last_poll() > 0,
+        "the older history was already fully read"
+    );
+    assert_eq!(fixture.primary_turn().delegated_output_tokens, Some(300));
+}
+
+// The attribution asks the backlog per pending turn with that turn's start.
+
+fn backlog_file(modified_at: DateTime<Utc>) -> crate::delegation::DelegationFileBacklog {
+    crate::delegation::DelegationFileBacklog {
+        modified_at,
+        live_pending: false,
+        archive_pending: false,
+        live_started_at: None,
+    }
+}
+
+#[test]
+fn backlog_predicate_ignores_files_modified_before_the_work_could_start() {
+    let start = time("2026-10-03T10:00:00Z");
+    // A pending live reader or archive on a file that is too old never blocks.
+    let mut file = backlog_file(start - Duration::hours(1));
+    file.live_pending = true;
+    file.archive_pending = true;
+    file.live_started_at = Some(start + Duration::minutes(5));
+    assert!(!file.blocks(start));
+
+    // The tolerance edge is inclusive: exactly two seconds before the start still blocks.
+    let mut live = backlog_file(start - Duration::seconds(2));
+    live.live_pending = true;
+    assert!(live.blocks(start));
+    live.modified_at = start - Duration::milliseconds(2_001);
+    assert!(!live.blocks(start));
+    // A file that is fully read blocks nothing, however recent.
+    assert!(!backlog_file(start + Duration::minutes(1)).blocks(start));
+}
+
+#[test]
+fn backlog_predicate_blocks_on_an_archive_only_when_the_live_tail_started_after_the_work() {
+    let start = time("2026-10-03T10:00:00Z");
+    let mut file = backlog_file(start + Duration::minutes(1));
+    file.archive_pending = true;
+
+    // The tail was positioned after the turn began: replayed content can hold its work.
+    file.live_started_at = Some(start + Duration::seconds(5));
+    assert!(file.blocks(start));
+    file.live_started_at = Some(start - Duration::seconds(2));
+    assert!(file.blocks(start));
+    // The tail already covers everything from before the turn: the archive holds none of it.
+    file.live_started_at = Some(start - Duration::milliseconds(2_001));
+    assert!(!file.blocks(start));
+    // A reader that is not positioned yet cannot rule it out.
+    file.live_started_at = None;
+    assert!(file.blocks(start));
+}
+
+#[test]
+fn turns_are_final_after_the_settle_time_unless_a_relevant_file_has_unread_content() {
+    use crate::delegation::{root_session_key, DelegationEvent, DelegationTracker};
+
+    let started = time("2026-10-03T10:00:00Z");
+    let completed = time("2026-10-03T10:01:00Z");
+    let mut turn = metric("turn", completed);
+    turn.delegated_output_tokens = None;
+    let events = vec![DelegationEvent::Turn {
+        turn_id: "turn".into(),
+        root_session: root_session_key("codex", "root"),
+        started_at: started,
+    }];
+    let settled = completed + Duration::seconds(30);
+    let blocked = |files: &[crate::delegation::DelegationFileBacklog]| {
+        let files = files.to_vec();
+        move |work_start: DateTime<Utc>| files.iter().any(|file| file.blocks(work_start))
+    };
+    let final_count = |records: &[TurnMetric]| {
+        records
+            .iter()
+            .filter(|record| record.delegated_output_tokens.is_some())
+            .count()
+    };
+
+    // An unrelated large file last modified before the turn still has an archive reader.
+    let mut unrelated = backlog_file(started - Duration::hours(2));
+    unrelated.archive_pending = true;
+    unrelated.live_started_at = Some(started + Duration::seconds(10));
+    // A file modified during the turn whose live reader is not caught up, or that holds an
+    // unread modification (the monitor reports both as a pending live reader).
+    let mut related = backlog_file(started + Duration::seconds(30));
+    related.live_pending = true;
+
+    let mut tracker = DelegationTracker::new();
+    let first = tracker.apply(
+        vec![turn],
+        events,
+        completed + Duration::seconds(5),
+        blocked(&[unrelated]),
+    );
+    assert_eq!(final_count(&first), 0);
+    // Not before the settle time, even without a relevant backlog.
+    let early = tracker.apply(
+        vec![],
+        vec![],
+        settled - Duration::seconds(1),
+        blocked(&[unrelated]),
+    );
+    assert_eq!(final_count(&early), 0);
+    // Blocked by the relevant file, whatever else is going on.
+    let held = tracker.apply(vec![], vec![], settled, blocked(&[unrelated, related]));
+    assert_eq!(final_count(&held), 0);
+    // Final once that file has been read, with the unrelated archive still pending.
+    let done = tracker.apply(vec![], vec![], settled, blocked(&[unrelated]));
+    assert_eq!(final_count(&done), 1);
+    assert_eq!(done[0].delegated_output_tokens, Some(0));
 }
 
 // Codex: child sessions spawned with `thread_spawn` are delegated work of their root session.

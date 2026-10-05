@@ -12,6 +12,46 @@ enum DelegationEvent: Sendable, Equatable {
     case workDiscarded(id: String)
 }
 
+/// One file of a delegated source as the backlog predicate sees it: an in-memory snapshot, never
+/// persisted.
+struct DelegationSourceFile: Sendable, Equatable {
+    /// The file's last observed modification time.
+    let modifiedAt: Date
+    /// The live reader is not caught up, or the file has a modification it has not read.
+    let livePending: Bool
+    /// The archive reader, which covers the content before the live tail's start, is not done.
+    let archivePending: Bool
+    /// The wall-clock `now` of the poll that positioned the live reader; nil until it is positioned.
+    let liveStartedAt: Date?
+}
+
+/// Which delegated-source files can still hold work a pending turn needs (contract: "Delegated
+/// output", finalization condition 2). A work item's start record is written at or after the start of
+/// the turn that spawned it, so a file last modified before that start never blocks the turn.
+struct DelegationBacklog: Sendable, Equatable {
+    /// Covers timestamp precision between a file's modification time and the records inside it.
+    static let timestampTolerance: TimeInterval = 2
+    /// Nothing is known about the delegated source (its poll failed): it blocks every turn.
+    static let unknown = DelegationBacklog(files: [], isUnknown: true)
+    static let none = DelegationBacklog(files: [])
+
+    let files: [DelegationSourceFile]
+    var isUnknown = false
+
+    /// True when a file could still hold unread work items started at or after `start`.
+    func hasBacklog(affectingWorkStartedAt start: Date) -> Bool {
+        if isUnknown { return true }
+        let earliest = start.addingTimeInterval(-Self.timestampTolerance)
+        return files.contains { file in
+            guard file.modifiedAt >= earliest else { return false }
+            if file.livePending { return true }
+            // The archive holds only content before the live tail: records at or after `start` can be in
+            // it only when the tail was positioned after `start` (a reader not positioned yet will be).
+            return file.archivePending && (file.liveStartedAt ?? .distantFuture) >= earliest
+        }
+    }
+}
+
 enum DelegationRoot {
     /// The in-memory attribution key of a root session: SHA-256 of `client|rawRootSessionId`.
     static func key(client: String, rawSessionID: String) -> String {
@@ -24,8 +64,9 @@ enum DelegationRoot {
 /// persisted.
 ///
 /// A primary turn is emitted at once with a nil total. It becomes final, and is re-emitted under the
-/// same id with the total, when the settle time has passed, the delegated source has no historical
-/// backlog, and no work item that started inside the turn is still open (or the maximum wait is over).
+/// same id with the total, when the settle time has passed, no delegated-source file that could still
+/// hold unread work started inside the turn is behind (`DelegationBacklog`), and no work item that
+/// started inside the turn is still open (or the maximum wait is over).
 struct DelegationAttributor: Sendable {
     static let settleSeconds: TimeInterval = 30
     static let maximumWaitSeconds: TimeInterval = 30 * 60
@@ -83,14 +124,16 @@ struct DelegationAttributor: Sendable {
     }
 
     /// Returns the pending turns that became final, with their delegated totals, and forgets them.
-    /// `hasHistoricalBacklog` is true while the delegated source still has files to catch up on.
-    mutating func finalize(now: Date, hasHistoricalBacklog: Bool) -> [TurnMetric] {
+    /// `backlog` describes the delegated source; each turn is held back only by the files that could
+    /// still hold work started inside that turn.
+    mutating func finalize(now: Date, backlog: DelegationBacklog) -> [TurnMetric] {
         trim(now: now)
-        guard !hasHistoricalBacklog, !pending.isEmpty else { return [] }
+        guard !pending.isEmpty else { return [] }
         var finals: [TurnMetric] = []
         for (id, entry) in pending {
             let completedAt = entry.metric.completedAt
-            guard now >= completedAt.addingTimeInterval(Self.settleSeconds) else { continue }
+            guard now >= completedAt.addingTimeInterval(Self.settleSeconds),
+                  !backlog.hasBacklog(affectingWorkStartedAt: entry.startedAt) else { continue }
             var total = 0
             var hasOpenWork = false
             for workID in workByRoot[entry.root] ?? [] {

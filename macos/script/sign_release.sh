@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IDENTITY="${1:?Usage: sign_release.sh CODE_SIGN_IDENTITY [KEYCHAIN_NOTARY_PROFILE]}"
 NOTARY_PROFILE="${2:-}"
-BUNDLE="${TOKRATE_BUNDLE_PATH:-$ROOT_DIR/macos/dist/0.1.16/Tokrate.app}"
+BUNDLE="${TOKRATE_BUNDLE_PATH:-$ROOT_DIR/macos/dist/0.1.17/Tokrate.app}"
 BINARY="$BUNDLE/Contents/MacOS/Tokrate"
 SPARKLE_FRAMEWORK="$BUNDLE/Contents/Frameworks/Sparkle.framework"
 [[ -x "$BINARY" ]] || { echo 'Run package_app.sh release first.' >&2; exit 1; }

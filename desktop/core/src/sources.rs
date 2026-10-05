@@ -104,22 +104,30 @@ impl SourceMonitor {
                 Err(_) => self.had_source_error = true,
             }
             self.bytes_read_last_poll += self.claude.bytes_read_last_poll();
+            // Without a subagent view no turn can tell whether its work was seen.
+            let mut subagents_unreadable = false;
             match self
                 .claude_subagents
                 .poll_with_budget(now, CLAUDE_SUBAGENT_BUDGET)
             {
                 Ok(found) => claude_records.extend(found),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => self.had_source_error = true,
+                Err(_) => {
+                    self.had_source_error = true;
+                    subagents_unreadable = true;
+                }
             }
             self.bytes_read_last_poll += self.claude_subagents.bytes_read_last_poll();
             let mut events = self.claude.take_delegation_events();
             events.extend(self.claude_subagents.take_delegation_events());
+            let subagents = &self.claude_subagents;
             records.extend(self.claude_delegation.apply(
                 claude_records,
                 events,
                 now,
-                self.claude_subagents.has_delegation_backlog(),
+                |work_start| {
+                    subagents_unreadable || subagents.has_delegation_backlog_since(work_start)
+                },
             ));
         }
         if self.grok_root.is_dir() {

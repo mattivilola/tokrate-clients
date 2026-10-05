@@ -708,8 +708,8 @@ public actor ClaudeSessionMonitor {
         let subagentUpdate = subagentPoll ?? MonitorUpdate()
         attributor.ingest(events: primaryUpdate.delegation + subagentUpdate.delegation, metrics: primaryUpdate.metrics)
         // Without a successful subagent poll nothing is known about delegated work: finalize nothing.
-        let backlog = subagentPoll == nil ? true : await subagents.hasHistoricalBacklog
-        let finals = attributor.finalize(now: now, hasHistoricalBacklog: backlog)
+        let backlog = subagentPoll == nil ? DelegationBacklog.unknown : await subagents.delegationBacklog
+        let finals = attributor.finalize(now: now, backlog: backlog)
         let primaryMetrics = DelegationAttributor.merging(primaryUpdate.metrics, finals: finals)
         return MonitorUpdate(
             metrics: (primaryMetrics + subagentUpdate.metrics).sorted { $0.completedAt > $1.completedAt },

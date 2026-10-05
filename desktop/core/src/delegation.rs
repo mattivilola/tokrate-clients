@@ -14,6 +14,9 @@ use std::collections::{HashMap, HashSet};
 pub(crate) const DELEGATION_SETTLE_SECONDS: i64 = 30;
 /// Work still open this long after the turn ended (a background agent) is not counted.
 pub(crate) const DELEGATION_MAX_WAIT_SECONDS: i64 = 1_800;
+/// A file last modified this much before a turn started cannot hold work that started with it:
+/// covers timestamp precision between the parsed log and the file system.
+const BACKLOG_TOLERANCE_MILLISECONDS: i64 = 2_000;
 /// Matches the local history retention: older work can never belong to a retained turn.
 const RETENTION_DAYS: i64 = 7;
 const MAX_WORK_ITEMS: usize = 20_000;
@@ -27,6 +30,36 @@ pub(crate) fn root_session_key(client: &str, raw_root_session_id: &str) -> Strin
         "{:x}",
         Sha256::digest(format!("{client}|{raw_root_session_id}").as_bytes())
     )
+}
+
+/// What a monitor knows about one delegated-source file that bears on whether a turn may be
+/// final: whether unread content remains, and since when the reading has been positioned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DelegationFileBacklog {
+    /// Last observed modification time of the file.
+    pub modified_at: DateTime<Utc>,
+    /// The live reader is not caught up, or the file changed since it last serviced the file.
+    pub live_pending: bool,
+    /// A replay reader still has content to read before the live tail's start offset.
+    pub archive_pending: bool,
+    /// Poll time at which the live reader was created and positioned; `None` while it is not.
+    pub live_started_at: Option<DateTime<Utc>>,
+}
+
+impl DelegationFileBacklog {
+    /// True when this file could still hold unread work started at or after `work_start`.
+    ///
+    /// A work item's start record is written at or after the start of the turn that began it, so
+    /// a file last modified before that cannot hold one. Replayed (archive) content precedes the
+    /// live tail, so it can hold such a record only if the tail was positioned after the start.
+    pub fn blocks(&self, work_start: DateTime<Utc>) -> bool {
+        let earliest = work_start - Duration::milliseconds(BACKLOG_TOLERANCE_MILLISECONDS);
+        if self.modified_at < earliest {
+            return false;
+        }
+        self.live_pending
+            || (self.archive_pending && self.live_started_at.map_or(true, |at| at >= earliest))
+    }
 }
 
 /// What a parser tells the attribution about turns and delegated work it has read.
@@ -98,14 +131,15 @@ impl DelegationTracker {
     /// that are final are returned with their delegated output set, replacing the pending
     /// version of the same id.
     ///
-    /// `backlog` is true while the delegated source still has history to read: nothing is
-    /// final then, since the work of a turn may not have been seen yet.
+    /// `backlog(start)` tells whether the delegated source may still hold unread work that
+    /// started at or after `start`: a turn is not final then, since its work may not have been
+    /// seen yet. It is asked per pending turn with that turn's start.
     pub fn apply(
         &mut self,
         mut records: Vec<TurnMetric>,
         events: Vec<DelegationEvent>,
         now: DateTime<Utc>,
-        backlog: bool,
+        backlog: impl Fn(DateTime<Utc>) -> bool,
     ) -> Vec<TurnMetric> {
         let mut turns: HashMap<String, (String, DateTime<Utc>)> = HashMap::new();
         for event in events {
@@ -153,7 +187,7 @@ impl DelegationTracker {
         }
         self.prune(cutoff);
 
-        let finals = self.finalize(now, backlog);
+        let finals = self.finalize(now, &backlog);
         if !finals.is_empty() {
             let positions: HashMap<String, usize> = records
                 .iter()
@@ -263,15 +297,16 @@ impl DelegationTracker {
         }
     }
 
-    fn finalize(&mut self, now: DateTime<Utc>, backlog: bool) -> Vec<TurnMetric> {
-        if backlog {
-            return Vec::new();
-        }
+    fn finalize(
+        &mut self,
+        now: DateTime<Utc>,
+        backlog: &impl Fn(DateTime<Utc>) -> bool,
+    ) -> Vec<TurnMetric> {
         let settle = Duration::seconds(DELEGATION_SETTLE_SECONDS);
         let max_wait = Duration::seconds(DELEGATION_MAX_WAIT_SECONDS);
         let mut ready: Vec<(String, i64)> = Vec::new();
         for (id, turn) in &self.pending {
-            if now < turn.completed_at + settle {
+            if now < turn.completed_at + settle || backlog(turn.started_at) {
                 continue;
             }
             let mut total = 0_i64;

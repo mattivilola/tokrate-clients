@@ -159,6 +159,24 @@ final class DelegatedWorkTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(firstFinalPoll), 1, "several polls of backlog came first")
     }
 
+    func testClaudeNewTurnFinalizesWhileAnUnrelatedOlderFileIsStillBeingReplayed() async throws {
+        // A large subagent file last modified long before the turn keeps a pending archive reader for
+        // many polls; it cannot hold work started inside the turn and must not hold the turn back.
+        var older = jsonl([prompt(-3_000, agent: "older"), assistant("o1", -2_900, 5, "end_turn", agent: "older")])
+        older.append(Data(repeating: 0x20, count: 2_000_000) + Data([0x0A]))
+        let monitor = try claudeMonitor(
+            primary: [prompt(0), assistant("p1", 60, 300, "end_turn")],
+            subagents: ["a1": [prompt(6, agent: "a1"), assistant("s1", 40, 700, "end_turn", agent: "a1")]],
+            rawSubagents: ["agent-older.jsonl": older]
+        )
+        let olderURL = directory.appendingPathComponent("project/\(session)/subagents/agent-older.jsonl")
+        try FileManager.default.setAttributes([.modificationDate: at(-3_000)], ofItemAtPath: olderURL.path)
+        let first = try await monitor.poll(now: at(60))
+        XCTAssertNil(first.metrics.first { $0.sourceKind == "primary" }?.delegatedOutputTokens)
+        let settled = try await monitor.poll(now: at(60 + settle))
+        XCTAssertEqual(settled.metrics.first { $0.sourceKind == "primary" }?.delegatedOutputTokens, 700)
+    }
+
     // MARK: Codex
 
     func testCodexChildTurnsAreAttributedToTheRootThroughSessionID() async throws {
@@ -236,6 +254,20 @@ final class DelegatedWorkTests: XCTestCase {
         XCTAssertGreaterThan(polls, 2)
     }
 
+    func testCodexNewTurnFinalizesWhileAnUnrelatedOlderFileIsStillBeingReplayed() async throws {
+        let root = codexRoot(turns: [codexTurn("t1", start: 0, end: 60, tokens: 300)])
+        let child = codexChild(id: "child-1", session: "root-1", parent: "root-1", turns: [codexTurn("c1", start: 10, end: 40, tokens: 400)])
+        // An older session far larger than the live tail: its archive reader stays pending for many polls.
+        let older = codexSession(id: "older-1", session: "older-1", parent: nil, source: "vscode", turns: [codexTurn("o1", start: -3_000, end: -2_900, tokens: 50)])
+            + Data(repeating: 0x20, count: 2_000_000) + Data([0x0A])
+        let monitor = try codexMonitor(files: ["root": root, "child": child, "older": older])
+        try FileManager.default.setAttributes([.modificationDate: at(-3_000)], ofItemAtPath: directory.appendingPathComponent("older.jsonl").path)
+        let first = try await readAll(monitor, at: 61)
+        XCTAssertNil(first.metrics.first?.delegatedOutputTokens)
+        let settled = try await monitor.poll(now: at(60 + settle))
+        XCTAssertEqual(settled.metrics.first { $0.outputTokens == 300 }?.delegatedOutputTokens, 400)
+    }
+
     func testCodexParserReportsSpawnedChildrenAsWorkOnlyAndSkipsOtherAgentSessions() throws {
         func parser(source: Any, extra: [String: Any] = [:]) throws -> CodexEventParser {
             var parser = CodexEventParser(sourceIdentity: "test")
@@ -308,10 +340,10 @@ final class DelegatedWorkTests: XCTestCase {
             .workFinished(id: "w", outputTokens: 70, finishedAt: completedAt),
             .workDiscarded(id: "w")
         ], metrics: [turn])
-        XCTAssertEqual(attributor.finalize(now: completedAt.addingTimeInterval(settle), hasHistoricalBacklog: true), [], "backlog holds it")
-        let finals = attributor.finalize(now: completedAt.addingTimeInterval(settle), hasHistoricalBacklog: false)
+        XCTAssertEqual(attributor.finalize(now: completedAt.addingTimeInterval(settle), backlog: .unknown), [], "backlog holds it")
+        let finals = attributor.finalize(now: completedAt.addingTimeInterval(settle), backlog: .none)
         XCTAssertEqual(finals.first?.delegatedOutputTokens, 70)
-        XCTAssertEqual(attributor.finalize(now: completedAt.addingTimeInterval(settle + 1), hasHistoricalBacklog: false), [], "pending entries are dropped once final")
+        XCTAssertEqual(attributor.finalize(now: completedAt.addingTimeInterval(settle + 1), backlog: .none), [], "pending entries are dropped once final")
 
         // Work older than the history retention is forgotten.
         var aged = DelegationAttributor()
@@ -322,7 +354,102 @@ final class DelegatedWorkTests: XCTestCase {
             codexTTFTSeconds: nil, turnThroughputTPS: 1, sourceKind: "primary"
         )
         aged.ingest(events: [.primaryTurn(turnID: "recent", root: "r")], metrics: [recent])
-        XCTAssertEqual(aged.finalize(now: completedAt.addingTimeInterval(settle), hasHistoricalBacklog: false).first?.delegatedOutputTokens, 0, "the expired open item no longer blocks")
+        XCTAssertEqual(aged.finalize(now: completedAt.addingTimeInterval(settle), backlog: .none).first?.delegatedOutputTokens, 0, "the expired open item no longer blocks")
+    }
+
+    // MARK: Turn-scoped backlog
+
+    /// A pending turn of 60 s that completed at `origin`, so its start is `origin - 60`.
+    private func pendingTurn(_ attributor: inout DelegationAttributor, id: String = "turn", completedAt: Date? = nil) -> (metric: TurnMetric, start: Date) {
+        let completed = completedAt ?? origin
+        let metric = TurnMetric(
+            id: id, completedAt: completed, model: "m", outputTokens: 100, durationSeconds: 60, codexTTFTSeconds: nil,
+            turnThroughputTPS: 1, sourceKind: "primary"
+        )
+        attributor.ingest(events: [.primaryTurn(turnID: id, root: "r")], metrics: [metric])
+        return (metric, completed.addingTimeInterval(-60))
+    }
+
+    private func sourceFile(
+        modifiedAt: Date, livePending: Bool = false, archivePending: Bool = false, liveStartedAt: Date? = nil
+    ) -> DelegationSourceFile {
+        DelegationSourceFile(modifiedAt: modifiedAt, livePending: livePending, archivePending: archivePending, liveStartedAt: liveStartedAt)
+    }
+
+    func testBacklogOfAnUnrelatedOlderFileDoesNotBlockANewTurn() {
+        var attributor = DelegationAttributor()
+        let (_, start) = pendingTurn(&attributor)
+        let replay = DelegationBacklog(files: [
+            sourceFile(modifiedAt: start.addingTimeInterval(-3_600), livePending: true, archivePending: true, liveStartedAt: origin)
+        ])
+        XCTAssertEqual(attributor.finalize(now: origin.addingTimeInterval(settle - 1), backlog: replay), [], "still settling")
+        XCTAssertEqual(attributor.finalize(now: origin.addingTimeInterval(settle), backlog: replay).first?.delegatedOutputTokens, 0)
+    }
+
+    func testBacklogOfAFileModifiedInsideTheTurnBlocksUntilItCatchesUp() {
+        var attributor = DelegationAttributor()
+        let (_, start) = pendingTurn(&attributor)
+        let now = origin.addingTimeInterval(settle)
+        for pending in [
+            sourceFile(modifiedAt: start.addingTimeInterval(10), livePending: true),
+            sourceFile(modifiedAt: origin.addingTimeInterval(5), livePending: true),
+            sourceFile(modifiedAt: start.addingTimeInterval(10), livePending: true, archivePending: true, liveStartedAt: start.addingTimeInterval(-3_600))
+        ] {
+            XCTAssertEqual(attributor.finalize(now: now, backlog: DelegationBacklog(files: [pending])), [], "a live reader that is behind blocks")
+        }
+        let caughtUp = DelegationBacklog(files: [sourceFile(modifiedAt: start.addingTimeInterval(10))])
+        XCTAssertEqual(attributor.finalize(now: now, backlog: caughtUp).count, 1)
+    }
+
+    func testPendingArchiveBlocksOnlyWhenTheLiveTailStartedAfterTheTurnStart() {
+        /// Offsets are seconds from the turn's start.
+        func blocked(liveStartedAt: TimeInterval?, modifiedAt: TimeInterval = 10) -> Bool {
+            var attributor = DelegationAttributor()
+            let (_, start) = pendingTurn(&attributor)
+            let file = sourceFile(
+                modifiedAt: start.addingTimeInterval(modifiedAt), archivePending: true,
+                liveStartedAt: liveStartedAt.map { start.addingTimeInterval($0) }
+            )
+            return attributor.finalize(now: origin.addingTimeInterval(settle), backlog: DelegationBacklog(files: [file])).isEmpty
+        }
+        XCTAssertTrue(blocked(liveStartedAt: 60), "the tail was positioned after the start")
+        XCTAssertTrue(blocked(liveStartedAt: 0), "exactly at the start")
+        XCTAssertTrue(blocked(liveStartedAt: -2), "exactly at the tolerance")
+        XCTAssertFalse(blocked(liveStartedAt: -2.001), "the tail already covered everything from the start")
+        XCTAssertFalse(blocked(liveStartedAt: -3_600))
+        XCTAssertTrue(blocked(liveStartedAt: nil), "a live reader that is not positioned yet will start after the turn")
+        XCTAssertFalse(blocked(liveStartedAt: 60, modifiedAt: -3_600), "an archive modified before the start cannot hold its work")
+    }
+
+    func testBacklogToleranceEdgeOfTheModificationTime() {
+        func blocked(modifiedOffset: TimeInterval) -> Bool {
+            var attributor = DelegationAttributor()
+            let (_, start) = pendingTurn(&attributor)
+            let file = sourceFile(modifiedAt: start.addingTimeInterval(modifiedOffset), livePending: true)
+            return attributor.finalize(now: origin.addingTimeInterval(settle), backlog: DelegationBacklog(files: [file])).isEmpty
+        }
+        XCTAssertTrue(blocked(modifiedOffset: -2), "modified exactly at start - 2 s blocks")
+        XCTAssertFalse(blocked(modifiedOffset: -2.001), "modified just before the tolerance does not")
+        XCTAssertTrue(blocked(modifiedOffset: -1.999))
+    }
+
+    func testBacklogIsEvaluatedPerPendingTurn() {
+        var attributor = DelegationAttributor()
+        let early = pendingTurn(&attributor, id: "early", completedAt: origin)
+        let late = pendingTurn(&attributor, id: "late", completedAt: origin.addingTimeInterval(3_600))
+        // A file modified between the two turns' starts is behind: it can hold work of the earlier turn only.
+        let between = sourceFile(modifiedAt: early.start.addingTimeInterval(600), livePending: true)
+        let finals = attributor.finalize(now: origin.addingTimeInterval(3_600 + settle), backlog: DelegationBacklog(files: [between]))
+        XCTAssertEqual(finals.map(\.id), ["late"], "the later turn finalizes, the earlier one stays blocked")
+        XCTAssertEqual(late.start, origin.addingTimeInterval(3_540))
+        XCTAssertEqual(attributor.finalize(now: origin.addingTimeInterval(3_700), backlog: .none).map(\.id), ["early"])
+    }
+
+    func testUnknownBacklogBlocksEveryTurn() {
+        var attributor = DelegationAttributor()
+        _ = pendingTurn(&attributor)
+        XCTAssertEqual(attributor.finalize(now: origin.addingTimeInterval(settle), backlog: .unknown), [])
+        XCTAssertEqual(attributor.finalize(now: origin.addingTimeInterval(settle), backlog: .none).count, 1)
     }
 
     // MARK: Claude fixtures

@@ -1,5 +1,7 @@
 use crate::claude_parser::is_subagent_transcript_path;
-use crate::delegation::{extend_bounded, DelegationEvent, DelegationTracker};
+use crate::delegation::{
+    extend_bounded, DelegationEvent, DelegationFileBacklog, DelegationTracker,
+};
 use crate::model::{ResponseMetric, TurnMetric};
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
 use chrono::{DateTime, Duration, Utc};
@@ -24,7 +26,36 @@ struct WatchedFile {
     identity: Option<FileIdentity>,
     last_discovered_size: u64,
     modified_at: DateTime<Utc>,
+    /// The modification time the live reader had last serviced the file at; older than
+    /// `modified_at` when the file changed since.
+    live_serviced_modified_at: Option<DateTime<Utc>>,
+    /// Poll time at which the live reader was created and positioned; `None` until positioned.
+    live_started_at: Option<DateTime<Utc>>,
     archive_ids_while_live_catches_up: HashSet<String>,
+}
+
+impl WatchedFile {
+    fn delegation_backlog(&self) -> DelegationFileBacklog {
+        DelegationFileBacklog {
+            modified_at: self.modified_at,
+            live_pending: !self.live.is_caught_up()
+                || self
+                    .live_serviced_modified_at
+                    .map_or(true, |serviced| serviced < self.modified_at),
+            archive_pending: self.archive.is_some(),
+            live_started_at: self.live_started_at,
+        }
+    }
+}
+
+/// True when any file could still hold unread work that started at or after `work_start`.
+fn files_hold_delegation_backlog(
+    files: &HashMap<String, WatchedFile>,
+    work_start: DateTime<Utc>,
+) -> bool {
+    files
+        .values()
+        .any(|file| file.delegation_backlog().blocks(work_start))
 }
 
 struct Candidate {
@@ -107,12 +138,11 @@ impl Monitor {
         std::mem::take(&mut self.delegation_events)
     }
 
-    /// True while history is still being read (a replay reader or a tail not yet caught up),
-    /// so work of already emitted turns may not have been seen.
-    pub(crate) fn has_delegation_backlog(&self) -> bool {
-        self.files
-            .values()
-            .any(|file| file.archive.is_some() || !file.live.is_caught_up())
+    /// True while a file that could hold work started at or after `work_start` still has unread
+    /// content (a replay reader, a tail not yet caught up or a modification not yet read), so
+    /// work of a turn that began then may not have been seen. Files last modified earlier cannot.
+    pub(crate) fn has_delegation_backlog_since(&self, work_start: DateTime<Utc>) -> bool {
+        files_hold_delegation_backlog(&self.files, work_start)
     }
 
     /// Qualifying responses the live (recent-tail) readers completed since the last call, in
@@ -165,6 +195,15 @@ impl Monitor {
                 break;
             }
             let polled = file.live.poll(limit, now);
+            if polled.is_ok() {
+                file.live_serviced_modified_at = Some(file.modified_at);
+            }
+            // A reader reset to the start of a replaced file is positioned anew later.
+            if !file.live.is_positioned() {
+                file.live_started_at = None;
+            } else if file.live_started_at.is_none() {
+                file.live_started_at = Some(now);
+            }
             self.live_responses.extend(file.live.take_responses());
             extend_bounded(
                 &mut self.delegation_events,
@@ -258,10 +297,12 @@ impl Monitor {
         }
         self.bytes_read_last_poll = max_bytes - byte_budget;
         let mut records: Vec<TurnMetric> = unique.into_values().collect();
-        let backlog = self.has_delegation_backlog();
         if let Some(tracker) = self.delegation.as_mut() {
             let events = std::mem::take(&mut self.delegation_events);
-            records = tracker.apply(records, events, now, backlog);
+            let files = &self.files;
+            records = tracker.apply(records, events, now, |work_start| {
+                files_hold_delegation_backlog(files, work_start)
+            });
         }
         records.sort_by(|left, right| {
             right
@@ -375,6 +416,8 @@ impl Monitor {
                         identity: candidate.identity,
                         last_discovered_size: candidate.size,
                         modified_at: candidate.modified_at,
+                        live_serviced_modified_at: None,
+                        live_started_at: None,
                         archive_ids_while_live_catches_up: HashSet::new(),
                     },
                 );

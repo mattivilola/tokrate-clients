@@ -172,6 +172,8 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         var archive: IncrementalJSONLMetricReader<Parser>?
         var modifiedAt: Date
         var liveServicedModification = Date.distantPast
+        /// The `now` of the poll that positioned the live reader.
+        var liveStartedAt: Date?
         var archiveIDsWhileLiveCatchesUp: Set<String> = []
     }
 
@@ -184,10 +186,17 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private(set) var rootIsAvailable = false
     private(set) var watchedFileCount = 0
 
-    /// True while any watched file still has history to read: an archive reader in progress, a live
-    /// reader short of its file's end, or a modification not read yet.
-    var hasHistoricalBacklog: Bool {
-        files.values.contains { $0.archive != nil || !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification }
+    /// The files that still have history to read: an archive reader in progress, a live reader short of
+    /// its file's end, or a modification not read yet.
+    var delegationBacklog: DelegationBacklog {
+        DelegationBacklog(files: files.values.map {
+            DelegationSourceFile(
+                modifiedAt: $0.modifiedAt,
+                livePending: !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification,
+                archivePending: $0.archive != nil,
+                liveStartedAt: $0.liveStartedAt
+            )
+        })
     }
 
     init(
@@ -226,6 +235,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             guard liveBudget > 0, var file = files[key] else { break }
             do {
                 let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget), now: now)
+                if file.liveStartedAt == nil { file.liveStartedAt = now }
                 collect(file.live.drainResponses())
                 delegation += file.live.drainDelegation()
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }

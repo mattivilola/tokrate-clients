@@ -376,4 +376,10 @@ impl IncrementalReader {
     pub fn excludes_session(&self) -> bool {
         self.parser.excludes_session()
     }
+
+    /// True once a recent-tail reader has chosen its start offset (and again false after a reset
+    /// to the beginning of a replaced or truncated file, until it is positioned anew).
+    pub fn is_positioned(&self) -> bool {
+        self.startup != Startup::Header
+    }
 }

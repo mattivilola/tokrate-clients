@@ -201,7 +201,7 @@ For the live stream responses are timed file-wide: also responses outside a huma
 
 ### Sharing
 
-`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; from 0.1.16 also `responseOutputTokens ≥ 200 × responseCount` and `responseDurationMs ≤ 600,000 × responseCount` (see "Measurement sanity (0.1.16)"); otherwise all three are null. `appVersion` is `0.1.16` (0.1.15 before).
+`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; from 0.1.16 also `responseOutputTokens ≥ 200 × responseCount` and `responseDurationMs ≤ 600,000 × responseCount` (see "Measurement sanity (0.1.16)"); otherwise all three are null. `appVersion` is `0.1.17` (0.1.16 before).
 
 ## Grok Build response speed (0.1.15)
 
@@ -265,14 +265,22 @@ A work item W belongs to primary turn T when W's root session equals T's and `T.
 A primary turn is emitted immediately as before, with `delegatedOutputTokens = nil`, so speeds update without delay, and the monitor keeps a pending entry for it. On every poll a pending entry becomes **final** when all of these hold:
 
 1. `now ≥ completedAt + 30 s` (`DELEGATION_SETTLE_SECONDS`);
-2. the delegated source has no historical backlog (its archive and catch-up readers are done, and no file modification is unread);
+2. no delegated-source file that could still hold unread work items started inside T's window is behind (turn-scoped backlog, below);
 3. no *open* work item (started, neither finished nor discarded) of the root session started inside T's window, or `now ≥ completedAt + 30 min` (`DELEGATION_MAX_WAIT_SECONDS`), in which case open items are ignored.
+
+**Turn-scoped backlog (0.1.17).** Until 0.1.16 condition 2 waited for the delegated source to have no historical backlog at all. Because every launch re-reads seven days of files (gigabytes of Codex sessions at about 1 MiB per 2 s poll), every turn stayed `nil`, and unshared, for about an hour after each launch, however recent it was. Condition 2 is now evaluated per pending turn T with start `S = completedAt − durationSeconds`. A work item's start record is written at or after S, so a delegated-source file last modified before `S − 2 s` (the tolerance covers timestamp precision) cannot hold one and never blocks T. Every other file blocks T only when:
+
+- **live part:** its live reader is not caught up, or the file has a modification the live reader has not read (`modifiedAt > liveServicedModification`), and `modifiedAt ≥ S − 2 s`;
+- **archive part:** its archive reader (which only covers the content before the live tail's start offset) is not done, `modifiedAt ≥ S − 2 s`, and `liveStartedAt ≥ S − 2 s`, where `liveStartedAt` is the wall-clock `now` of the poll that created and positioned the live reader (a live reader not positioned yet counts as positioned after S). Records at or after S can only sit in the archive part when the live tail was positioned after S. Codex delegated child files are read from their header line by the live reader and have no archive part;
+- a file discovered but not yet given a live reader blocks T when `modifiedAt ≥ S − 2 s`.
+
+For Claude Code only the subagent monitor's files count, and a failed subagent poll keeps every pending turn blocked. For Codex the monitor's own files count. The monitor exposes the predicate (`hasBacklog(affectingWorkStartedAt:)` / `has_delegation_backlog_since(S)`) over a per-file snapshot `(modifiedAt, livePending, archivePending, liveStartedAt)`; the attributor evaluates it for each pending entry with that entry's start. A turn finished after launch is therefore final about 30 s after completion, once its own session's files are caught up, while older history is still replayed; historical turns finalize progressively as the replay passes their period. Conditions 1 and 3, the caps and the upload fields are unchanged (notice version stays 3; no parser or metric version change).
 
 On finalization the monitor re-emits the same record id with `delegatedOutputTokens = Σ finished W.outputTokens` (0 when none); the store's upsert by id replaces the stored record, and a settled total is never replaced by a pending re-emission of a replay. Memory is bounded: work items older than the 7-day history retention are dropped, pending entries are dropped when final, and hard caps of 20,000 work items and 10,000 pending entries discard the oldest. Every launch re-parses seven days of files, so history is re-attributed after an upgrade; records that never finalize keep `nil` and are excluded from the indicator.
 
 ### Sharing and consent notice 3
 
-- `SharedSample` gains `delegatedOutputTokens`, always encoded (explicit `null` when nil). It is shared only when `0 ≤ delegatedOutputTokens ≤ 100,000,000`; a primary turn outside that range, or without a total, builds no sample. Subagent records always share `null`. `appVersion` is `0.1.16`.
+- `SharedSample` gains `delegatedOutputTokens`, always encoded (explicit `null` when nil). It is shared only when `0 ≤ delegatedOutputTokens ≤ 100,000,000`; a primary turn outside that range, or without a total, builds no sample. Subagent records always share `null`. `appVersion` is `0.1.17` (0.1.16 before).
 - **Primary turns are enqueued for sharing only once final** (`delegatedOutputTokens != nil`). Subagent records are enqueued as before. The existing rules still apply: future-only `completedAt ≥ consentStartedAt`, the seen-id dedupe and the queue caps. The old "only ids not yet in history" pre-filter is replaced by this readiness rule so the settled re-emission is shared, and each record is shared at most once.
 - **Consent notice version 3.** `SharingPreferences.currentNoticeVersion` is 3 (desktop: `SHARING_NOTICE_VERSION = "2026-10-05-v3"`). Re-consent behaves as for version 2: a saved OFF stays OFF. The notice adds: "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator." The consent example payload includes the new key.
 - **Server rule.** Before 0.1.16 the key is forbidden; from 0.1.16 it is required. For `sourceKind` `primary` it is a non-negative integer ≤ 100,000,000; for `subagent` it is `null`.
