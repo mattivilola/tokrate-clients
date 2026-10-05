@@ -197,7 +197,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.14")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.15")
         XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         // The only response (200 tokens in 10 s from the task prompt) qualifies.
@@ -605,7 +605,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         func sample(client: String, provider: String) -> SharedSample? {
             let (parser, metricVersion): (String, String) = switch client {
             case "claude-code": ("claude-transcript-v4", "claude-observed-turn-v1")
-            case "grok-build": ("grok-session-v1", "grok-observed-work-turn-v1")
+            case "grok-build": ("grok-session-v2", "grok-observed-work-turn-v1")
             default: ("codex-rollout-v2", "turn-v1")
             }
             return SharedSample(TurnMetric(
@@ -625,7 +625,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             XCTAssertNil(sample(client: "grok-build", provider: provider))
         }
         XCTAssertNil(sample(client: "claude-code", provider: "azure"))
-        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])))?.appVersion, "0.1.14")
+        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])))?.appVersion, "0.1.15")
     }
 
     // MARK: Response speed (response-v1)

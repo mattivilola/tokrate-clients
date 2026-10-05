@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
-import { toolLabel } from "../metrics";
+import { GROK_RESPONSE_EXPLANATION, GROK_RESPONSE_NOTE, isGrokBuild, toolLabel } from "../metrics";
 import type { Dashboard } from "../model/dashboard";
 import { effortChip, exactTime, num, signedPercent } from "../model/format";
 import { Gauge } from "./Gauge";
@@ -19,14 +19,15 @@ export function heroCaption(dashboard: Dashboard): string {
 }
 
 export function Hero({ dashboard }: { dashboard: Dashboard }) {
-  const { hero, responseDelta, activeKey, sample, liveLatest, scopeTools } = dashboard;
+  const { hero, responseDelta, activeKey, sample, liveLatest, scopeTools, heroTurn } = dashboard;
+  const grokHero = hero.source === "turn" && isGrokBuild(heroTurn);
   const rounded = responseDelta ? Math.round(responseDelta.percent) : 0;
   const caption = heroCaption(dashboard);
   const effort = sample ? effortChip(sample) : liveLatest?.reasoningEffort ? `${liveLatest.reasoningEffort} effort` : null;
   const label =
     hero.value === null
       ? "No response yet"
-      : `Response speed ${num(hero.value)} tokens per second, ${caption}. ${RESPONSE_DEFINITION}`;
+      : `Response speed ${num(hero.value)} tokens per second, ${caption}. ${RESPONSE_DEFINITION}${grokHero ? ` ${GROK_RESPONSE_NOTE}.` : ""}`;
   const completedAt =
     hero.at === null ? null : new Date(hero.at).toISOString();
   return (
@@ -79,7 +80,10 @@ export function Hero({ dashboard }: { dashboard: Dashboard }) {
             </p>
           )}
           <p className="definition">
-            <span>{RESPONSE_DEFINITION}</span>
+            <span title={grokHero ? GROK_RESPONSE_EXPLANATION : undefined}>
+              {RESPONSE_DEFINITION}
+              {grokHero && ` ${GROK_RESPONSE_NOTE}.`}
+            </span>
             <InfoDisclosure label="About response speed">
               <strong>Response speed</strong> · Each API response is timed from the request that
               triggered it (your prompt, a tool result or a notification) to the response&apos;s
@@ -87,6 +91,12 @@ export function Hero({ dashboard }: { dashboard: Dashboard }) {
               check-ins never move it. The large number is the median of your last 5 responses
               from the past 10 minutes, or the newest turn&apos;s own responses when none are
               live.
+              {grokHero && (
+                <>
+                  <br />
+                  {GROK_RESPONSE_EXPLANATION}
+                </>
+              )}
               <br />
               Turn speed — a whole turn including tools and waiting — stays available as the
               secondary measurement. Neither is streaming speed, and Tokrate never infers

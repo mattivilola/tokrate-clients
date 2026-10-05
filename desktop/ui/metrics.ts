@@ -77,6 +77,12 @@ export const toolLabel = (id: string) =>
     id
   ] ?? "Coding tool";
 export const clientLabel = (m: Metric) => toolLabel(client(m));
+/** Short note beside a Grok Build response speed: its value is a whole-turn average. */
+export const GROK_RESPONSE_NOTE = "Grok Build: average over all model calls in a turn";
+/** Full explanation of Grok Build's response speed for info popovers and help text. */
+export const GROK_RESPONSE_EXPLANATION =
+  "Grok Build records output tokens per turn, not per response, so its response speed is the turn's output tokens divided by the time its model calls spent generating (tool runs and permission waits excluded). Short calls are included, which can make it read lower than per-response measurements from Codex and Claude Code. Turns with nested agents are not counted.";
+export const isGrokBuild = (m: Metric | undefined) => !!m && client(m) === "grok-build";
 /** Inference provider ids a Tokrate client can attribute from explicit evidence. */
 export const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",

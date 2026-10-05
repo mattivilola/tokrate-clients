@@ -61,7 +61,7 @@ extension DashboardSnapshot {
         TrendMetric.allCases.filter { $0 != .firstToken || ttft.count > 0 }
     }
 
-    /// The selected model has turns but none with per-response timing (for example Grok Build).
+    /// The selected model has turns but none with response timing (for example Grok Build history recorded before 0.1.15).
     var responseSpeedUnavailable: Bool {
         responseHero == nil && responsePoints.isEmpty && (turnHero != nil || !points.isEmpty)
     }
@@ -69,8 +69,8 @@ extension DashboardSnapshot {
     /// Why there is no response speed: names the coding tool when its source records only whole turns.
     var responseSpeedUnavailableText: String {
         switch selectedCohort?.client {
-        case "grok-build"?:
-            "\(ModelCohort.clientTitle("grok-build")) doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn."
+        case ResponseSpeedCopy.grokBuildClient?:
+            "No response speed for these \(ModelCohort.clientTitle(ResponseSpeedCopy.grokBuildClient)) turns: they were recorded before Tokrate 0.1.15."
         default:
             "No response speed for this model yet."
         }
@@ -86,12 +86,14 @@ extension DashboardSnapshot {
     func trendSeries(for metric: TrendMetric) -> TrendSeries {
         switch metric {
         case .responseSpeed:
+            let isGrokBuild = selectedCohort?.client == ResponseSpeedCopy.grokBuildClient
             return TrendSeries(
                 metric: metric, title: "Your response speed", axisName: "Response speed",
                 points: responsePoints, stats: response, unit: "tok/s", digits: 1,
                 emptyText: responseSpeedUnavailable ? responseSpeedUnavailableText : "Your next completed response starts the chart.",
-                definition: ResponseSpeedCopy.definition,
-                help: "Median per-turn response speed in each time interval, for turns with at least one response of 200+ output tokens. Only the time the model spent responding counts; tool runs and waiting are excluded. Effort is shown per model entry; speed tier and workload are uncontrolled.",
+                definition: isGrokBuild ? ResponseSpeedCopy.grokBuildNote : ResponseSpeedCopy.definition,
+                help: "Median per-turn response speed in each time interval, for turns with at least one response of 200+ output tokens. Only the time the model spent responding counts; tool runs and waiting are excluded. Effort is shown per model entry; speed tier and workload are uncontrolled."
+                    + (isGrokBuild ? " " + ResponseSpeedCopy.grokBuildExplanation : ""),
                 accessibilitySubject: "response speed, in output tokens per responding second"
             )
         case .turnSpeed:

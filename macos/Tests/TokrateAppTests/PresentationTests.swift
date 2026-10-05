@@ -215,7 +215,7 @@ final class PresentationTests: XCTestCase {
         let sample = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
         let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"]
         XCTAssertEqual(Set(sample.keys), expected)
-        XCTAssertEqual(sample["appVersion"] as? String, "0.1.14")
+        XCTAssertEqual(sample["appVersion"] as? String, "0.1.15")
         XCTAssertEqual(sample["responseCount"] as? Int, 3)
         XCTAssertTrue(sample["providerRegion"] is NSNull, "the region is derived by the server, not sent by the app")
         XCTAssertTrue(SamplePayload.exampleJSON().contains("providerRegion"))

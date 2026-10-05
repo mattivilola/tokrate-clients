@@ -1,5 +1,7 @@
 use crate::model::{
-    ReportedReasoningEffort, TurnMetric, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+    ReportedReasoningEffort, ResponseTotals, TurnMetric, GROK_CLIENT, GROK_METRIC_VERSION,
+    GROK_PARSER_VERSION, RESPONSE_MAX_DURATION_SECONDS, RESPONSE_MAX_TOKENS_PER_SECOND,
+    RESPONSE_MIN_OUTPUT_TOKENS,
 };
 use crate::reader::{file_identity, FileIdentity, MAX_LINE_BYTES};
 use chrono::{DateTime, Duration, Utc};
@@ -17,6 +19,7 @@ const MAX_SUMMARY_BYTES: u64 = 65_536;
 const MAX_COMPLETED_TURNS: usize = 4_096;
 const MAX_SESSIONS_PER_POLL: usize = 8;
 const PER_FILE_BUDGET: usize = 32_768;
+const MAX_NESTED_DEPTH: u32 = 64;
 
 #[derive(Clone)]
 struct Candidate {
@@ -27,6 +30,46 @@ struct Candidate {
     modified_at: DateTime<Utc>,
 }
 
+/// Time one primary turn's model calls spent generating. A call's window runs from its
+/// `loop_started` to the first `tool_started` after it, or to the turn's end for the last call.
+/// Tool runs and permission waits fall between windows.
+#[derive(Clone, Default)]
+struct GenerationWindows {
+    open_since: Option<DateTime<Utc>>,
+    seconds: f64,
+    count: i64,
+    /// A window had an unreadable or out-of-range time: the turn carries no response timing.
+    invalid: bool,
+}
+
+impl GenerationWindows {
+    fn open(&mut self, at: Option<DateTime<Utc>>) {
+        self.close(at);
+        match at {
+            Some(at) => self.open_since = Some(at),
+            None => self.invalid = true,
+        }
+    }
+
+    /// Later `tool_started` events of the same call find no open window and change nothing.
+    fn close(&mut self, at: Option<DateTime<Utc>>) {
+        let Some(start) = self.open_since.take() else {
+            return;
+        };
+        let Some(end) = at else {
+            self.invalid = true;
+            return;
+        };
+        let seconds = (end - start).num_nanoseconds().unwrap_or(0) as f64 / 1e9;
+        if seconds <= 0.0 || seconds > RESPONSE_MAX_DURATION_SECONDS {
+            self.invalid = true;
+            return;
+        }
+        self.seconds += seconds;
+        self.count += 1;
+    }
+}
+
 struct StartedTurn {
     number: u64,
     started_at: DateTime<Utc>,
@@ -34,6 +77,11 @@ struct StartedTurn {
     /// Session reasoning effort when the turn began while Tokrate was watching.
     effort: Option<String>,
     valid: bool,
+    windows: GenerationWindows,
+    /// Nested agent turns currently open inside this turn.
+    nested_depth: u32,
+    /// A nested agent ran inside this turn, so its usage mixes in output Tokrate cannot time.
+    has_nested_agent: bool,
 }
 
 #[derive(Clone)]
@@ -45,6 +93,8 @@ struct CompletedTurn {
     effort: Option<String>,
     next_primary_started_at: Option<DateTime<Utc>>,
     valid: bool,
+    windows: GenerationWindows,
+    has_nested_agent: bool,
 }
 
 #[derive(Default)]
@@ -161,8 +211,31 @@ impl EventReader {
                 self.start(event)
             }
             Some("turn_ended") => self.end(event),
+            Some("loop_started") => {
+                let at = parse_date(event.get("ts"));
+                if let Some(active) = self.primary_depth_turn() {
+                    active.windows.open(at);
+                }
+            }
+            Some("tool_started") => {
+                let at = parse_date(event.get("ts"));
+                if let Some(active) = self.primary_depth_turn() {
+                    active.windows.close(at);
+                }
+            }
             _ => {}
         }
+    }
+
+    /// The active primary turn while no nested agent is open; generation is timed only there.
+    fn primary_depth_turn(&mut self) -> Option<&mut StartedTurn> {
+        if self.state.suppress_until_end {
+            return None;
+        }
+        self.state
+            .active
+            .as_mut()
+            .filter(|active| active.nested_depth == 0)
     }
 
     fn start(&mut self, event: &Map<String, Value>) {
@@ -184,6 +257,25 @@ impl EventReader {
             }
         }
         if event.get("session_relationship").and_then(Value::as_str) == Some("subagent") {
+            // A nested agent keeps the primary turn: Grok's usage includes its output, but the
+            // turn then has no response timing. Anything unreadable stays fail-closed.
+            let nested = self.state.active.as_ref().is_some_and(|active| {
+                !self.state.suppress_until_end
+                    && active.nested_depth < MAX_NESTED_DEPTH
+                    && parse_date(event.get("ts")).is_some()
+                    && event.get("turn_number").and_then(Value::as_u64).is_some()
+                    && event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value == active.session_id)
+            });
+            if nested {
+                if let Some(active) = self.state.active.as_mut() {
+                    active.nested_depth += 1;
+                    active.has_nested_agent = true;
+                }
+                return;
+            }
             if let Some(active) = self.state.active.as_mut() {
                 active.valid = false;
             }
@@ -251,6 +343,9 @@ impl EventReader {
                 None
             },
             valid: !self.state.duplicate_numbers.contains(&number),
+            windows: GenerationWindows::default(),
+            nested_depth: 0,
+            has_nested_agent: false,
         });
     }
 
@@ -260,7 +355,14 @@ impl EventReader {
             self.state.active = None;
             return;
         }
-        let Some(active) = self.state.active.take() else {
+        if let Some(active) = self.state.active.as_mut() {
+            if active.nested_depth > 0 {
+                // The end of a nested agent's turn, not of the primary turn.
+                active.nested_depth -= 1;
+                return;
+            }
+        }
+        let Some(mut active) = self.state.active.take() else {
             return;
         };
         if event.get("session_id").is_some() {
@@ -284,6 +386,7 @@ impl EventReader {
         if !active.valid || self.state.duplicate_numbers.contains(&active.number) {
             return;
         }
+        active.windows.close(Some(completed_at));
         if self.state.completed.len() >= MAX_COMPLETED_TURNS {
             self.state.completed.remove(0);
         }
@@ -295,6 +398,8 @@ impl EventReader {
             effort: active.effort,
             next_primary_started_at: None,
             valid: true,
+            windows: active.windows,
+            has_nested_agent: active.has_nested_agent,
         });
     }
 }
@@ -307,6 +412,25 @@ struct UsageTurn {
     reasoning_tokens: Option<i64>,
     incomplete: Option<bool>,
     model_usage: Option<Value>,
+    model_calls: ModelCalls,
+}
+
+/// The usage ledger's count of model calls in a turn.
+#[derive(Clone, Copy, PartialEq)]
+enum ModelCalls {
+    Missing,
+    Count(u64),
+    /// Present but not a non-negative integer: it cannot confirm any window count.
+    Invalid,
+}
+
+impl ModelCalls {
+    fn parse(value: Option<&Value>) -> Self {
+        match value {
+            None | Some(Value::Null) => Self::Missing,
+            Some(value) => value.as_u64().map_or(Self::Invalid, Self::Count),
+        }
+    }
 }
 
 struct UsageSnapshot {
@@ -349,6 +473,7 @@ impl UsageSnapshot {
                     reasoning_tokens: value.get("reasoningTokens").and_then(Value::as_i64),
                     incomplete: value.get("usageIsIncomplete").and_then(Value::as_bool),
                     model_usage: value.get("modelUsage").cloned(),
+                    model_calls: ModelCalls::parse(value.get("modelCalls")),
                 })
             })
             .collect();
@@ -602,7 +727,9 @@ impl GrokSession {
             let reasoning_tokens = row
                 .reasoning_tokens
                 .filter(|value| (0..=output_tokens).contains(value));
-            let metric = TurnMetric::new_observed(
+            let (response_output_tokens, response_duration_seconds, response_count) =
+                response_fields(turn, row, output_tokens, duration);
+            let mut metric = TurnMetric::new_observed(
                 id.clone(),
                 turn.completed_at,
                 model,
@@ -621,6 +748,9 @@ impl GrokSession {
                 GROK_PARSER_VERSION,
                 GROK_METRIC_VERSION,
             );
+            metric.response_output_tokens = response_output_tokens;
+            metric.response_duration_seconds = response_duration_seconds;
+            metric.response_count = response_count;
             // A turn becomes immutable when first accepted. A later usage.json
             // rewrite must not create a second contribution with the same ID;
             // this matches the Swift monitor and backend's first-write dedupe.
@@ -788,6 +918,43 @@ fn discover_candidates(root: &Path, cutoff: DateTime<Utc>) -> io::Result<Vec<Can
             .then_with(|| left.key.cmp(&right.key))
     });
     Ok(candidates)
+}
+
+/// Response speed of a Grok turn: its output tokens over the time its model calls spent
+/// generating. Grok records output per turn, so this is a whole-turn average over all model
+/// calls. Any ambiguity or implausible value leaves the turn without response timing.
+fn response_fields(
+    turn: &CompletedTurn,
+    row: &UsageTurn,
+    output_tokens: i64,
+    turn_duration_seconds: f64,
+) -> (Option<i64>, Option<f64>, Option<i64>) {
+    let windows = &turn.windows;
+    let count = windows.count;
+    let calls_match = match row.model_calls {
+        ModelCalls::Missing => true,
+        ModelCalls::Count(calls) => i64::try_from(calls) == Ok(count),
+        ModelCalls::Invalid => false,
+    };
+    if turn.has_nested_agent
+        || windows.invalid
+        || windows.open_since.is_some()
+        || count < 1
+        || !calls_match
+        || !windows.seconds.is_finite()
+        || windows.seconds <= 0.0
+        || windows.seconds > turn_duration_seconds
+        || output_tokens < RESPONSE_MIN_OUTPUT_TOKENS.saturating_mul(count)
+        || output_tokens as f64 / windows.seconds > RESPONSE_MAX_TOKENS_PER_SECOND
+    {
+        return (None, None, None);
+    }
+    ResponseTotals {
+        output_tokens,
+        duration_seconds: windows.seconds,
+        count,
+    }
+    .fields()
 }
 
 fn single_model_key(value: Option<&Value>) -> Option<String> {

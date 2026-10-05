@@ -392,6 +392,12 @@ private struct ResponseRow: View {
             Text("\(ModelCohort.providerTitle(summary.group.provider)) · merged across coding tools and source kinds")
                 .font(DashboardStyle.Typography.caption)
                 .foregroundStyle(DashboardStyle.muted)
+            if includesGrokBuild {
+                Text(ResponseSpeedCopy.grokBuildNote)
+                    .font(DashboardStyle.Typography.caption)
+                    .foregroundStyle(DashboardStyle.muted)
+                    .help(ResponseSpeedCopy.grokBuildExplanation)
+            }
         }
         .padding(.top, 2)
     }
@@ -409,8 +415,11 @@ private struct ResponseRow: View {
 
     private var rowHelp: String {
         func format(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "—" }
-        return "\(summary.group.displayModel) · \(ModelCohort.providerTitle(summary.group.provider))\nResponse speed median \(format(summary.response.median)) tok/s · n=\(summary.response.count) turns\nTurn speed median \(format(summary.throughput.median)) tok/s"
+        let note = includesGrokBuild ? "\n" + ResponseSpeedCopy.grokBuildNote : ""
+        return "\(summary.group.displayModel) · \(ModelCohort.providerTitle(summary.group.provider))\nResponse speed median \(format(summary.response.median)) tok/s · n=\(summary.response.count) turns\nTurn speed median \(format(summary.throughput.median)) tok/s" + note
     }
+
+    private var includesGrokBuild: Bool { summary.clients.contains(ResponseSpeedCopy.grokBuildClient) }
 }
 
 private struct CohortRow: View {

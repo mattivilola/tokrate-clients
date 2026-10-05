@@ -4,7 +4,9 @@ import { Footer } from "./Footer";
 import { chartCopy, MetricToggle, RangeToggle, TrendDetails, useTrendBuckets } from "./Trend";
 import { TrendChart } from "./TrendChart";
 import {
+  GROK_RESPONSE_EXPLANATION,
   clientLabel,
+  isGrokBuild,
   measurementChip,
   measurementTitle,
   providerRoute,
@@ -104,14 +106,16 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                       </span>
                     </td>
                     <td className="num">{m.outputTokens}</td>
-                    <td className="num">
+                    <td className="num" title={isGrokBuild(m) ? GROK_RESPONSE_EXPLANATION : undefined}>
                       {responseSpeed(m) === null ? (
                         "—"
                       ) : (
                         <>
                           <strong>{num(responseSpeed(m))}</strong> tok/s
                           <span className="table-sub">
-                            {m.responseCount ?? 0} {m.responseCount === 1 ? "response" : "responses"}
+                            {isGrokBuild(m)
+                              ? `${m.responseCount ?? 0} ${m.responseCount === 1 ? "model call" : "model calls"}`
+                              : `${m.responseCount ?? 0} ${m.responseCount === 1 ? "response" : "responses"}`}
                           </span>
                         </>
                       )}

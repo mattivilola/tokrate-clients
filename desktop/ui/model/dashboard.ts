@@ -183,6 +183,7 @@ export function buildDashboard(input: DashboardInput) {
     scopeTools,
     liveLatest,
     hero,
+    heroTurn: hero.source === "turn" ? latestResponseTurn : undefined,
     heroRelative: hero.at === null ? null : relativeTime(hero.at, now),
     responseDelta,
     responseInRange,

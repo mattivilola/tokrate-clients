@@ -297,6 +297,29 @@ final class ResponseSpeedTests: XCTestCase {
         XCTAssertFalse(snapshot.responsePoints.isEmpty)
     }
 
+    func testGrokBuildResponseSpeedCarriesTheTurnAverageNoteAndExplanation() {
+        let grok = (0..<3).map {
+            turn("g\($0)", secondsAgo: Double($0 + 1) * 600, model: "grok-4.7-build", provider: "xai", client: "grok-build",
+                 parser: "grok-session-v2", metricVersion: "grok-observed-work-turn-v1", responseSpeed: 70, responses: 4)
+        }
+        let snapshot = DashboardSnapshot(records: grok, range: .day, selection: .cohort(ModelCohort(grok[0])), now: now)
+        XCTAssertFalse(snapshot.responseSpeedUnavailable)
+        XCTAssertEqual(snapshot.effectiveTrendMetric(nil), .responseSpeed)
+        let hero = snapshot.heroReading(live: nil, liveGroup: nil)
+        XCTAssertEqual(hero.kind, .latestTurnResponse)
+        XCTAssertEqual(hero.cohort?.client, "grok-build")
+        let series = snapshot.trendSeries(for: .responseSpeed)
+        XCTAssertFalse(series.points.isEmpty)
+        XCTAssertEqual(series.definition, "Grok Build: average over all model calls in a turn")
+        XCTAssertTrue(series.help.hasSuffix(ResponseSpeedCopy.grokBuildExplanation))
+        XCTAssertEqual(snapshot.responseSummaries.first?.clients, ["grok-build"])
+
+        let claude = (0..<3).map { turn("c\($0)", secondsAgo: Double($0 + 1) * 600) }
+        let other = DashboardSnapshot(records: claude, range: .day, selection: .cohort(ModelCohort(claude[0])), now: now)
+        XCTAssertEqual(other.trendSeries(for: .responseSpeed).definition, ResponseSpeedCopy.definition)
+        XCTAssertFalse(other.trendSeries(for: .responseSpeed).help.contains("Grok Build"))
+    }
+
     func testTrendChartFollowsDataUntilTheUserPicksAMetric() {
         let timed = (0..<3).map { turn("t\($0)", secondsAgo: Double($0 + 1) * 600) }
         let withResponse = DashboardSnapshot(records: timed, range: .day, selection: .cohort(ModelCohort(timed[0])), now: now)
@@ -316,7 +339,7 @@ final class ResponseSpeedTests: XCTestCase {
         XCTAssertEqual(untimed.effectiveTrendMetric(.firstToken), .turnSpeed, "an unavailable choice falls back to automatic")
         let series = untimed.trendSeries(for: .responseSpeed)
         XCTAssertTrue(series.points.isEmpty)
-        XCTAssertEqual(series.emptyText, "Grok Build doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn.")
+        XCTAssertEqual(series.emptyText, "No response speed for these Grok Build turns: they were recorded before Tokrate 0.1.15.")
         XCTAssertEqual(untimed.availableTrendMetrics, [.responseSpeed, .turnSpeed])
 
         let other = (0..<3).map { turn("o\($0)", secondsAgo: Double($0 + 1) * 600, responseSpeed: nil) }

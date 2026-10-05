@@ -164,10 +164,10 @@ struct HistoryView: View {
                 if let speed = record.responseSpeedTPS, let count = record.responseCount {
                     Text("\(speed, specifier: "%.1f") tok/s · \(count)")
                         .monospacedDigit()
-                        .help("\(count) \(count == 1 ? "response" : "responses"): \(ResponseSpeedCopy.definition)")
+                        .help("\(count) \(count == 1 ? "response" : "responses"): \(record.client == ResponseSpeedCopy.grokBuildClient ? ResponseSpeedCopy.grokBuildExplanation : ResponseSpeedCopy.definition)")
                 } else {
                     Text("—").foregroundStyle(DashboardStyle.muted)
-                        .help("No response of at least 200 output tokens, or the source has no per-response timing.")
+                        .help("No response of at least 200 output tokens, or no response timing was recorded for this turn.")
                 }
             }
             .width(min: 140)

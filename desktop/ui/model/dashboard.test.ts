@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { DAY, cohort, type LiveResponse, type Metric } from "../metrics";
+import {
+  DAY,
+  GROK_RESPONSE_EXPLANATION,
+  GROK_RESPONSE_NOTE,
+  cohort,
+  isGrokBuild,
+  type LiveResponse,
+  type Metric,
+} from "../metrics";
 import { pickerLabel } from "../components/Header";
 import { heroCaption } from "../components/Hero";
 import { chartCopy } from "../components/Trend";
@@ -272,7 +280,7 @@ describe("chart metric", () => {
   const grok = (id: string, minutesAgo: number) =>
     turn(id, minutesAgo, 60, { model: "grok-code-fast-1", provider: "xai", client: "grok-build" });
   const GROK_TEXT =
-    "Grok Build doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn.";
+    "No response speed for these Grok Build turns: they were recorded before Tokrate 0.1.15.";
   it("follows the data until the user picks a metric", () => {
     const timed = buildDashboard(input([claudeTurn("c1", 30, 100)]));
     expect(chartCopy(timed, null).metric).toBe("response");
@@ -294,6 +302,48 @@ describe("chart metric", () => {
   it("falls back to automatic when first token is not captured", () => {
     expect(chartCopy(buildDashboard(input([grok("g1", 10)])), "ttft").metric).toBe("throughput");
     expect(chartCopy(buildDashboard(input([claudeTurn("c1", 30, 100)])), "ttft").metric).toBe("response");
+  });
+});
+
+describe("Grok Build response speed", () => {
+  const grokV2 = (id: string, minutesAgo: number) =>
+    turn(id, minutesAgo, 20, {
+      model: "grok-4",
+      provider: "xai",
+      client: "grok-build",
+      parserVersion: "grok-session-v2",
+      metricVersion: "grok-observed-work-turn-v1",
+      codexTTFTSeconds: null,
+      outputTokens: 1800,
+      durationSeconds: 90,
+      responseOutputTokens: 1800,
+      responseDurationSeconds: 20,
+      responseCount: 9,
+    });
+  it("drives the hero from the latest turn and flags it as a whole-turn average", () => {
+    const d = buildDashboard(input([grokV2("g1", 10), grokV2("g2", 30)]));
+    expect(d.hero.source).toBe("turn");
+    expect(d.hero.value).toBeCloseTo(90, 6);
+    expect(d.heroTurn?.id).toBe("g1");
+    expect(isGrokBuild(d.heroTurn)).toBe(true);
+    // Other tools' latest turns carry no Grok note.
+    const claude = buildDashboard(input([claudeTurn("c", 5, 100)]));
+    expect(claude.heroTurn?.id).toBe("c");
+    expect(isGrokBuild(claude.heroTurn)).toBe(false);
+  });
+  it("ranks Grok Build by its per-turn response speed like any other model", () => {
+    const row = buildDashboard(input([grokV2("g1", 10), grokV2("g2", 30)])).modelRows[0];
+    expect(row.median).toBeCloseTo(90, 6);
+    expect(row.turns).toBe(2);
+    expect(row.responses).toBe(18);
+    expect(row.untimed).toBe(0);
+    expect(row.tools).toEqual(["grok-build"]);
+  });
+  it("uses the exact short note and explanation", () => {
+    expect(GROK_RESPONSE_NOTE).toBe("Grok Build: average over all model calls in a turn");
+    expect(GROK_RESPONSE_EXPLANATION).toBe(
+      "Grok Build records output tokens per turn, not per response, so its response speed is the turn's output tokens divided by the time its model calls spent generating (tool runs and permission waits excluded). Short calls are included, which can make it read lower than per-response measurements from Codex and Claude Code. Turns with nested agents are not counted.",
+    );
   });
 });
 

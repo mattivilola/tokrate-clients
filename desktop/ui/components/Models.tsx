@@ -1,6 +1,8 @@
 import { ArrowLeft, Columns2 } from "lucide-react";
 import {
   clientLabel,
+  GROK_RESPONSE_EXPLANATION,
+  GROK_RESPONSE_NOTE,
   communityId,
   measurementTitle,
   toolLabel,
@@ -61,8 +63,15 @@ function ResponseModelRow({
   const fill =
     row.median !== null && max > 0 ? Math.min(100, Math.max(4, (row.median / max) * 100)) : 0;
   const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const grok = row.tools.includes("grok-build");
+  const grokOnly = grok && row.tools.length === 1;
   const sub = row.turns
-    ? [count(row.turns, "turn", "turns"), count(row.responses, "response", "responses")].join(" · ")
+    ? [
+        count(row.turns, "turn", "turns"),
+        grokOnly
+          ? count(row.responses, "model call", "model calls")
+          : count(row.responses, "response", "responses"),
+      ].join(" · ")
     : row.untimed
       ? "No per-response timing yet"
       : "Collecting data";
@@ -70,6 +79,7 @@ function ResponseModelRow({
     `${row.model.model ?? "Unknown model"} · ${providerName(row.model.provider)}`,
     `Response speed · median of ${count(row.turns, "turn", "turns")} in 24 h`,
     row.untimed ? `${count(row.untimed, "turn", "turns")} without response timing` : null,
+    grok ? `${GROK_RESPONSE_NOTE}\n${GROK_RESPONSE_EXPLANATION}` : null,
   ]
     .filter(Boolean)
     .join("\n");
@@ -367,7 +377,7 @@ export function CompareAll({
       )}
       <p className="fine">
         {view === "response"
-          ? "Response speed pools each model's responses across coding tools and Subagent work; Grok Build does not report per-response timing. Different workloads affect these numbers, and this is not an answer-quality ranking."
+          ? "Response speed pools each model's responses across coding tools and Subagent work. Grok Build records output per turn, so its value is an average over all model calls in a turn (hover a row for details). Different workloads affect these numbers, and this is not an answer-quality ranking."
           : "Different workloads and measurement definitions affect these numbers. Subagent, Work-turn and whole-turn speeds are never ranked against each other, and this is not an answer-quality ranking."}
       </p>
       <button type="button" className="text-button back" onClick={() => void store.selectCohort("auto")}>

@@ -71,7 +71,8 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
              ("claude-code", "claude-transcript-v3", "claude-observed-subagent-turn-v1"),
              ("claude-code", "claude-transcript-v4", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v4", "claude-observed-subagent-turn-v1"),
-             ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"):
+             ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"),
+             ("grok-build", "grok-session-v2", "grok-observed-work-turn-v1"):
             true
         default:
             false
@@ -178,7 +179,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         codexTTFTSeconds = try values.decodeIfPresent(Double.self, forKey: .codexTTFTSeconds)
         turnThroughputTPS = try values.decode(Double.self, forKey: .turnThroughputTPS)
         streamingTPS = try values.decodeIfPresent(Double.self, forKey: .streamingTPS)
-        // Records saved before response speed (0.1.14) carry none of these fields.
+        // Records saved before response speed (0.1.14; Grok Build 0.1.15) carry none of these fields.
         responseOutputTokens = try values.decodeIfPresent(Int.self, forKey: .responseOutputTokens)
         responseDurationSeconds = try values.decodeIfPresent(Double.self, forKey: .responseDurationSeconds)
         responseCount = try values.decodeIfPresent(Int.self, forKey: .responseCount)

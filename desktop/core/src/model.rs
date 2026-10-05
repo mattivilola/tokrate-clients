@@ -9,7 +9,7 @@ pub const CLAUDE_PARSER_VERSION: &str = "claude-transcript-v4";
 pub const CLAUDE_METRIC_VERSION: &str = "claude-observed-turn-v1";
 pub const CLAUDE_SUBAGENT_METRIC_VERSION: &str = "claude-observed-subagent-turn-v1";
 pub const GROK_CLIENT: &str = "grok-build";
-pub const GROK_PARSER_VERSION: &str = "grok-session-v1";
+pub const GROK_PARSER_VERSION: &str = "grok-session-v2";
 pub const GROK_METRIC_VERSION: &str = "grok-observed-work-turn-v1";
 
 /// Contract version of the per-response measurement shared with the Mac client.
@@ -18,6 +18,8 @@ pub const RESPONSE_METRIC_VERSION: &str = "response-v1";
 pub const RESPONSE_MIN_OUTPUT_TOKENS: i64 = 200;
 /// Longer request-to-end spans are waits, not generation.
 pub const RESPONSE_MAX_DURATION_SECONDS: f64 = 600.0;
+/// No model streams faster than this; a larger implied response speed is a measurement error.
+pub const RESPONSE_MAX_TOKENS_PER_SECOND: f64 = 2_000.0;
 
 /// True when one API response is long and fast enough to be measured.
 pub fn response_qualifies(output_tokens: i64, duration_seconds: f64) -> bool {

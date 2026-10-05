@@ -3,7 +3,9 @@ import CryptoKit
 import Foundation
 
 /// Folds completed primary work turns with the matching Grok usage ledger snapshot.
-/// Subagent output remains part of the reported root work-turn total.
+/// Subagent output remains part of the reported root work-turn total. Grok records output tokens per
+/// turn only, so response speed is a whole-turn average over the turn's generation windows
+/// (`loop_started` to the next `tool_started` or `turn_ended`); turns with nested agents carry none.
 struct GrokSessionParser: JSONLMetricParser {
     private static let earlyTimestampTolerance: TimeInterval = 1
     private static let maximumUsageWriteDelay: TimeInterval = 60
@@ -22,10 +24,44 @@ struct GrokSessionParser: JSONLMetricParser {
         case ambiguous
     }
 
+    /// Time the primary agent spent generating: one window per model call. Tool runs and permission
+    /// waits fall between a call's `tool_started` and the next `loop_started`.
+    private struct GenerationWindows: Sendable {
+        private static let maximumWindows = 1_024
+        private var openedAt: Date?
+        private(set) var durations: [TimeInterval] = []
+        private(set) var hasNestedAgent = false
+        private(set) var isInvalid = false
+
+        mutating func loopStarted(at timestamp: Date) {
+            close(at: timestamp)
+            openedAt = timestamp
+        }
+
+        /// Closes the open window. Later `tool_started` events of the same call find none open.
+        mutating func close(at timestamp: Date) {
+            guard let start = openedAt else { return }
+            openedAt = nil
+            if durations.count >= Self.maximumWindows { isInvalid = true; return }
+            durations.append(timestamp.timeIntervalSince(start))
+        }
+
+        mutating func markNestedAgent() { hasNestedAgent = true }
+        mutating func markInvalid() { isInvalid = true }
+    }
+
     private struct EndedTurn: Sendable {
         let start: TurnStart
         let endedAt: Date
         let outcome: String
+        let windows: GenerationWindows
+    }
+
+    /// The ledger row's model-call count, which must equal the number of generation windows.
+    private enum ModelCalls: Equatable, Sendable {
+        case absent
+        case count(Int)
+        case malformed
     }
 
     private struct UsageTurn: Equatable, Sendable {
@@ -33,12 +69,14 @@ struct GrokSessionParser: JSONLMetricParser {
         let outputTokens: Int
         let reasoningTokens: Int?
         let model: String?
+        let modelCalls: ModelCalls
     }
 
     private var sourceIdentity: String
     private var sessionID: String?
     private var stack: [Frame] = []
     private var activeStart: TurnStart?
+    private var windows = GenerationWindows()
     private var seenPrimaryTurnNumbers: Set<Int> = []
     private var ambiguousTurnNumbers: Set<Int> = []
     private var endedTurns: [Int: EndedTurn] = [:]
@@ -56,6 +94,7 @@ struct GrokSessionParser: JSONLMetricParser {
         sessionID = nil
         stack.removeAll(keepingCapacity: true)
         activeStart = nil
+        windows = GenerationWindows()
         seenPrimaryTurnNumbers.removeAll(keepingCapacity: true)
         ambiguousTurnNumbers.removeAll(keepingCapacity: true)
         endedTurns.removeAll(keepingCapacity: true)
@@ -88,6 +127,8 @@ struct GrokSessionParser: JSONLMetricParser {
             consumeStart(event)
         } else if type == "turn_ended" {
             consumeEnd(event)
+        } else if type == "loop_started" || type == "tool_started" {
+            consumeGeneration(event, isLoopStart: type == "loop_started")
         }
         return nil
     }
@@ -117,7 +158,10 @@ struct GrokSessionParser: JSONLMetricParser {
             let number = ledgerNumber - 1
             let model = soleModelUsage(entry["modelUsage"])
             let reasoningTokens = nonnegativeInteger(entry["reasoningTokens"]).flatMap { $0 <= outputTokens ? $0 : nil }
-            let value = UsageTurn(endedAt: endedAt, outputTokens: outputTokens, reasoningTokens: reasoningTokens, model: model)
+            let value = UsageTurn(
+                endedAt: endedAt, outputTokens: outputTokens, reasoningTokens: reasoningTokens, model: model,
+                modelCalls: modelCalls(entry["modelCalls"])
+            )
             if replacement[number] != nil {
                 duplicateNumbers.insert(number)
             } else {
@@ -149,6 +193,7 @@ struct GrokSessionParser: JSONLMetricParser {
             guard duration.isFinite, duration > 0 else { continue }
             let rate = Double(usage.outputTokens) / duration
             guard rate.isFinite, rate >= 0 else { continue }
+            let response = responseTiming(eventTurn.windows, usage: usage, turnDuration: duration)
             let digest = SHA256.hash(data: Data("\(sessionID)|\(number)".utf8))
             records.append(TurnMetric(
                 id: digest.map { String(format: "%02x", $0) }.joined(),
@@ -161,12 +206,15 @@ struct GrokSessionParser: JSONLMetricParser {
                 streamingTPS: nil,
                 client: "grok-build",
                 clientVersion: nil,
-                parserVersion: "grok-session-v1",
+                parserVersion: "grok-session-v2",
                 metricVersion: "grok-observed-work-turn-v1",
                 reasoningOutputTokens: usage.reasoningTokens,
                 sourceKind: "primary",
                 provider: "unknown",
-                reasoningEffort: confirmedEffort(eventTurn.start)
+                reasoningEffort: confirmedEffort(eventTurn.start),
+                responseOutputTokens: response?.tokens,
+                responseDurationSeconds: response?.seconds,
+                responseCount: response?.count
             ))
             emittedTurnNumbers.insert(number)
         }
@@ -198,6 +246,7 @@ struct GrokSessionParser: JSONLMetricParser {
                 return
             }
             stack.append(.subagent)
+            if activeStart != nil { windows.markNestedAgent() }
             return
         }
         guard relationship == "primary" else {
@@ -224,7 +273,19 @@ struct GrokSessionParser: JSONLMetricParser {
         seenPrimaryTurnNumbers.insert(number)
         let start = TurnStart(number: number, startedAt: timestamp, sessionID: id, effort: isLiveRead ? currentEffort : nil)
         activeStart = start
+        windows = GenerationWindows()
         stack = [.primary(number)]
+    }
+
+    /// `loop_started` opens a model call's window (closing any still open); the call's first
+    /// `tool_started` closes it. Only the primary agent's own events count.
+    private mutating func consumeGeneration(_ event: [String: Any], isLoopStart: Bool) {
+        guard stack.count == 1, case .primary(let number) = stack[0], activeStart?.number == number else { return }
+        guard let timestamp = parseDate(event["ts"]) else {
+            windows.markInvalid()
+            return
+        }
+        if isLoopStart { windows.loopStarted(at: timestamp) } else { windows.close(at: timestamp) }
     }
 
     private mutating func consumeEnd(_ event: [String: Any]) {
@@ -235,6 +296,8 @@ struct GrokSessionParser: JSONLMetricParser {
             return
         }
         activeStart = nil
+        var turnWindows = windows
+        turnWindows.close(at: timestamp)
         if let rawID = event["session_id"] as? String,
            let id = safeIdentifier(rawID), id != start.sessionID {
             ambiguousTurnNumbers.insert(number)
@@ -251,7 +314,7 @@ struct GrokSessionParser: JSONLMetricParser {
             pendingEndedTurnNumbers.remove(number)
             return
         }
-        endedTurns[number] = EndedTurn(start: start, endedAt: timestamp, outcome: outcome)
+        endedTurns[number] = EndedTurn(start: start, endedAt: timestamp, outcome: outcome, windows: turnWindows)
         pendingEndedTurnNumbers.insert(number)
     }
 
@@ -273,6 +336,34 @@ struct GrokSessionParser: JSONLMetricParser {
         guard names.count == 1 else { return nil }
         let name = names[0]
         return safeIdentifier(name, maximum: 80)
+    }
+
+    /// Grok reports output tokens per turn, so the turn's total over its summed generation windows is the
+    /// only response measurement available. Anything that does not add up fails closed.
+    private func responseTiming(
+        _ windows: GenerationWindows, usage: UsageTurn, turnDuration: TimeInterval
+    ) -> (tokens: Int, seconds: Double, count: Int)? {
+        let count = windows.durations.count
+        guard !windows.hasNestedAgent, !windows.isInvalid, count >= 1,
+              windows.durations.allSatisfy({ $0.isFinite && $0 > 0 && $0 <= ResponseSpeed.maximumDurationSeconds })
+        else { return nil }
+        switch usage.modelCalls {
+        case .absent: break
+        case .count(let calls): guard calls == count else { return nil }
+        case .malformed: return nil
+        }
+        let tokens = usage.outputTokens
+        let seconds = windows.durations.reduce(0, +)
+        guard tokens >= ResponseSpeed.minimumOutputTokens * count,
+              seconds <= turnDuration + 0.000_001,
+              Double(tokens) / seconds <= SharedSample.maximumResponseTPS
+        else { return nil }
+        return (tokens, min(seconds, turnDuration), count)
+    }
+
+    private func modelCalls(_ value: Any?) -> ModelCalls {
+        guard let value, !(value is NSNull) else { return .absent }
+        return nonnegativeInteger(value).map { .count($0) } ?? .malformed
     }
 
     private func validTurnCount(_ value: Any?) -> Bool {

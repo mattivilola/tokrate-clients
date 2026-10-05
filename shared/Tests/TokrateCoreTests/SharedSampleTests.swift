@@ -30,8 +30,8 @@ final class SharedSampleTests: XCTestCase {
             "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs",
             "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"
         ])
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.14")
-        XCTAssertEqual(sample.appVersion, "0.1.14")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.15")
+        XCTAssertEqual(sample.appVersion, "0.1.15")
         for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens"] {
             XCTAssertTrue(object[key] is NSNull, "\(key) is encoded as null when absent")
         }

@@ -253,16 +253,22 @@ struct MenuBarView: View {
                     checkForUpdates: { updates.checkForUpdates() }
                 )
                 .dashboardInset(padding: 10)
-                definitions
+                definitions(snapshot: snapshot)
             }
         }
     }
 
-    private var definitions: some View {
+    private func definitions(snapshot: DashboardSnapshot) -> some View {
+        let showsGrokBuild = snapshot.selectedCohort?.client == ResponseSpeedCopy.grokBuildClient
+            || snapshot.responseSummaries.contains { $0.clients.contains(ResponseSpeedCopy.grokBuildClient) }
+        return definitionsText(grokBuild: showsGrokBuild)
+    }
+
+    private func definitionsText(grokBuild: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("How Tokrate measures speed")
                 .font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.ink)
-            Text("\(ResponseSpeedCopy.explanation) Turn speed is output tokens divided by whole-turn seconds, including tools, waiting and reasoning. Speed ordering is not a quality ranking. First token is shown only when Codex reports it. Effort is read from session metadata when present; speed tier and workload are not controlled.")
+            Text("\(ResponseSpeedCopy.explanation)\(grokBuild ? " " + ResponseSpeedCopy.grokBuildExplanation : "") Turn speed is output tokens divided by whole-turn seconds, including tools, waiting and reasoning. Speed ordering is not a quality ranking. First token is shown only when Codex reports it. Effort is read from session metadata when present; speed tier and workload are not controlled.")
                 .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }

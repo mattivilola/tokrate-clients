@@ -6,7 +6,7 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.14"
+    public let appVersion = "0.1.15"
     public let parserVersion: String
     public let metricVersion: String
     public let model: String

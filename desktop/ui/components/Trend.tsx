@@ -1,5 +1,13 @@
 import { useMemo } from "react";
-import { buckets, client, measurementLabel, toolLabel, type Metric } from "../metrics";
+import {
+  GROK_RESPONSE_EXPLANATION,
+  buckets,
+  client,
+  isGrokBuild,
+  measurementLabel,
+  toolLabel,
+  type Metric,
+} from "../metrics";
 import type { Dashboard } from "../model/dashboard";
 import { num, signedPercent } from "../model/format";
 import { useStore } from "../store/store";
@@ -75,7 +83,7 @@ export const responseSpeedUnavailable = (dashboard: Dashboard) =>
 /** Why there is no response speed: names the coding tool when its source records only whole turns. */
 export const responseUnavailableText = (sample: Metric | undefined) =>
   sample && client(sample) === "grok-build"
-    ? `${toolLabel("grok-build")} doesn't record per-response timing, so response speed isn't available. Turn speed covers the whole turn.`
+    ? `No response speed for these ${toolLabel("grok-build")} turns: they were recorded before Tokrate 0.1.15.`
     : "No response speed for this model yet.";
 
 /**
@@ -246,7 +254,8 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
         <small>Your workload may have changed.</small>
       </p>
       <p className="detail-line detail-fine">
-        Response speed pools this model&apos;s responses across coding tools. Turn speed:{" "}
+        Response speed pools this model&apos;s responses across coding tools.
+        {isGrokBuild(sample) && ` ${GROK_RESPONSE_EXPLANATION}`} Turn speed:{" "}
         {sample ? measurementLabel(sample) : "Turn speed"}.
         {firstToken && " First token is the wait Codex reports and does not claim first visible text."}{" "}
         Bucket medians, gaps mean no turns. Different workloads and measurement definitions affect

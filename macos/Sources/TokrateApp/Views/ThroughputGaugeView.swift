@@ -249,7 +249,7 @@ struct ThroughputGaugeView: View {
             }
             .frame(maxWidth: .infinity)
             .accessibilityElement(children: .combine)
-            .help(reading.usesResponseSpeed ? ResponseSpeedCopy.explanation : "\(measurementTitle) is output tokens divided by whole-turn seconds. It is not streaming speed.")
+            .help(isGrokBuildResponse ? ResponseSpeedCopy.grokBuildExplanation : reading.usesResponseSpeed ? ResponseSpeedCopy.explanation : "\(measurementTitle) is output tokens divided by whole-turn seconds. It is not streaming speed.")
         } else {
             Text("Waiting for a completed response")
                 .font(DashboardStyle.Typography.footnote)
@@ -286,6 +286,16 @@ struct ThroughputGaugeView: View {
                 .lineLimit(1)
                 .help(reading.completedAt.map { "Completed \(RelativeTime.exact($0))" } ?? "")
         }
+        if isGrokBuildResponse {
+            Text(ResponseSpeedCopy.grokBuildNote)
+                .font(DashboardStyle.Typography.caption)
+                .foregroundStyle(DashboardStyle.muted)
+                .lineLimit(2).multilineTextAlignment(.center)
+        }
+    }
+
+    private var isGrokBuildResponse: Bool {
+        reading.usesResponseSpeed && reading.cohort?.client == ResponseSpeedCopy.grokBuildClient
     }
 
     private func tint(for delta: SpeedDelta) -> Color {

@@ -357,6 +357,10 @@ enum ResponseSpeedCopy {
     /// Very short qualifier shown beside the unit under the readout.
     static let shortDefinition = "while responding, tools excluded"
     static let explanation = "Response speed is output tokens divided by the seconds the model spent producing each response, from the request that triggered it to its last output. Tool runs and your own time are excluded; reasoning tokens are included. Only responses of at least 200 tokens and at most 10 minutes count, so tiny automated check-ins never do. It is not streaming speed."
+    /// Grok Build records output tokens per turn only, so its response speed is a whole-turn average.
+    static let grokBuildClient = "grok-build"
+    static let grokBuildNote = "Grok Build: average over all model calls in a turn"
+    static let grokBuildExplanation = "Grok Build records output tokens per turn, not per response, so its response speed is the turn's output tokens divided by the time its model calls spent generating (tool runs and permission waits excluded). Short calls are included, which can make it read lower than per-response measurements from Codex and Claude Code. Turns with nested agents are not counted."
 }
 
 // MARK: - Menu-bar readout

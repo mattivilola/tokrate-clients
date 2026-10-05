@@ -1145,7 +1145,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.14");
+    assert_eq!(sample.app_version, "0.1.15");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1220,7 +1220,12 @@ fn grok_emits_completed_turn_once_even_if_usage_snapshot_later_changes() {
     assert_eq!(first.codex_ttft_seconds, None);
     assert_eq!(first.client, GROK_CLIENT);
     assert_eq!(first.parser_version, GROK_PARSER_VERSION);
+    assert_eq!(first.parser_version, "grok-session-v2");
     assert_eq!(first.metric_version, GROK_METRIC_VERSION);
+    // No loop events were recorded, so there is no response timing.
+    assert_eq!(first.response_output_tokens, None);
+    assert_eq!(first.response_duration_seconds, None);
+    assert_eq!(first.response_count, None);
     let normalized = serde_json::to_string(first).unwrap();
     assert!(!normalized.contains("session-private-id"));
 
@@ -1907,7 +1912,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.14");
+    assert_eq!(first[0].app_version, "0.1.15");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -1997,11 +2002,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         CLAUDE_PARSER_VERSION,
         CLAUDE_SUBAGENT_METRIC_VERSION,
     );
-    let grok = TurnMetric::new_observed(
+    let mut grok = TurnMetric::new_observed(
         "local-grok-digest".into(),
         completed,
         Some("grok-4".into()),
-        240,
+        1200,
         12.0,
         None,
         Some(70),
@@ -2012,6 +2017,9 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         GROK_PARSER_VERSION,
         GROK_METRIC_VERSION,
     );
+    grok.response_output_tokens = Some(1200);
+    grok.response_duration_seconds = Some(10.0);
+    grok.response_count = Some(4);
     let samples = [
         crate::SharedSample::from_metric(
             &claude,
@@ -2046,7 +2054,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.14-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.15-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2054,7 +2062,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.14-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.15-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2076,7 +2084,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.14");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.15");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2085,9 +2093,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][0]["responseDurationMs"], 8000.0);
     assert_eq!(actual["samples"][0]["responseCount"], 2);
     assert_eq!(actual["samples"][0]["providerRegion"], Value::Null);
-    assert_eq!(actual["samples"][1]["responseOutputTokens"], Value::Null);
-    assert_eq!(actual["samples"][1]["responseDurationMs"], Value::Null);
-    assert_eq!(actual["samples"][1]["responseCount"], Value::Null);
+    // Grok Build reports a whole-turn average over its model calls under parser v2.
+    assert_eq!(actual["samples"][1]["parserVersion"], "grok-session-v2");
+    assert_eq!(actual["samples"][1]["responseOutputTokens"], 1200);
+    assert_eq!(actual["samples"][1]["responseDurationMs"], 10000.0);
+    assert_eq!(actual["samples"][1]["responseCount"], 4);
     assert_eq!(actual["samples"][2]["responseCount"], Value::Null);
     assert_eq!(actual["samples"][3]["responseDurationMs"], 9000.0);
     assert_eq!(actual["samples"][3]["providerRegion"], "eu");
@@ -2558,7 +2568,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.14");
+    assert_eq!(crate::APP_VERSION, "0.1.15");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -4484,4 +4494,306 @@ fn claude_remembered_record_times_are_bounded_per_file() {
     ));
     recent.flush_pending(time("2026-10-03T10:00:10Z"), true);
     assert_eq!(recent.take_responses()[0].duration_seconds, 9.0);
+}
+
+// --- Grok Build response speed (whole-turn average over model calls) ----------------------------
+
+/// Builds one primary Grok turn from `(milliseconds since 10:00:00Z, event type)` steps. The
+/// session log, like a real one, carries phase and permission noise that must not matter.
+fn grok_timed_events(session_id: &str, number: u64, steps: &[(i64, &str)]) -> Vec<Vec<u8>> {
+    let base = time("2026-10-03T10:00:00Z");
+    steps
+        .iter()
+        .map(|(offset, kind)| {
+            let ts = (base + Duration::milliseconds(*offset))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let mut event = json!({ "type": kind, "ts": ts });
+            match *kind {
+                "turn_started" => {
+                    event["schema_version"] = json!("1.0");
+                    event["session_id"] = json!(session_id);
+                    event["turn_number"] = json!(number);
+                    event["session_relationship"] = json!("primary");
+                }
+                "turn_ended" => event["outcome"] = json!("completed"),
+                "tool_started" => event["tool_name"] = json!("run_command"),
+                "loop_started" => event["loop_index"] = json!(0),
+                _ => {}
+            }
+            serde_json::to_vec(&event).unwrap()
+        })
+        .collect()
+}
+
+/// A usage ledger row ending when the last step does; `model_calls` of `null` omits the field.
+fn grok_timed_usage(
+    session_id: &str,
+    number: u64,
+    output_tokens: i64,
+    model_calls: Value,
+    ended_ms: i64,
+) -> Value {
+    let ended = (time("2026-10-03T10:00:00Z") + Duration::milliseconds(ended_ms))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut usage = grok_usage(session_id, number, output_tokens);
+    usage["updatedAt"] = json!(ended);
+    usage["turns"][0]["endedAt"] = json!(ended);
+    if model_calls.is_null() {
+        usage["turns"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("modelCalls");
+    } else {
+        usage["turns"][0]["modelCalls"] = model_calls;
+    }
+    usage
+}
+
+/// Steps of a turn with one model call per window length (milliseconds). Every call but the last
+/// ends at a tool, which runs for three seconds; the last one ends the turn.
+fn grok_call_steps(windows_ms: &[i64]) -> Vec<(i64, &'static str)> {
+    let mut steps = vec![(0, "turn_started")];
+    let mut at = 1_000;
+    for (index, window) in windows_ms.iter().enumerate() {
+        steps.push((at, "loop_started"));
+        steps.push((at + 10, "phase_changed"));
+        steps.push((at + 400, "first_token"));
+        steps.push((at + 500, "phase_changed"));
+        if index + 1 == windows_ms.len() {
+            steps.push((at + window, "turn_ended"));
+        } else {
+            steps.push((at + window, "tool_started"));
+            steps.push((at + window + 100, "permission_requested"));
+            steps.push((at + window + 1_100, "permission_resolved"));
+            steps.push((at + window + 3_000, "tool_completed"));
+            at += window + 3_000;
+        }
+    }
+    steps
+}
+
+fn grok_turn_end_ms(steps: &[(i64, &str)]) -> i64 {
+    steps.last().unwrap().0
+}
+
+fn grok_poll_all(root: &Path) -> Vec<TurnMetric> {
+    let mut monitor = GrokMonitor::new(root.to_path_buf());
+    let mut found = Vec::new();
+    for _ in 0..4 {
+        found.extend(monitor.poll(time("2026-10-03T10:30:00Z")).unwrap());
+    }
+    found
+}
+
+/// Runs a built turn through the monitor and returns the single emitted record.
+fn grok_single_record(steps: &[(i64, &str)], output_tokens: i64, model_calls: Value) -> TurnMetric {
+    let temp = TestDir::new();
+    write_grok_session(
+        temp.path(),
+        "timed",
+        &grok_timed_events("timed", 0, steps),
+        &grok_timed_usage(
+            "timed",
+            0,
+            output_tokens,
+            model_calls,
+            grok_turn_end_ms(steps),
+        ),
+    );
+    let mut found = grok_poll_all(temp.path());
+    assert_eq!(found.len(), 1, "the work turn itself is still recorded");
+    found.remove(0)
+}
+
+fn assert_no_grok_response_timing(record: &TurnMetric) {
+    assert_eq!(record.response_output_tokens, None);
+    assert_eq!(record.response_duration_seconds, None);
+    assert_eq!(record.response_count, None);
+}
+
+#[test]
+fn grok_real_shape_turn_reports_a_whole_turn_response_speed_over_all_model_calls() {
+    // Shape and totals of a real Grok Build 1.0.46 turn: nine model calls whose generation
+    // windows sum to 179.9 s (Grok's own apiDurationMs was 179.7 s) and 12,535 output tokens.
+    let mut windows = vec![20_000; 9];
+    windows[0] = 19_900;
+    let steps = grok_call_steps(&windows);
+    let record = grok_single_record(&steps, 12_535, json!(9));
+    assert_eq!(record.parser_version, "grok-session-v2");
+    assert_eq!(record.output_tokens, 12_535);
+    assert_eq!(record.response_output_tokens, Some(12_535));
+    assert_eq!(record.response_count, Some(9));
+    assert!((record.response_duration_seconds.unwrap() - 179.9).abs() < 1e-6);
+    let speed =
+        record.response_output_tokens.unwrap() as f64 / record.response_duration_seconds.unwrap();
+    assert!((speed - 69.68).abs() < 0.01);
+    // Tool runs are excluded: the turn is longer than the generation windows.
+    assert!(record.duration_seconds > record.response_duration_seconds.unwrap() + 20.0);
+
+    // The shared sample carries the same fields under parser v2.
+    let sample = crate::SharedSample::from_metric(&record, Uuid::new_v4()).unwrap();
+    assert_eq!(sample.parser_version, "grok-session-v2");
+    assert_eq!(sample.response_output_tokens, Some(12_535));
+    assert_eq!(sample.response_count, Some(9));
+    assert!((sample.response_duration_ms.unwrap() - 179_900.0).abs() < 1e-3);
+}
+
+#[test]
+fn grok_final_window_is_closed_by_turn_ended_and_a_new_loop_closes_the_previous_window() {
+    // One call, no tool: the window runs to the turn's end.
+    let single = grok_call_steps(&[30_000]);
+    let record = grok_single_record(&single, 3_000, json!(1));
+    assert_eq!(record.response_count, Some(1));
+    assert!((record.response_duration_seconds.unwrap() - 30.0).abs() < 1e-6);
+
+    // Two calls without a tool between them: the second loop closes the first window.
+    let steps = vec![
+        (0, "turn_started"),
+        (1_000, "loop_started"),
+        (11_000, "loop_started"),
+        (31_000, "turn_ended"),
+    ];
+    let record = grok_single_record(&steps, 6_000, json!(2));
+    assert_eq!(record.response_count, Some(2));
+    assert!((record.response_duration_seconds.unwrap() - 30.0).abs() < 1e-6);
+}
+
+#[test]
+fn grok_repeated_tool_started_events_in_one_call_do_not_extend_the_window() {
+    let steps = vec![
+        (0, "turn_started"),
+        (1_000, "loop_started"),
+        (11_000, "tool_started"),
+        (11_500, "tool_started"),
+        (12_000, "tool_started"),
+        (20_000, "tool_completed"),
+        (21_000, "loop_started"),
+        (31_000, "turn_ended"),
+    ];
+    let record = grok_single_record(&steps, 4_000, json!(2));
+    assert_eq!(record.response_count, Some(2));
+    assert!((record.response_duration_seconds.unwrap() - 20.0).abs() < 1e-6);
+}
+
+#[test]
+fn grok_nested_agents_keep_the_work_turn_but_have_no_response_timing() {
+    let session = "nested";
+    let mut events = grok_timed_events(
+        session,
+        0,
+        &[
+            (0, "turn_started"),
+            (1_000, "loop_started"),
+            (11_000, "tool_started"),
+        ],
+    );
+    events.push(grok_event(
+        "turn_started",
+        json!({
+            "ts":"2026-10-03T10:00:12Z",
+            "session_id":session,
+            "turn_number":1,
+            "session_relationship":"subagent"
+        }),
+    ));
+    // The nested agent's own model calls are not the primary turn's windows.
+    events.extend(grok_timed_events(
+        session,
+        0,
+        &[(13_000, "loop_started"), (23_000, "tool_started")],
+    ));
+    events.extend(grok_timed_events(session, 0, &[(25_000, "turn_ended")]));
+    events.extend(grok_timed_events(
+        session,
+        0,
+        &[(26_000, "loop_started"), (36_000, "turn_ended")],
+    ));
+    let temp = TestDir::new();
+    write_grok_session(
+        temp.path(),
+        session,
+        &events,
+        &grok_timed_usage(session, 0, 4_000, json!(2), 36_000),
+    );
+    let found = grok_poll_all(temp.path());
+    assert_eq!(found.len(), 1, "the usage still includes the nested output");
+    assert_eq!(found[0].output_tokens, 4_000);
+    assert_no_grok_response_timing(&found[0]);
+}
+
+#[test]
+fn grok_windows_longer_than_the_response_limit_have_no_response_timing() {
+    let ten_minutes = grok_call_steps(&[600_000, 10_000]);
+    let record = grok_single_record(&ten_minutes, 4_000, json!(2));
+    assert_eq!(record.response_count, Some(2), "exactly 600 s still counts");
+
+    let too_long = grok_call_steps(&[600_001, 10_000]);
+    let record = grok_single_record(&too_long, 4_000, json!(2));
+    assert_eq!(record.output_tokens, 4_000);
+    assert_no_grok_response_timing(&record);
+}
+
+#[test]
+fn grok_model_call_count_must_match_the_usage_ledger_when_present() {
+    let steps = grok_call_steps(&[20_000, 20_000, 20_000]);
+    assert_no_grok_response_timing(&grok_single_record(&steps, 3_000, json!(4)));
+    assert_no_grok_response_timing(&grok_single_record(&steps, 3_000, json!(2)));
+    assert_no_grok_response_timing(&grok_single_record(&steps, 3_000, json!("3")));
+    assert_no_grok_response_timing(&grok_single_record(&steps, 3_000, json!(-3)));
+    assert_eq!(
+        grok_single_record(&steps, 3_000, json!(3)).response_count,
+        Some(3)
+    );
+    // A ledger row without modelCalls accepts the window count.
+    assert_eq!(
+        grok_single_record(&steps, 3_000, Value::Null).response_count,
+        Some(3)
+    );
+}
+
+#[test]
+fn grok_needs_at_least_the_response_minimum_output_tokens_per_model_call_on_average() {
+    let steps = grok_call_steps(&[20_000; 9]);
+    assert_no_grok_response_timing(&grok_single_record(&steps, 1_799, json!(9)));
+    let exact = grok_single_record(&steps, 1_800, json!(9));
+    assert_eq!(exact.response_output_tokens, Some(1_800));
+    assert_eq!(exact.response_count, Some(9));
+}
+
+#[test]
+fn grok_implausibly_fast_or_unwindowed_turns_have_no_response_timing() {
+    // 60,000 tokens in 20 s of generation is 3,000 tok/s, above the shared limit.
+    let steps = grok_call_steps(&[20_000]);
+    assert_no_grok_response_timing(&grok_single_record(&steps, 60_000, json!(1)));
+    assert_eq!(
+        grok_single_record(&steps, 40_000, json!(1)).response_count,
+        Some(1)
+    );
+
+    // No loop events: nothing to time.
+    let bare = vec![(0, "turn_started"), (20_000, "turn_ended")];
+    assert_no_grok_response_timing(&grok_single_record(&bare, 3_000, json!(1)));
+
+    // A window with no extent is not a window.
+    let instant = vec![
+        (0, "turn_started"),
+        (1_000, "loop_started"),
+        (1_000, "tool_started"),
+        (2_000, "loop_started"),
+        (22_000, "turn_ended"),
+    ];
+    assert_no_grok_response_timing(&grok_single_record(&instant, 3_000, json!(2)));
+}
+
+#[test]
+fn grok_parser_v1_history_is_not_shared_by_this_version() {
+    let steps = grok_call_steps(&[20_000]);
+    let mut record = grok_single_record(&steps, 2_000, json!(1));
+    assert!(crate::SharedSample::from_metric(&record, Uuid::new_v4()).is_some());
+    record.parser_version = "grok-session-v1".into();
+    assert!(crate::SharedSample::from_metric(&record, Uuid::new_v4()).is_none());
+    // It still decodes and displays locally.
+    let decoded: TurnMetric =
+        serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+    assert_eq!(decoded.parser_version, "grok-session-v1");
 }

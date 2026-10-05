@@ -45,7 +45,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(json["client"] as? String, "claude-code")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-turn-v1")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.14")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.15")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         let serialized = try XCTUnwrap(String(data: bytes, encoding: .utf8))
         XCTAssertFalse(serialized.contains("PRIVATE_PROMPT"))
@@ -96,7 +96,10 @@ final class MultiSourceParserTests: XCTestCase {
         let snapshot = try usageSnapshot(number: 7, endedAt: "2026-10-03T20:00:25.000Z", output: 160, updatedAt: "2026-10-03T20:00:26.000Z", modelUsage: ["grok-4": ["outputTokens": 160]])
         let metric = try XCTUnwrap(parser.reconcile(snapshot: snapshot).first)
         XCTAssertEqual(metric.client, "grok-build")
-        XCTAssertEqual(metric.parserVersion, "grok-session-v1")
+        XCTAssertEqual(metric.parserVersion, "grok-session-v2")
+        // A nested agent makes the turn's generation time ambiguous: no response speed.
+        XCTAssertNil(metric.responseSpeedTPS)
+        XCTAssertNil(metric.responseCount)
         XCTAssertEqual(metric.metricVersion, "grok-observed-work-turn-v1")
         XCTAssertEqual(metric.model, "grok-4")
         XCTAssertEqual(metric.outputTokens, 160)
@@ -272,6 +275,212 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(status.sessions, 2)
     }
 
+    // MARK: Grok Build response speed (0.1.15)
+
+    /// One model call: generation window, then its tool run (with the repeated `tool_started` and the
+    /// permission events real sessions write). The last call of a turn has no tool; `turn_ended` closes it.
+    private struct GrokCall {
+        let generating: TimeInterval
+        var toolRun: TimeInterval? = 5
+        var repeatedToolStarts = 1
+    }
+
+    private let grokBase = Date(timeIntervalSince1970: 1_790_000_000)
+
+    private func grokTurn(
+        number: Int = 0, firstLoopDelay: TimeInterval = 0.1, calls: [GrokCall], nestedAgentAt: TimeInterval? = nil
+    ) throws -> (parser: GrokSessionParser, endedAt: Date) {
+        var parser = GrokSessionParser(sourceIdentity: "synthetic")
+        func at(_ offset: TimeInterval) -> String { iso8601(grokBase.addingTimeInterval(offset)) }
+        _ = parser.consume(line: try grokStart(timestamp: at(0), number: number, relationship: "primary"))
+        var cursor = firstLoopDelay
+        for (index, call) in calls.enumerated() {
+            _ = parser.consume(line: try json(["type": "loop_started", "ts": at(cursor), "loop_index": index]))
+            _ = parser.consume(line: try json(["type": "phase_changed", "ts": at(cursor + 0.2), "phase": "streaming_text"]))
+            cursor += call.generating
+            guard let toolRun = call.toolRun else { continue }
+            for repeated in 0..<call.repeatedToolStarts {
+                _ = parser.consume(line: try json(["type": "tool_started", "ts": at(cursor + Double(repeated) * 0.05), "tool_name": "run"]))
+            }
+            _ = parser.consume(line: try json(["type": "permission_requested", "ts": at(cursor + 0.1)]))
+            cursor += toolRun
+            if let nestedAgentAt, index == 0 {
+                _ = parser.consume(line: try grokStart(timestamp: at(nestedAgentAt), number: 90, relationship: "subagent"))
+                _ = parser.consume(line: try grokEnd(timestamp: at(nestedAgentAt + 1), outcome: "completed"))
+            }
+        }
+        _ = parser.consume(line: try grokEnd(timestamp: at(cursor), outcome: "completed"))
+        return (parser, grokBase.addingTimeInterval(cursor))
+    }
+
+    private func grokMetric(
+        _ turn: (parser: GrokSessionParser, endedAt: Date), output: Int, modelCalls: Any? = 9, number: Int = 0
+    ) throws -> TurnMetric {
+        var parser = turn.parser
+        let snapshot = try usageSnapshot(
+            number: number, endedAt: iso8601(turn.endedAt.addingTimeInterval(0.02)), output: output,
+            updatedAt: iso8601(turn.endedAt.addingTimeInterval(1)), modelUsage: ["grok-4.7-build": ["outputTokens": output]],
+            modelCalls: modelCalls
+        )
+        return try XCTUnwrap(parser.reconcile(snapshot: snapshot).first)
+    }
+
+    func testGrokReportsWholeTurnResponseSpeedFromGenerationWindows() throws {
+        // Real-shape turn (Grok Build 1.0.46): nine model calls, eight followed by tool runs (the first
+        // with parallel tool starts), windows summing to 179.9 s, 12,535 output tokens, 220 s in all.
+        var calls = (0..<8).map { _ in GrokCall(generating: 20) }
+        calls[3].repeatedToolStarts = 3
+        calls.append(GrokCall(generating: 19.9, toolRun: nil))
+        let metric = try grokMetric(try grokTurn(calls: calls), output: 12_535)
+
+        XCTAssertEqual(metric.parserVersion, "grok-session-v2")
+        XCTAssertEqual(metric.metricVersion, "grok-observed-work-turn-v1")
+        XCTAssertEqual(metric.responseOutputTokens, 12_535)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 179.9, accuracy: 0.001)
+        XCTAssertEqual(metric.responseCount, 9)
+        XCTAssertEqual(try XCTUnwrap(metric.responseSpeedTPS), 12_535 / 179.9, accuracy: 0.01)
+        XCTAssertEqual(metric.durationSeconds, 220, accuracy: 0.001)
+        XCTAssertEqual(metric.turnThroughputTPS, 12_535 / 220, accuracy: 0.01)
+        XCTAssertNil(metric.ttftSeconds)
+
+        let sample = try XCTUnwrap(SharedSample(metric))
+        XCTAssertEqual(sample.responseOutputTokens, 12_535)
+        XCTAssertEqual(try XCTUnwrap(sample.responseDurationMs), 179_900, accuracy: 1)
+        XCTAssertEqual(sample.responseCount, 9)
+        XCTAssertEqual(sample.parserVersion, "grok-session-v2")
+        XCTAssertEqual(sample.appVersion, "0.1.15")
+
+        let shorter = try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 33.0), GrokCall(generating: 33.0), GrokCall(generating: 33.2, toolRun: nil)]),
+            output: 8_032, modelCalls: 3
+        )
+        XCTAssertEqual(try XCTUnwrap(shorter.responseDurationSeconds), 99.2, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(shorter.responseSpeedTPS), 8_032 / 99.2, accuracy: 0.01)
+    }
+
+    func testGrokFirstWindowStartsAtLoopStartAndLastIsClosedByTurnEnd() throws {
+        // A 2 s lead-in before the first call is not generation; the single window runs to turn_ended.
+        let metric = try grokMetric(
+            try grokTurn(firstLoopDelay: 2, calls: [GrokCall(generating: 10, toolRun: nil)]), output: 500, modelCalls: 1
+        )
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 10, accuracy: 0.001)
+        XCTAssertEqual(metric.responseCount, 1)
+        XCTAssertEqual(metric.durationSeconds, 12, accuracy: 0.001)
+    }
+
+    func testGrokRepeatedToolStartsKeepTheWindowClosedAndLoopWithoutToolClosesPreviousWindow() throws {
+        let repeated = try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 10, toolRun: 30, repeatedToolStarts: 4), GrokCall(generating: 6, toolRun: nil)]),
+            output: 800, modelCalls: 2
+        )
+        XCTAssertEqual(try XCTUnwrap(repeated.responseDurationSeconds), 16, accuracy: 0.001)
+
+        // Two loop_started events with no tool_started between them: the first window ends at the second.
+        var parser = GrokSessionParser(sourceIdentity: "synthetic")
+        func at(_ offset: TimeInterval) -> String { iso8601(grokBase.addingTimeInterval(offset)) }
+        _ = parser.consume(line: try grokStart(timestamp: at(0), number: 0, relationship: "primary"))
+        _ = parser.consume(line: try json(["type": "loop_started", "ts": at(1), "loop_index": 0]))
+        _ = parser.consume(line: try json(["type": "loop_started", "ts": at(5), "loop_index": 1]))
+        _ = parser.consume(line: try grokEnd(timestamp: at(9), outcome: "completed"))
+        let metric = try grokMetric((parser, grokBase.addingTimeInterval(9)), output: 400, modelCalls: 2)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 8, accuracy: 0.001)
+        XCTAssertEqual(metric.responseCount, 2)
+    }
+
+    func testGrokTurnsWithNestedAgentsHaveNoResponseSpeed() throws {
+        let turn = try grokTurn(
+            calls: [GrokCall(generating: 20), GrokCall(generating: 20, toolRun: nil)], nestedAgentAt: 21
+        )
+        let metric = try grokMetric(turn, output: 4_000, modelCalls: 2)
+        XCTAssertNil(metric.responseOutputTokens)
+        XCTAssertNil(metric.responseDurationSeconds)
+        XCTAssertNil(metric.responseCount)
+        XCTAssertEqual(metric.outputTokens, 4_000, "the work-turn metric still includes nested output")
+        XCTAssertEqual(metric.turnThroughputTPS, 4_000 / metric.durationSeconds, accuracy: 0.001)
+        XCTAssertEqual(metric.parserVersion, "grok-session-v2")
+    }
+
+    func testGrokWindowsOutsideZeroToTenMinutesFailClosed() throws {
+        XCTAssertNil(try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 600.5, toolRun: nil)]), output: 5_000, modelCalls: 1
+        ).responseCount)
+        XCTAssertEqual(try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 600, toolRun: nil)]), output: 5_000, modelCalls: 1
+        ).responseCount, 1)
+
+        // A turn_ended (or tool_started) at the same instant as its loop_started is a zero-length window.
+        XCTAssertNil(try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 10), GrokCall(generating: 0, toolRun: nil)]), output: 800, modelCalls: 2
+        ).responseCount)
+
+        // One bad window discards the turn even when the others are fine.
+        XCTAssertNil(try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 10), GrokCall(generating: 700, toolRun: nil)]), output: 9_000, modelCalls: 2
+        ).responseCount)
+
+        // Out-of-order timestamps give a negative window.
+        var parser = GrokSessionParser(sourceIdentity: "synthetic")
+        func at(_ offset: TimeInterval) -> String { iso8601(grokBase.addingTimeInterval(offset)) }
+        _ = parser.consume(line: try grokStart(timestamp: at(0), number: 0, relationship: "primary"))
+        _ = parser.consume(line: try json(["type": "loop_started", "ts": at(8), "loop_index": 0]))
+        _ = parser.consume(line: try json(["type": "tool_started", "ts": at(6), "tool_name": "run"]))
+        _ = parser.consume(line: try grokEnd(timestamp: at(10), outcome: "completed"))
+        XCTAssertNil(try grokMetric((parser, grokBase.addingTimeInterval(10)), output: 500, modelCalls: 1).responseCount)
+
+        // A loop_started without a timestamp cannot be trusted.
+        var untimed = GrokSessionParser(sourceIdentity: "synthetic")
+        _ = untimed.consume(line: try grokStart(timestamp: at(0), number: 0, relationship: "primary"))
+        _ = untimed.consume(line: try json(["type": "loop_started", "loop_index": 0]))
+        _ = untimed.consume(line: try json(["type": "loop_started", "ts": at(1), "loop_index": 1]))
+        _ = untimed.consume(line: try grokEnd(timestamp: at(10), outcome: "completed"))
+        XCTAssertNil(try grokMetric((untimed, grokBase.addingTimeInterval(10)), output: 500, modelCalls: 1).responseCount)
+    }
+
+    func testGrokModelCallsMustMatchTheWindowCount() throws {
+        func metric(modelCalls: Any?) throws -> TurnMetric {
+            try grokMetric(try grokTurn(calls: [GrokCall(generating: 10), GrokCall(generating: 10, toolRun: nil)]), output: 800, modelCalls: modelCalls)
+        }
+        XCTAssertEqual(try metric(modelCalls: 2).responseCount, 2)
+        XCTAssertNil(try metric(modelCalls: 3).responseCount)
+        XCTAssertNil(try metric(modelCalls: 1).responseCount)
+        XCTAssertNil(try metric(modelCalls: "2").responseCount)
+        XCTAssertNil(try metric(modelCalls: -2).responseCount)
+        // A ledger row without a call count accepts the window count.
+        XCTAssertEqual(try metric(modelCalls: nil).responseCount, 2)
+        XCTAssertEqual(try metric(modelCalls: NSNull()).responseCount, 2)
+        // The turn itself is still reported.
+        XCTAssertEqual(try metric(modelCalls: 3).outputTokens, 800)
+    }
+
+    func testGrokResponseNeedsTwoHundredOutputTokensPerCallAndAPlausibleRate() throws {
+        func metric(output: Int, generating: TimeInterval = 10) throws -> TurnMetric {
+            try grokMetric(
+                try grokTurn(calls: [GrokCall(generating: generating), GrokCall(generating: generating, toolRun: nil)]),
+                output: output, modelCalls: 2
+            )
+        }
+        XCTAssertEqual(try metric(output: 400).responseCount, 2)
+        XCTAssertNil(try metric(output: 399).responseCount)
+        XCTAssertNil(try metric(output: 399).responseSpeedTPS)
+        XCTAssertEqual(try metric(output: 399).outputTokens, 399)
+        // Faster than 2,000 tok/s over the summed windows is a measurement error.
+        XCTAssertNotNil(try metric(output: 40_000).responseCount)
+        XCTAssertNil(try metric(output: 40_001).responseCount)
+    }
+
+    func testGrokTurnWithoutGenerationEventsHasNoResponseSpeed() throws {
+        let noLoops = try grokMetric(try grokTurn(calls: []), output: 500, modelCalls: 1)
+        XCTAssertNil(noLoops.responseCount)
+        XCTAssertEqual(noLoops.parserVersion, "grok-session-v2")
+    }
+
+    func testGrokSessionV1AndV2AreBothSupportedSourceTuples() {
+        for parser in ["grok-session-v1", "grok-session-v2"] {
+            XCTAssertTrue(TurnMetric.isSupportedSourceTuple(client: "grok-build", parserVersion: parser, metricVersion: "grok-observed-work-turn-v1"))
+        }
+        XCTAssertFalse(TurnMetric.isSupportedSourceTuple(client: "grok-build", parserVersion: "grok-session-v3", metricVersion: "grok-observed-work-turn-v1"))
+    }
+
     func testLegacyHistoryDefaultsToCodexAndCorruptNonCodexTTFTIsSuppressed() throws {
         let legacy = #"{"id":"legacy","completedAt":"2026-10-03T20:00:00Z","model":"gpt-test","outputTokens":100,"durationSeconds":10,"codexTTFTSeconds":1.5,"turnThroughputTPS":10,"streamingTPS":null}"#
         let decoder = JSONDecoder()
@@ -378,14 +587,16 @@ final class MultiSourceParserTests: XCTestCase {
         updatedAt: String,
         incomplete: Bool = false,
         modelUsage: [String: [String: Int]],
-        primaryModelId: String? = nil
+        primaryModelId: String? = nil,
+        modelCalls: Any? = 2
     ) throws -> Data {
         // The usage ledger numbers turns from 1 while events.jsonl numbers them from 0.
         var turn: [String: Any] = [
             "turnNumber": number + 1, "endedAt": endedAt, "outputTokens": output,
-            "reasoningTokens": 20, "modelCalls": 2, "turnCount": 1,
+            "reasoningTokens": 20, "turnCount": 1,
             "usageIsIncomplete": incomplete, "modelUsage": modelUsage
         ]
+        if let modelCalls { turn["modelCalls"] = modelCalls }
         if let primaryModelId { turn["primaryModelId"] = primaryModelId }
         return try json(["sessionId": sessionID, "updatedAt": updatedAt, "turns": [turn]])
     }
