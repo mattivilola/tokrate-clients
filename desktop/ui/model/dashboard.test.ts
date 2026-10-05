@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { DAY, cohort, type Metric } from "../metrics";
+import { DAY, cohort, type LiveResponse, type Metric } from "../metrics";
+import { pickerLabel } from "../components/Header";
+import { heroCaption } from "../components/Hero";
 import { buildDashboard, communityLine } from "./dashboard";
 import { PROVIDER_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
@@ -24,7 +26,7 @@ const turn = (id: string, minutesAgo: number, tps: number, p: Partial<Metric> = 
 });
 const input = (records: Metric[], over = {}) => ({
   records,
-  selection: "latest",
+  selection: "auto",
   days: 1,
   tool: "all" as const,
   provider: "all" as const,
@@ -47,7 +49,7 @@ describe("dashboard model", () => {
   it("falls back to the latest cohort when the saved selection has expired", () => {
     const records = [turn("1", 5, 60)];
     const d = buildDashboard(input(records, { selection: cohort(turn("x", 1, 1, { model: "gone" })) }));
-    expect(d.selection).toBe("latest");
+    expect(d.selection).toBe("auto");
     expect(d.sample?.id).toBe("1");
   });
   it("keeps all-models mode free of pooled values", () => {
@@ -112,9 +114,9 @@ describe("gauge", () => {
     const d = buildDashboard(input([...codex, sub]));
     // Latest codex value 60, group median 60 -> 1.25 x 60 = 75.
     expect(d.latest?.client ?? "codex").toBe("codex");
-    expect(d.gaugeMax).toBe(75);
-    const only = buildDashboard(input([sub], { selection: "latest" }));
-    expect(only.gaugeMax).toBe(500);
+    expect(d.turnGaugeMax).toBe(75);
+    const only = buildDashboard(input([sub], { selection: "auto" }));
+    expect(only.turnGaugeMax).toBe(500);
   });
   it("groups models by measurement group, most recent group first", () => {
     const sub = turn("s", 1, 30, { client: "claude-code", parserVersion: "claude-transcript-v2", metricVersion: "claude-observed-subagent-turn-v1", sourceKind: "subagent", codexTTFTSeconds: null });
@@ -177,5 +179,136 @@ describe("formatting and scales", () => {
     expect(monitoringState(base).tone).toBe("good");
     expect(monitoringState({ ...base, monitorStatus: "A source folder could not be read." }).tone).toBe("warn");
     expect(monitoringState({ ...base, settings: { ...base.settings, monitoring: false } }).label).toBe("Paused");
+  });
+});
+
+// --- response speed -----------------------------------------------------------------------------
+
+/** A turn whose qualifying responses ran at `rtps` tokens per second. */
+const rturn = (id: string, minutesAgo: number, rtps: number, p: Partial<Metric> = {}): Metric =>
+  turn(id, minutesAgo, 20, { responseOutputTokens: 600, responseDurationSeconds: 600 / rtps, responseCount: 3, ...p });
+const claudeTurn = (id: string, minutesAgo: number, rtps: number, p: Partial<Metric> = {}) =>
+  rturn(id, minutesAgo, rtps, {
+    client: "claude-code",
+    model: "claude-opus-5-5",
+    provider: "anthropic",
+    parserVersion: "claude-transcript-v4",
+    metricVersion: "claude-observed-turn-v1",
+    sourceKind: "primary",
+    codexTTFTSeconds: null,
+    ...p,
+  });
+const liveResponse = (id: string, minutesAgo: number, tps: number, p: Partial<LiveResponse> = {}): LiveResponse => ({
+  id,
+  completedAt: new Date(NOW - minutesAgo * 60000).toISOString(),
+  model: "claude-opus-5-5",
+  provider: "anthropic",
+  client: "claude-code",
+  sourceKind: "primary",
+  metricVersion: "response-v1",
+  reasoningEffort: "high",
+  outputTokens: 500,
+  durationSeconds: 500 / tps,
+  ...p,
+});
+
+describe("response speed hero", () => {
+  const records = [claudeTurn("c1", 30, 100), claudeTurn("c2", 90, 100), claudeTurn("c3", 150, 100), rturn("x1", 40, 40)];
+  it("shows the median of the last five live responses and its caption", () => {
+    const live = [10, 20, 30, 40, 50, 60].map((tps, i) => liveResponse(`l${i}`, 8 - i * 0.5, tps));
+    const d = buildDashboard(input(records, { live, active: { model: "claude-opus-5-5", provider: "anthropic" } }));
+    // Newest five are the last five: 20..60 tok/s -> median 40.
+    expect(d.hero).toMatchObject({ source: "live", count: 5 });
+    expect(d.hero.value).toBeCloseTo(40, 6);
+    expect(heroCaption(d)).toBe("last 5 responses · just now".replace("just now", d.heroRelative!));
+    expect(d.liveDriven).toBe(true);
+    expect(pickerLabel(d)).toBe("Auto · claude-opus-5-5");
+    // 24 h response-speed median of the model is 100 tok/s: the live 40 is 60% below it.
+    expect(d.responseDelta?.percent).toBeCloseTo(-60, 6);
+  });
+  it("ignores live responses older than ten minutes and falls back to the newest turn", () => {
+    const live = [liveResponse("old", 11, 50)];
+    const d = buildDashboard(input(records, { live, active: null }));
+    expect(d.hero.source).toBe("turn");
+    expect(d.hero.value).toBeCloseTo(100, 6);
+    expect(d.activeKey).toEqual({ model: "claude-opus-5-5", provider: "anthropic" });
+    expect(heroCaption(d)).toMatch(/^latest turn · 30 min ago$/);
+    expect(pickerLabel(d)).toBe("Auto · claude-opus-5-5");
+  });
+  it("falls back to the newest turn with response data, else to the newest turn", () => {
+    const noResponse = turn("n", 1, 50, { model: "no-response" });
+    expect(buildDashboard(input([noResponse, ...records])).activeKey?.model).toBe("claude-opus-5-5");
+    const only = buildDashboard(input([noResponse]));
+    expect(only.activeKey?.model).toBe("no-response");
+    expect(only.hero.value).toBeNull();
+    expect(heroCaption(only)).toBe("Waiting for a response");
+  });
+  it("restricts Auto to one coding tool and labels it", () => {
+    const d = buildDashboard(input(records, { selection: "auto:codex", active: null }));
+    expect(d.activeKey?.model).toBe("model-a");
+    expect(pickerLabel(d)).toBe("Auto in Codex · model-a");
+    const live = [liveResponse("c", 1, 80)];
+    const claude = buildDashboard(input(records, { selection: "auto:claude-code", live, active: { model: "claude-opus-5-5", provider: "anthropic" } }));
+    expect(claude.hero.source).toBe("live");
+    expect(pickerLabel(claude)).toBe("Auto in Claude Code · claude-opus-5-5");
+  });
+  it("pins a model across tools and a cohort exactly", () => {
+    const pinned = buildDashboard(input(records, { selection: 'model:["model-a","openai"]' }));
+    expect(pinned.activeKey?.model).toBe("model-a");
+    expect(pinned.liveDriven).toBe(false);
+    expect(pickerLabel(pinned)).toBe("model-a");
+    const exact = buildDashboard(input(records, { selection: cohort(claudeTurn("q", 1, 1)) }));
+    expect(exact.mode.kind).toBe("cohort");
+    expect(exact.selected.map((m) => m.id)).toEqual(["c1", "c2", "c3"]);
+    expect(pickerLabel(exact)).toMatch("claude-opus-5-5");
+  });
+  it("migrates the legacy latest selection to Auto", () => {
+    expect(buildDashboard(input(records, { selection: "latest" })).selection).toBe("auto");
+  });
+});
+
+describe("response speed model rows", () => {
+  const records = [
+    claudeTurn("c1", 30, 120),
+    claudeTurn("c2", 60, 100),
+    claudeTurn("sub", 45, 200, { sourceKind: "subagent", metricVersion: "claude-observed-subagent-turn-v1", model: "claude-opus-5-5" }),
+    rturn("x1", 40, 60),
+    rturn("x2", 70, 80),
+    // Same model name through another provider route is a separate row.
+    claudeTurn("b1", 50, 90, { provider: "amazon-bedrock", providerRegion: "eu" }),
+    // Grok reports no per-response timing.
+    turn("g1", 20, 30, { client: "grok-build", model: "grok-4", provider: "xai", metricVersion: "grok-observed-work-turn-v1", codexTTFTSeconds: null }),
+  ];
+  it("groups by model and provider across tools and subagent work, ranked by 24 h median", () => {
+    const d = buildDashboard(input(records));
+    const rows = d.modelRows.slice().sort((a, b) => (b.median ?? -1) - (a.median ?? -1));
+    const claude = rows.find((r) => r.model.model === "claude-opus-5-5" && r.model.provider === "anthropic")!;
+    expect(claude.turns).toBe(3);
+    expect(claude.median).toBeCloseTo(120, 6);
+    expect(claude.hasSubagent).toBe(true);
+    expect(claude.responses).toBe(9);
+    expect(rows.find((r) => r.model.provider === "amazon-bedrock")?.median).toBeCloseTo(90, 6);
+    const codex = rows.find((r) => r.model.model === "model-a")!;
+    expect(codex.tools).toEqual(["codex"]);
+    expect(codex.median).toBeCloseTo(70, 6);
+    const grok = rows.find((r) => r.model.model === "grok-4")!;
+    expect(grok.median).toBeNull();
+    expect(grok.untimed).toBe(1);
+    expect(rows[rows.length - 1]).toBe(grok);
+    expect(rows[0]).toBe(claude);
+  });
+  it("lists tools of a model that runs in several coding tools", () => {
+    const shared = [rturn("a", 10, 50, { model: "shared", provider: "openai" }), claudeTurn("b", 20, 70, { model: "shared", provider: "openai" })];
+    const row = buildDashboard(input(shared)).modelRows[0];
+    expect(row.tools).toEqual(["codex", "claude-code"]);
+    expect(row.turns).toBe(2);
+  });
+  it("keeps the turn-speed measurement groups available", () => {
+    const d = buildDashboard(input(records, { sort: "throughput" }));
+    expect(d.compareGroups.map((g) => g.title)).toContain("Claude Code · Subagent turn speed");
+  });
+  it("scales the response gauge by the largest model median", () => {
+    const d = buildDashboard(input(records));
+    expect(d.gaugeMax).toBe(niceScaleMax(120));
   });
 });

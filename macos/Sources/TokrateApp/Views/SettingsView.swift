@@ -74,13 +74,17 @@ struct SettingsView: View {
 struct SettingsGeneralPage: View {
     @Bindable var store: HistoryStore
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
+    @AppStorage("showProviderBadge") private var showProviderBadge = true
 
     var body: some View {
         SettingsPage {
-            SettingsGroup(title: "Menu bar", footer: "Shows the latest turn speed of the selected model. The value updates after completed turns; it is not a live streaming speed. Paused monitoring shows a dash.") {
+            SettingsGroup(title: "Menu bar", footer: "Shows the response speed of the model you are using: the median of its last five responses in the past ten minutes, updated as responses finish. It is not a streaming speed. A dash means no recent response, or paused monitoring.") {
                 Toggle("Show speed in menu bar", isOn: $showMenuBarSpeed)
                     .toggleStyle(.switch)
-                    .help("Shows recent whole-turn speed for the selected model. All models shows Compare without a pooled speed.")
+                    .help("Shows the live response speed of the followed model. All models shows Compare without a pooled speed.")
+                Toggle("Show provider badge", isOn: $showProviderBadge)
+                    .toggleStyle(.switch)
+                    .help("Shows a letter badge for the model's maker (A Anthropic, O OpenAI, X xAI) before the speed.")
             }
             SettingsGroup(title: "Monitoring", footer: "Pausing stops reads of your session files. Already-queued sharing stays active; turn sharing off to stop all community requests.") {
                 HStack(spacing: 10) {
@@ -121,7 +125,7 @@ struct SettingsSharingPage: View {
             SharingView(
                 preferences: store.sharingPreferences,
                 selection: store.dashboardSelection,
-                latestCohort: store.latestCohort,
+                resolvedCohort: store.resolvedCohort,
                 compact: false,
                 showToggle: true,
                 framed: true,

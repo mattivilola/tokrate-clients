@@ -25,10 +25,89 @@ extension DashboardSnapshot.Bucket: Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.date == rhs.date && lhs.median == rhs.median && lhs.turns == rhs.turns }
 }
 
+/// The speed the trend chart plots. Response speed is the default.
+enum TrendMetric: String, CaseIterable, Identifiable {
+    case responseSpeed, turnSpeed, firstToken
+    var id: String { rawValue }
+    var shortTitle: String {
+        switch self {
+        case .responseSpeed: "Response"
+        case .turnSpeed: "Turn"
+        case .firstToken: "First token"
+        }
+    }
+}
+
+/// One plotted series with its labels and statistics.
+struct TrendSeries {
+    let metric: TrendMetric
+    let title: String
+    let axisName: String
+    let points: [DashboardSnapshot.Bucket]
+    let stats: MetricStats
+    let unit: String
+    let digits: Int
+    let emptyText: String
+    let definition: String
+    let help: String
+    let accessibilitySubject: String
+
+    func value(_ number: Double?) -> String { number.map { String(format: "%.*f", digits, $0) } ?? "—" }
+}
+
+extension DashboardSnapshot {
+    /// Series available for the selected model; first token only when the source reports it.
+    var availableTrendMetrics: [TrendMetric] {
+        TrendMetric.allCases.filter { $0 != .firstToken || ttft.count > 0 }
+    }
+
+    func trendSeries(for metric: TrendMetric) -> TrendSeries {
+        switch metric {
+        case .responseSpeed:
+            return TrendSeries(
+                metric: metric, title: "Your response speed", axisName: "Response speed",
+                points: responsePoints, stats: response, unit: "tok/s", digits: 1,
+                emptyText: "Your next completed response starts the chart.",
+                definition: ResponseSpeedCopy.definition,
+                help: "Median per-turn response speed in each time interval, for turns with at least one response of 200+ output tokens. Only the time the model spent responding counts; tool runs and waiting are excluded. Effort is shown per model entry; speed tier and workload are uncontrolled.",
+                accessibilitySubject: "response speed, in output tokens per responding second"
+            )
+        case .turnSpeed:
+            let help: String
+            switch throughputLabel {
+            case "Work-turn speed":
+                help = "Median whole-work-turn output per second in each time interval. Grok's reported output can include nested subagent work."
+            case "Subagent turn speed":
+                help = "Median subagent output per second in each time interval, from the task prompt to the final answer. Each turn includes tool work and waiting."
+            default:
+                help = "Median whole-turn speed in each time interval, for turns with at least 20 output tokens. Each turn includes tool work, waiting, and reasoning."
+            }
+            return TrendSeries(
+                metric: metric, title: "Your \(throughputLabel.lowercased())", axisName: throughputLabel,
+                points: points, stats: throughput, unit: "tok/s", digits: 1,
+                emptyText: "Your next completed turn starts the chart.",
+                definition: "Whole turn, including tools and waiting.",
+                help: help + " Whole turn, 20+ output tokens. Effort is shown per model entry; speed tier and workload are uncontrolled.",
+                accessibilitySubject: "turn speed, in output tokens per whole-turn second"
+            )
+        case .firstToken:
+            return TrendSeries(
+                metric: metric, title: "Your first token", axisName: "First token",
+                points: ttftPoints, stats: ttft, unit: "s", digits: 2,
+                emptyText: "Your next completed turn starts the chart.",
+                definition: "Source-reported wait for the first token.",
+                help: "Median Codex-reported first-token wait in each time interval. First-visible-text semantics are unverified.",
+                accessibilitySubject: "first-token wait, in seconds"
+            )
+        }
+    }
+}
+
 struct TrendChartView: View {
     let snapshot: DashboardSnapshot
     @Binding var range: DashboardRange
     var compact = true
+    @State private var selectedMetric: TrendMetric = .responseSpeed
 
     var body: some View {
         if compact {
@@ -38,36 +117,56 @@ struct TrendChartView: View {
         }
     }
 
+    /// The chosen series, falling back to turn speed when a source has no response data at all.
+    private var series: TrendSeries {
+        let available = snapshot.availableTrendMetrics
+        var metric = available.contains(selectedMetric) ? selectedMetric : .responseSpeed
+        if metric == .responseSpeed, snapshot.responsePoints.isEmpty, snapshot.responseHero == nil, !snapshot.points.isEmpty { metric = .turnSpeed }
+        return snapshot.trendSeries(for: metric)
+    }
+
     private var content: some View {
-        VStack(alignment: .leading, spacing: compact ? 8 : 12) {
+        let series = series
+        return VStack(alignment: .leading, spacing: compact ? 8 : 12) {
             HStack {
-                Text("Your turn speed").font(DashboardStyle.Typography.bodyEmphasis).foregroundStyle(DashboardStyle.ink)
+                Text(series.title).font(DashboardStyle.Typography.bodyEmphasis).foregroundStyle(DashboardStyle.ink)
                 Spacer()
                 RangePicker(range: $range)
             }
-            chart
-            Text(statsLine)
+            metricPicker(series)
+            chart(series)
+            Text(statsLine(series))
                 .font(DashboardStyle.Typography.caption.monospacedDigit())
                 .foregroundStyle(DashboardStyle.muted)
                 .lineLimit(1).minimumScaleFactor(0.85)
-                .help(trendHelp)
-                .accessibilityLabel(statsAccessibility)
+                .help(series.help)
+                .accessibilityLabel(statsAccessibility(series))
         }
     }
 
+    private func metricPicker(_ series: TrendSeries) -> some View {
+        Picker("Speed shown in the chart", selection: Binding(get: { series.metric }, set: { selectedMetric = $0 })) {
+            ForEach(snapshot.availableTrendMetrics) { metric in Text(metric.shortTitle).tag(metric) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .accessibilityLabel("Speed shown in the chart")
+        .help("Response speed excludes tools and your time; turn speed covers the whole turn.")
+    }
+
     @ViewBuilder
-    private var chart: some View {
+    private func chart(_ series: TrendSeries) -> some View {
         let height: CGFloat = compact ? 76 : 170
-        if snapshot.points.isEmpty {
+        if series.points.isEmpty {
             VStack(spacing: 6) {
                 Image(systemName: "waveform.path").font(.system(size: 18)).foregroundStyle(DashboardStyle.accent)
-                Text("Your next completed turn starts the chart.")
+                Text(series.emptyText)
                     .font(DashboardStyle.Typography.footnote).foregroundStyle(DashboardStyle.muted)
             }
             .frame(maxWidth: .infinity)
             .frame(height: compact ? 64 : 170)
         } else {
-            let runs = TrendRun.runs(from: snapshot.points, range: range)
+            let runs = TrendRun.runs(from: series.points, range: range)
             Chart {
                 ForEach(runs) { run in
                     if run.points.count > 1 {
@@ -75,7 +174,7 @@ struct TrendChartView: View {
                             AreaMark(
                                 x: .value("Time", point.date),
                                 yStart: .value("Zero", 0),
-                                yEnd: .value("Turn speed", point.median),
+                                yEnd: .value(series.axisName, point.median),
                                 series: .value("Run", "area\(run.id)")
                             )
                             .foregroundStyle(LinearGradient(colors: [DashboardStyle.arcEnd.opacity(0.22), DashboardStyle.arcStart.opacity(0.0)], startPoint: .top, endPoint: .bottom))
@@ -83,21 +182,21 @@ struct TrendChartView: View {
                         ForEach(run.points) { point in
                             LineMark(
                                 x: .value("Time", point.date),
-                                y: .value("Turn speed", point.median),
+                                y: .value(series.axisName, point.median),
                                 series: .value("Run", "line\(run.id)")
                             )
                             .foregroundStyle(DashboardStyle.gradient)
                             .lineStyle(StrokeStyle(lineWidth: 2.25, lineCap: .round, lineJoin: .round))
                         }
                     } else if let point = run.points.first {
-                        PointMark(x: .value("Time", point.date), y: .value("Turn speed", point.median))
+                        PointMark(x: .value("Time", point.date), y: .value(series.axisName, point.median))
                             .foregroundStyle(DashboardStyle.arcEnd)
                             .symbolSize(40)
                     }
                 }
             }
             .chartXScale(domain: snapshot.dates)
-            .chartYScale(domain: 0...max(1, (snapshot.points.map(\.median).max() ?? 1) * 1.15))
+            .chartYScale(domain: 0...max(1, (series.points.map(\.median).max() ?? 1) * 1.15))
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 3)) { axis in
                     AxisValueLabel {
@@ -116,33 +215,21 @@ struct TrendChartView: View {
                 }
             }
             .frame(height: height)
-            .accessibilityLabel("Local turn speed over \(range == .day ? "24 hours" : "seven days"), in output tokens per whole-turn second")
-            .accessibilityValue(statsAccessibility)
+            .accessibilityLabel("Local \(series.accessibilitySubject) over \(range == .day ? "24 hours" : "seven days")")
+            .accessibilityValue(statsAccessibility(series))
         }
     }
 
-    private var statsLine: String {
-        guard snapshot.throughput.count > 0 else { return "Whole turn, including tools and waiting." }
-        func value(_ number: Double?) -> String { number.map { String(format: "%.1f", $0) } ?? "—" }
-        return "\(range.shortTitle) median \(value(snapshot.throughput.median)) tok/s · min \(value(snapshot.throughput.minimum)) · max \(value(snapshot.throughput.maximum)) · n=\(snapshot.throughput.count)"
+    private func statsLine(_ series: TrendSeries) -> String {
+        guard series.stats.count > 0 else { return series.definition }
+        return "\(range.shortTitle) median \(series.value(series.stats.median)) \(series.unit) · min \(series.value(series.stats.minimum)) · max \(series.value(series.stats.maximum)) · n=\(series.stats.count)"
     }
 
-    private var statsAccessibility: String {
-        guard snapshot.throughput.count > 0 else { return "No completed turns in this range" }
-        func value(_ number: Double?) -> String { number.map { String(format: "%.1f", $0) } ?? "unavailable" }
-        return "\(range.title) median \(value(snapshot.throughput.median)) tokens per second, minimum \(value(snapshot.throughput.minimum)), maximum \(value(snapshot.throughput.maximum)), \(snapshot.throughput.count) turns"
-    }
-
-    private var trendHelp: String {
-        let common = " Whole turn, 20+ output tokens. Effort is shown per model entry; speed tier and workload are uncontrolled."
-        switch snapshot.throughputLabel {
-        case "Work-turn speed":
-            return "Median whole-work-turn output per second in each time interval. Grok's reported output can include nested subagent work." + common
-        case "Subagent turn speed":
-            return "Median subagent output per second in each time interval, from the task prompt to the final answer. Each turn includes tool work and waiting." + common
-        default:
-            return "Median whole-turn speed in each time interval, for turns with at least 20 output tokens. Each turn includes tool work, waiting, and reasoning." + common
-        }
+    private func statsAccessibility(_ series: TrendSeries) -> String {
+        guard series.stats.count > 0 else { return "No completed measurements in this range" }
+        let unit = series.metric == .firstToken ? "seconds" : "tokens per second"
+        func value(_ number: Double?) -> String { number.map { String(format: "%.*f", series.digits, $0) } ?? "unavailable" }
+        return "\(range.title) median \(value(series.stats.median)) \(unit), minimum \(value(series.stats.minimum)), maximum \(value(series.stats.maximum)), \(series.stats.count) turns"
     }
 }
 

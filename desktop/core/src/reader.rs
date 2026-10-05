@@ -1,6 +1,7 @@
 use crate::claude_parser::ClaudeTranscriptParser;
-use crate::model::TurnMetric;
+use crate::model::{ResponseMetric, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
+use chrono::{DateTime, Utc};
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -58,6 +59,9 @@ pub(crate) struct IncrementalReader {
     bytes_read_last_poll: usize,
     is_caught_up: bool,
     tail_bytes: Option<u64>,
+    /// Recent-tail readers keep the responses they complete; replay readers discard them.
+    collect_responses: bool,
+    responses: Vec<ResponseMetric>,
 }
 
 impl IncrementalReader {
@@ -127,10 +131,31 @@ impl IncrementalReader {
             bytes_read_last_poll: 0,
             is_caught_up: false,
             tail_bytes,
+            collect_responses: tail_bytes.is_some(),
+            responses: Vec::new(),
         }
     }
 
-    pub fn poll(&mut self, max_bytes: usize) -> io::Result<Vec<TurnMetric>> {
+    /// Responses completed by this reader since the last call. Only the recent-tail (live)
+    /// reader returns any, so history replay never reaches the live stream.
+    pub fn take_responses(&mut self) -> Vec<ResponseMetric> {
+        std::mem::take(&mut self.responses)
+    }
+
+    /// Reads up to `max_bytes`. Once the file is read to its end, work that only waited for more
+    /// records is closed using `now`.
+    pub fn poll(&mut self, max_bytes: usize, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
+        let mut records = self.poll_records(max_bytes)?;
+        if self.is_caught_up {
+            // Replay readers see a whole file, so nothing more is coming for their pending turns.
+            let final_read = self.tail_bytes.is_none();
+            records.extend(self.parser.flush_pending(now, final_read));
+        }
+        self.collect_parser_responses();
+        Ok(records)
+    }
+
+    fn poll_records(&mut self, max_bytes: usize) -> io::Result<Vec<TurnMetric>> {
         self.bytes_read_last_poll = 0;
         if max_bytes == 0 {
             return Ok(Vec::new());
@@ -275,6 +300,16 @@ impl IncrementalReader {
         }
         bytes.truncate(read);
         Ok(bytes)
+    }
+
+    fn collect_parser_responses(&mut self) {
+        let responses = self.parser.take_responses();
+        if self.collect_responses {
+            self.responses.extend(responses);
+            // Bounded in case the host stops draining.
+            let excess = self.responses.len().saturating_sub(1_024);
+            self.responses.drain(..excess);
+        }
     }
 
     fn consume_complete_lines(&mut self) -> Vec<TurnMetric> {

@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct TokrateApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
+    @AppStorage("showProviderBadge") private var showProviderBadge = true
     private var historyStore: HistoryStore { appDelegate.historyStore }
 
     var body: some Scene {
@@ -67,13 +68,7 @@ struct TokrateApp: App {
                 showInitialConsentDashboard: { appDelegate.showInitialConsentDashboard() }
             )
         } label: {
-            HStack(spacing: 4) {
-                Image(nsImage: MenuBarIcon.image)
-                if showMenuBarSpeed {
-                    Text(historyStore.menuBarTitle).monospacedDigit()
-                }
-            }
-            .accessibilityLabel(showMenuBarSpeed ? "Tokrate, selected model comparison: \(historyStore.menuBarTitle)" : "Tokrate")
+            MenuBarLabel(readout: historyStore.menuBarReadout, showsSpeed: showMenuBarSpeed, showsBadge: showProviderBadge)
         }
         .menuBarExtraStyle(.window)
 

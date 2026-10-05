@@ -6,7 +6,7 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.13"
+    public let appVersion = "0.1.14"
     public let parserVersion: String
     public let metricVersion: String
     public let model: String
@@ -17,10 +17,20 @@ public struct SharedSample: Encodable, Sendable {
     public let reasoningOutputTokens: Int?
     public let durationMs: Double
     public let ttftMs: Double?
+    /// Response speed (contract `response-v1`): totals over the turn's qualifying API responses.
+    /// All three are null together when the turn has none or they fail validation.
+    public let responseOutputTokens: Int?
+    public let responseDurationMs: Double?
+    public let responseCount: Int?
+    /// Amazon Bedrock inference-profile region; null for every other provider.
+    public let providerRegion: String?
+    /// A response faster than this is a measurement error, not a model.
+    public static let maximumResponseTPS = 2_000.0
+    public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
 
     public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
         let duration = metric.durationSeconds * 1_000
-        // v1 and v2 Claude records may remain in local history but are never shared from 0.1.13.
+        // v1 and v2 Claude records may remain in local history but are never shared (since 0.1.13).
         guard metric.isSupportedSourceTuple,
               !["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion),
               Self.isAllowedProvider(metric.provider, client: metric.client),
@@ -45,6 +55,22 @@ public struct SharedSample: Encodable, Sendable {
             let ms = value * 1_000
             return ms.isFinite && (0...duration).contains(ms) ? ms : nil
         }
+        if let tokens = metric.responseOutputTokens, let seconds = metric.responseDurationSeconds,
+           let count = metric.responseCount,
+           count > 0, (1...metric.outputTokens).contains(tokens), tokens >= ResponseSpeed.minimumOutputTokens * count,
+           seconds.isFinite, seconds > 0, seconds * 1_000 <= duration,
+           Double(tokens) / seconds <= Self.maximumResponseTPS {
+            responseOutputTokens = tokens
+            responseDurationMs = seconds * 1_000
+            responseCount = count
+        } else {
+            responseOutputTokens = nil
+            responseDurationMs = nil
+            responseCount = nil
+        }
+        providerRegion = metric.provider == "amazon-bedrock"
+            ? metric.providerRegion.flatMap { Self.providerRegions.contains($0) ? $0 : nil } ?? "unknown"
+            : nil
     }
 
     /// Bedrock and Vertex are explicit-evidence providers only Claude Code reports.
@@ -58,6 +84,7 @@ public struct SharedSample: Encodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, reasoningEffort, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
+        case responseOutputTokens, responseDurationMs, responseCount, providerRegion
     }
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -76,6 +103,10 @@ public struct SharedSample: Encodable, Sendable {
         try container.encode(reasoningOutputTokens, forKey: .reasoningOutputTokens)
         try container.encode(durationMs, forKey: .durationMs)
         try container.encode(ttftMs, forKey: .ttftMs)
+        try container.encode(responseOutputTokens, forKey: .responseOutputTokens)
+        try container.encode(responseDurationMs, forKey: .responseDurationMs)
+        try container.encode(responseCount, forKey: .responseCount)
+        try container.encode(providerRegion, forKey: .providerRegion)
     }
 
     private static func safeIdentifier(_ value: String?, maximum: Int) -> String? {

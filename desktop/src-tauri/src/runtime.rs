@@ -1,5 +1,5 @@
-use crate::Shared;
-use chrono::Utc;
+use crate::{badge, flyout, Shared};
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -9,10 +9,13 @@ use std::{
     time::Duration,
 };
 use tauri::Manager;
-use tokrate_core::{signed_request, History, SharingQueue, SourceMonitor, TurnMetric};
+use tokrate_core::{
+    fallback_model, signed_request, AutoSelector, History, LiveResponses, LiveScope, ModelKey,
+    ProviderBadge, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TurnMetric,
+};
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-04-v1";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-05-v2";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +47,7 @@ pub struct Settings {
     pub monitoring: bool,
     pub show_speed: bool,
     pub selection: String,
+    pub show_provider_badge: bool,
     pub days: u8,
     pub root: String,
     pub claude_root: String,
@@ -68,7 +72,8 @@ impl Default for Settings {
             sharing_consent: None,
             monitoring: true,
             show_speed: true,
-            selection: "latest".into(),
+            selection: "auto".into(),
+            show_provider_badge: true,
             days: 1,
             root: codex_home.join("sessions").to_string_lossy().into(),
             claude_root: claude_home.join("projects").to_string_lossy().into(),
@@ -91,6 +96,7 @@ pub struct SettingsPatch {
     pub monitoring: Option<bool>,
     pub show_speed: Option<bool>,
     pub selection: Option<String>,
+    pub show_provider_badge: Option<bool>,
     pub days: Option<u8>,
 }
 /// Detected state of one coding-tool log folder, for the Sources settings and first-run welcome.
@@ -108,6 +114,10 @@ pub struct Snapshot {
     settings: Settings,
     consent_prompt_required: bool,
     records: Vec<TurnMetric>,
+    /// Qualifying responses completed since launch, oldest first. Local only, never persisted.
+    live: Vec<ResponseMetric>,
+    /// The model an Auto selection currently follows; `None` for pinned selections.
+    active: Option<ModelKey>,
     status: String,
     monitor_status: String,
     pending: usize,
@@ -121,6 +131,9 @@ pub struct Runtime {
     settings: Settings,
     consent_prompt_required: bool,
     history: History,
+    live: LiveResponses,
+    selector: AutoSelector,
+    active: Option<ModelKey>,
     monitor: SourceMonitor,
     dir: PathBuf,
     status: String,
@@ -142,9 +155,8 @@ impl Runtime {
             match std::fs::read(dir.join("settings.json")) {
                 Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
                     Ok(mut s) if [1, 7].contains(&s.days) => {
-                        if !valid_selection(&s.selection) {
-                            s.selection = "latest".into();
-                        }
+                        s.selection =
+                            SelectionMode::normalize(&s.selection).unwrap_or_else(|| "auto".into());
                         let requires_reconfirmation = s.sharing && !s.sharing_authorized();
                         if requires_reconfirmation {
                             s.sharing = false;
@@ -192,6 +204,9 @@ impl Runtime {
             settings,
             consent_prompt_required,
             history,
+            live: LiveResponses::new(Utc::now()),
+            selector: AutoSelector::new(),
+            active: None,
             dir,
             status: status.into(),
             monitor_status: "Starting monitoring…".into(),
@@ -254,6 +269,8 @@ impl Runtime {
             } else {
                 vec![]
             },
+            live: self.live.responses(),
+            active: self.active.clone(),
             status: self.status.clone(),
             monitor_status: self.monitor_status.clone(),
             pending: self.queue.len(),
@@ -291,6 +308,9 @@ impl Runtime {
     pub fn is_smoke(&self) -> bool {
         self.smoke
     }
+    pub fn show_provider_badge(&self) -> bool {
+        self.settings.show_provider_badge
+    }
     fn save_settings(&self, settings: &Settings) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(settings).map_err(|_| "Settings invalid")?;
         std::fs::write(self.dir.join("settings.json"), bytes)
@@ -321,7 +341,10 @@ impl Runtime {
             if v.len() > 1000 {
                 return Err("Selection too long".into());
             }
-            next.selection = v
+            next.selection = SelectionMode::normalize(&v).ok_or("Unsupported selection")?
+        }
+        if let Some(v) = p.show_provider_badge {
+            next.show_provider_badge = v
         }
         if let Some(v) = p.days {
             if ![1, 7].contains(&v) {
@@ -409,13 +432,15 @@ impl Runtime {
     fn valid(&self, g: u64) -> bool {
         self.settings.sharing_authorized() && self.generation == g
     }
-    fn poll_monitor(&mut self) -> String {
+    fn poll_monitor(&mut self) -> TrayState {
         let now = Utc::now();
         let mut records = Vec::new();
         if self.settings.monitoring {
             match self.monitor.poll(now) {
                 Ok(found) => {
                     records = found;
+                    let responses = self.monitor.take_live_responses();
+                    self.live.push(responses, now);
                     if self.monitor.had_source_error() {
                         self.monitor_status = "A source folder could not be read. Other available monitors remain active.".into();
                     } else {
@@ -431,6 +456,13 @@ impl Runtime {
         } else {
             self.monitor_status = "Monitoring paused".into();
         }
+        self.active = match SelectionMode::parse(&self.settings.selection) {
+            Some(SelectionMode::Auto { tool }) => self
+                .selector
+                .update(now, &self.live.responses(), tool.as_deref())
+                .cloned(),
+            _ => None,
+        };
         let new_records = !records.is_empty();
         if self.sharing_active {
             self.queue.enqueue(&records, now);
@@ -461,26 +493,16 @@ impl Runtime {
             let evidence = serde_json::json!({"records": self.history.records().len(), "sources": sources, "sharing": self.settings.sharing, "monitorStatus": self.monitor_status});
             let _ = std::fs::write(self.dir.join("smoke-state.json"), evidence.to_string());
         }
-        self.tray_text()
+        self.tray_state(now)
     }
-    fn tray_text(&self) -> String {
-        if !self.settings.monitoring || !self.settings.show_speed {
-            return "Tokrate".into();
-        }
-        let records = self.history.records();
-        let selected = if self.settings.selection == "latest" {
-            records.first().map(cohort)
-        } else {
-            Some(self.settings.selection.clone())
-        };
-        let value = records.iter().find(|m| {
-            m.completed_at >= Utc::now() - chrono::Duration::minutes(15)
-                && m.output_tokens >= 20
-                && Some(cohort(m)) == selected
-        });
-        value
-            .map(|m| format!("{:.1} t/s · {}", m.turn_throughput_tps, metric_label(m)))
-            .unwrap_or_else(|| "Tokrate · no selected turn".into())
+    fn tray_state(&self, now: DateTime<Utc>) -> TrayState {
+        tray_state(
+            &self.settings,
+            &self.live,
+            self.active.as_ref(),
+            self.history.records(),
+            now,
+        )
     }
 
     fn source_status(&self) -> String {
@@ -501,33 +523,104 @@ impl Runtime {
         }
     }
 }
-fn cohort(m: &TurnMetric) -> String {
-    serde_json::json!([
-        m.client,
-        m.client_version,
-        m.parser_version,
-        m.metric_version,
-        m.model,
-        m.provider,
-        m.reasoning_effort,
-        m.source_kind
-    ])
-    .to_string()
+/// What the tray shows: a headline, a longer tooltip/menu line and the provider badge to draw.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrayState {
+    pub title: String,
+    pub detail: String,
+    pub badge: ProviderBadge,
+    /// True when a model is resolved, so a provider badge can replace the default icon.
+    pub badge_model_known: bool,
 }
-fn valid_selection(value: &str) -> bool {
-    if matches!(value, "latest" | "all") {
-        return true;
-    }
-    serde_json::from_str::<Vec<serde_json::Value>>(value).is_ok_and(|parts| parts.len() == 8)
-}
-fn metric_label(metric: &TurnMetric) -> &'static str {
-    match metric.client.as_str() {
-        "claude-code" if metric.metric_version == "claude-observed-subagent-turn-v1" => {
-            "subagent turn speed"
+impl TrayState {
+    fn idle() -> Self {
+        Self {
+            title: "Tokrate".into(),
+            detail: "Tokrate".into(),
+            badge: ProviderBadge::Unknown,
+            badge_model_known: false,
         }
-        "claude-code" => "transcript-observed turn throughput",
-        "grok-build" => "work-turn throughput · includes nested agent output",
-        _ => "completed-turn throughput",
+    }
+}
+/// The model whose live speed the tray shows, plus the coding tool it is restricted to.
+fn tray_scope(
+    selection: &str,
+    active: Option<&ModelKey>,
+    turns: &[TurnMetric],
+) -> Option<(ModelKey, Option<String>)> {
+    match SelectionMode::parse(selection).unwrap_or(SelectionMode::Auto { tool: None }) {
+        SelectionMode::Auto { tool } => active
+            .cloned()
+            .or_else(|| fallback_model(turns, tool.as_deref()))
+            .map(|key| (key, tool)),
+        SelectionMode::All => active
+            .cloned()
+            .or_else(|| fallback_model(turns, None))
+            .map(|key| (key, None)),
+        SelectionMode::Model(key) => Some((key, None)),
+        SelectionMode::Cohort(parts) => {
+            let parts = serde_json::from_str::<Vec<serde_json::Value>>(&parts).ok()?;
+            let text = |index: usize| parts[index].as_str().map(str::to_owned);
+            Some((
+                ModelKey {
+                    model: text(4),
+                    provider: text(5),
+                },
+                text(0),
+            ))
+        }
+    }
+}
+fn tray_state(
+    settings: &Settings,
+    live: &LiveResponses,
+    active: Option<&ModelKey>,
+    turns: &[TurnMetric],
+    now: DateTime<Utc>,
+) -> TrayState {
+    if !settings.monitoring || !settings.show_speed {
+        return TrayState::idle();
+    }
+    let Some((key, client)) = tray_scope(&settings.selection, active, turns) else {
+        return TrayState {
+            title: "—".into(),
+            detail: "Tokrate · Response speed — · no model yet".into(),
+            ..TrayState::idle()
+        };
+    };
+    let badge = ProviderBadge::of(key.model.as_deref(), key.provider.as_deref());
+    let scope = LiveScope {
+        model: key.model.clone(),
+        provider: key.provider.clone(),
+        client,
+    };
+    let (title, detail) = match live.value(now, &scope) {
+        Some(value) => {
+            let title = if value.speed < 100.0 {
+                format!("{:.1} tok/s", value.speed)
+            } else {
+                format!("{:.0} tok/s", value.speed)
+            };
+            let detail = format!(
+                "{title} · Response speed · {} · {}",
+                key.model.as_deref().unwrap_or("Unknown model"),
+                badge.label()
+            );
+            (title, detail)
+        }
+        None => (
+            "—".into(),
+            format!(
+                "Tokrate · Response speed — · {}",
+                key.model.as_deref().unwrap_or("no model yet")
+            ),
+        ),
+    };
+    TrayState {
+        title,
+        detail,
+        badge,
+        badge_model_known: true,
     }
 }
 fn identity() -> Result<Zeroizing<[u8; 32]>, String> {
@@ -562,18 +655,41 @@ fn authorized_effect<T>(authorized: bool, effect: impl FnOnce() -> T) -> Option<
 
 pub fn start_monitor(app: tauri::AppHandle, speed: tauri::menu::MenuItem<tauri::Wry>) {
     tauri::async_runtime::spawn(async move {
+        // The badge, theme and enabled state last applied to the tray icon (`None`: default icon).
+        let mut applied_icon: Option<(ProviderBadge, bool)> = None;
         loop {
             let shared = app.state::<Shared>().inner().clone();
-            let result =
-                tauri::async_runtime::spawn_blocking(move || shared.lock().unwrap().poll_monitor())
-                    .await;
-            if let Ok(text) = result {
-                let _ = speed.set_text(&text);
-                if let Some(tray) = app.tray_by_id("tokrate") {
-                    let _ = tray.set_tooltip(Some(&text));
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let mut runtime = shared.lock().unwrap();
+                let state = runtime.poll_monitor();
+                (state, runtime.show_provider_badge())
+            })
+            .await;
+            if let Ok((state, show_badge)) = result {
+                let _ = speed.set_text(&state.detail);
+                if let Some(tray) = app.tray_by_id(flyout::TRAY_ID) {
+                    let _ = tray.set_tooltip(Some(&state.detail));
                     #[cfg(not(target_os = "windows"))]
                     {
-                        let _ = tray.set_title(Some(&text));
+                        let _ = tray.set_title(Some(&state.title));
+                    }
+                    let dark = app
+                        .get_webview_window(flyout::MAIN)
+                        .and_then(|window| window.theme().ok())
+                        == Some(tauri::Theme::Dark);
+                    let wanted =
+                        (show_badge && state.badge_model_known).then_some((state.badge, dark));
+                    if wanted != applied_icon {
+                        let icon = match wanted {
+                            Some((badge, dark)) => {
+                                let (rgba, width, height) = badge::render_badge(badge, dark);
+                                Ok(tauri::image::Image::new_owned(rgba, width, height))
+                            }
+                            None => badge::default_icon(),
+                        };
+                        if icon.is_ok_and(|icon| tray.set_icon(Some(icon)).is_ok()) {
+                            applied_icon = wanted;
+                        }
                     }
                 }
             }
@@ -984,15 +1100,160 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("history.json")).unwrap(), original);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    fn write_settings(dir: &std::path::Path, json: serde_json::Value) {
+        std::fs::write(dir.join("settings.json"), json.to_string()).unwrap();
+    }
+    const OLD_NOTICE: &str = "2026-10-04-v1";
+    fn saved_settings(sharing: bool, consent: Option<(&str, &str)>) -> serde_json::Value {
+        let mut settings = serde_json::to_value(Settings::default()).unwrap();
+        settings["sharing"] = sharing.into();
+        settings["sharingConsent"] = consent.map_or(serde_json::Value::Null, |(version, action)| {
+            serde_json::json!({"noticeVersion": version, "recordedAt": Utc::now().to_rfc3339(), "action": action})
+        });
+        settings
+    }
     #[test]
-    fn tray_never_presents_an_old_turn_as_current() {
+    fn notice_version_two_pauses_sharing_that_was_accepted_under_version_one() {
+        assert_ne!(SHARING_NOTICE_VERSION, OLD_NOTICE);
         let dir = temporary();
-        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
-        let now = Utc::now();
-        let metric = TurnMetric::new(
-            "fixture".into(),
-            now - chrono::Duration::minutes(16),
-            Some("fixture-model".into()),
+        write_settings(&dir, saved_settings(true, Some((OLD_NOTICE, "accepted"))));
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.sharing);
+        assert!(!runtime.settings.sharing_authorized());
+        assert!(runtime.consent_prompt_required);
+        assert!(!runtime.sharing_active);
+        assert!(runtime.board.is_none());
+        assert_eq!(runtime.queue.len(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn saved_off_choices_stay_off_without_a_prompt_when_the_notice_changes() {
+        let dir = temporary();
+        for consent in [
+            None,
+            Some((OLD_NOTICE, "declined")),
+            Some((OLD_NOTICE, "withdrawn")),
+            Some((OLD_NOTICE, "accepted")),
+        ] {
+            write_settings(&dir, saved_settings(false, consent));
+            let runtime = Runtime::load(dir.clone()).unwrap();
+            assert!(!runtime.settings.sharing);
+            assert!(!runtime.consent_prompt_required, "{consent:?}");
+            assert!(!runtime.sharing_active);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn current_consent_keeps_sharing_authorized() {
+        let dir = temporary();
+        write_settings(
+            &dir,
+            saved_settings(true, Some((SHARING_NOTICE_VERSION, "accepted"))),
+        );
+        let runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(runtime.settings.sharing_authorized());
+        assert!(!runtime.consent_prompt_required);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn selection_defaults_to_auto_and_migrates_legacy_values() {
+        assert_eq!(Settings::default().selection, "auto");
+        let dir = temporary();
+        for (stored, expected) in [
+            ("latest", "auto"),
+            ("auto", "auto"),
+            ("auto:codex", "auto:codex"),
+            ("all", "all"),
+            (
+                "model:[\"gpt-5\",\"openai\"]",
+                "model:[\"gpt-5\",\"openai\"]",
+            ),
+            ("[1,2,3,4,5,6,7,8]", "auto"),
+            ("garbage", "auto"),
+        ] {
+            let mut settings = saved_settings(false, None);
+            settings["selection"] = stored.into();
+            write_settings(&dir, settings);
+            assert_eq!(
+                Runtime::load(dir.clone()).unwrap().settings.selection,
+                expected
+            );
+        }
+        let nine = r#"["codex",null,"p","m","gpt-5","openai",null,"high",null]"#;
+        let mut settings = saved_settings(false, None);
+        settings["selection"] = nine.into();
+        write_settings(&dir, settings);
+        assert_eq!(Runtime::load(dir.clone()).unwrap().settings.selection, nine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn selection_patches_are_validated_and_stored_normalized() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let patch = |selection: &str| -> SettingsPatch {
+            serde_json::from_value(serde_json::json!({ "selection": selection })).unwrap()
+        };
+        runtime.update(patch("auto:claude-code")).unwrap();
+        assert_eq!(runtime.settings.selection, "auto:claude-code");
+        runtime.update(patch("latest")).unwrap();
+        assert_eq!(runtime.settings.selection, "auto");
+        for invalid in ["auto:vim", "model:[1]", "[1,2,3]", "nonsense"] {
+            assert_eq!(
+                runtime.update(patch(invalid)),
+                Err("Unsupported selection".into())
+            );
+        }
+        assert_eq!(runtime.settings.selection, "auto");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn provider_badge_defaults_on_loads_when_absent_and_is_patchable() {
+        assert!(Settings::default().show_provider_badge);
+        let dir = temporary();
+        let mut settings = saved_settings(false, None);
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("showProviderBadge");
+        write_settings(&dir, settings);
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(runtime.show_provider_badge());
+        let patch =
+            serde_json::from_value(serde_json::json!({"showProviderBadge": false})).unwrap();
+        runtime.update(patch).unwrap();
+        assert!(!runtime.show_provider_badge());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["showProviderBadge"], false);
+        assert!(!Runtime::load(dir.clone()).unwrap().show_provider_badge());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn response(
+        id: &str,
+        completed_at: DateTime<Utc>,
+        model: &str,
+        client: &str,
+        speed: i64,
+    ) -> ResponseMetric {
+        ResponseMetric {
+            id: id.into(),
+            completed_at,
+            model: Some(model.into()),
+            provider: None,
+            client: client.into(),
+            source_kind: None,
+            metric_version: "response-v1".into(),
+            reasoning_effort: None,
+            output_tokens: speed * 10,
+            duration_seconds: 10.0,
+        }
+    }
+    fn turn(id: &str, client: &str, model: &str, now: DateTime<Utc>) -> TurnMetric {
+        let mut turn = TurnMetric::new(
+            id.into(),
+            now,
+            Some(model.into()),
             200,
             10.0,
             None,
@@ -1004,13 +1265,202 @@ mod tests {
             None,
             None,
         );
-        runtime.history.merge(&[metric.clone()], now);
-        assert_eq!(runtime.tray_text(), "Tokrate · no selected turn");
-        let mut fresh = metric;
-        fresh.id = "fresh".into();
-        fresh.completed_at = now;
-        runtime.history.merge(&[fresh], now);
-        assert_eq!(runtime.tray_text(), "20.0 t/s · completed-turn throughput");
+        turn.client = client.into();
+        turn
+    }
+    fn live_at(
+        started: DateTime<Utc>,
+        responses: Vec<ResponseMetric>,
+        now: DateTime<Utc>,
+    ) -> LiveResponses {
+        let mut live = LiveResponses::new(started);
+        live.push(responses, now);
+        live
+    }
+    fn state(
+        selection: &str,
+        live: &LiveResponses,
+        active: Option<&ModelKey>,
+        turns: &[TurnMetric],
+        now: DateTime<Utc>,
+    ) -> TrayState {
+        let settings = Settings {
+            selection: selection.into(),
+            ..Settings::default()
+        };
+        tray_state(&settings, live, active, turns, now)
+    }
+    fn key(model: &str) -> ModelKey {
+        ModelKey {
+            model: Some(model.into()),
+            provider: None,
+        }
+    }
+    #[test]
+    fn tray_shows_the_median_of_the_newest_five_responses() {
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(1);
+        let responses = [10, 20, 30, 40, 50, 60]
+            .iter()
+            .enumerate()
+            .map(|(index, speed)| {
+                let at = now - chrono::Duration::minutes(6 - index as i64);
+                response(
+                    &format!("r{index}"),
+                    at,
+                    "claude-opus-4",
+                    "claude-code",
+                    *speed,
+                )
+            })
+            .collect();
+        let live = live_at(started, responses, now);
+        let shown = state("auto", &live, Some(&key("claude-opus-4")), &[], now);
+        assert_eq!(shown.title, "40.0 tok/s");
+        assert_eq!(
+            shown.detail,
+            "40.0 tok/s · Response speed · claude-opus-4 · Anthropic"
+        );
+        assert_eq!(shown.badge, ProviderBadge::Anthropic);
+        assert!(shown.badge_model_known);
+        // Three digits drop the decimal.
+        let fast = live_at(
+            started,
+            vec![response("f", now, "gpt-5", "codex", 123)],
+            now,
+        );
+        assert_eq!(
+            state("model:[\"gpt-5\",null]", &fast, None, &[], now).title,
+            "123 tok/s"
+        );
+    }
+    #[test]
+    fn tray_shows_a_dash_when_the_newest_response_is_older_than_ten_minutes() {
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(1);
+        let stale = response(
+            "old",
+            now - chrono::Duration::minutes(11),
+            "gpt-5",
+            "codex",
+            50,
+        );
+        let live = live_at(started, vec![stale], now);
+        let shown = state("auto", &live, Some(&key("gpt-5")), &[], now);
+        assert_eq!(shown.title, "—");
+        assert_eq!(shown.detail, "Tokrate · Response speed — · gpt-5");
+        assert_eq!(shown.badge, ProviderBadge::OpenAi);
+        assert!(shown.badge_model_known);
+        // No model at all yet.
+        let empty = state("auto", &LiveResponses::new(started), None, &[], now);
+        assert_eq!(empty.detail, "Tokrate · Response speed — · no model yet");
+        assert!(!empty.badge_model_known);
+    }
+    #[test]
+    fn auto_follows_the_active_model_then_falls_back_to_the_latest_turn() {
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(1);
+        let live = live_at(
+            started,
+            vec![
+                response("a", now, "claude-opus-4", "claude-code", 80),
+                response("b", now, "gpt-5", "codex", 30),
+            ],
+            now,
+        );
+        let turns = [turn("t", "codex", "gpt-5", now)];
+        assert_eq!(
+            state("auto", &live, Some(&key("claude-opus-4")), &turns, now).title,
+            "80.0 tok/s"
+        );
+        assert_eq!(state("auto", &live, None, &turns, now).title, "30.0 tok/s");
+        // Auto within a tool restricts the scope to that tool.
+        let tool = state(
+            "auto:claude-code",
+            &live,
+            None,
+            &[turn("c", "claude-code", "gpt-5", now)],
+            now,
+        );
+        assert_eq!(tool.title, "—");
+        assert_eq!(tool.detail, "Tokrate · Response speed — · gpt-5");
+        // "All" behaves like Auto without a tool.
+        assert_eq!(
+            state("all", &live, Some(&key("claude-opus-4")), &turns, now).title,
+            "80.0 tok/s"
+        );
+        assert_eq!(state("all", &live, None, &turns, now).title, "30.0 tok/s");
+    }
+    #[test]
+    fn pinned_model_and_cohort_ignore_the_active_model() {
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(1);
+        let live = live_at(
+            started,
+            vec![
+                response("a", now, "claude-opus-4", "claude-code", 80),
+                response("b", now, "gpt-5", "codex", 30),
+                response("c", now, "gpt-5", "claude-code", 90),
+            ],
+            now,
+        );
+        let active = key("claude-opus-4");
+        let pinned = state("model:[\"gpt-5\",null]", &live, Some(&active), &[], now);
+        assert_eq!(pinned.title, "60.0 tok/s");
+        assert!(pinned.detail.ends_with("gpt-5 · OpenAI"));
+        // A pinned cohort is the UI's nine-part identity; the tray only needs tool, model, provider.
+        let cohort = serde_json::json!([
+            "codex",
+            null,
+            "codex-rollout-v2",
+            "turn-v1",
+            "gpt-5",
+            null,
+            null,
+            "high",
+            "primary"
+        ])
+        .to_string();
+        let cohort_state = state(&cohort, &live, Some(&active), &[], now);
+        assert_eq!(cohort_state.title, "30.0 tok/s");
+        assert_eq!(cohort_state.badge, ProviderBadge::OpenAi);
+    }
+    #[test]
+    fn paused_or_hidden_speed_keeps_the_plain_tray() {
+        let now = Utc::now();
+        let live = LiveResponses::new(now);
+        for settings in [
+            Settings {
+                monitoring: false,
+                ..Settings::default()
+            },
+            Settings {
+                show_speed: false,
+                ..Settings::default()
+            },
+        ] {
+            let shown = tray_state(&settings, &live, Some(&key("gpt-5")), &[], now);
+            assert_eq!(
+                (shown.title.as_str(), shown.detail.as_str()),
+                ("Tokrate", "Tokrate")
+            );
+            assert!(!shown.badge_model_known);
+        }
+    }
+    #[test]
+    fn snapshot_exposes_live_responses_and_the_active_model_without_touching_the_revision() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let now = Utc::now();
+        assert!(runtime
+            .live
+            .push(vec![response("a", now, "gpt-5", "codex", 40)], now));
+        runtime.active = Some(key("gpt-5"));
+        let snapshot = runtime.snapshot(None);
+        assert_eq!(snapshot.revision, 0);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["live"][0]["id"], "a");
+        assert_eq!(json["active"]["model"], "gpt-5");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -12,6 +12,8 @@ struct GrokSessionParser: JSONLMetricParser {
         let number: Int
         let startedAt: Date
         let sessionID: String
+        /// The session's reasoning effort when this turn began while Tokrate was already watching.
+        let effort: String?
     }
 
     private enum Frame: Sendable {
@@ -44,6 +46,8 @@ struct GrokSessionParser: JSONLMetricParser {
     private var emittedTurnNumbers: Set<Int> = []
     private var pendingEndedTurnNumbers: Set<Int> = []
     private var nextPrimaryStartAtByTurnNumber: [Int: Date] = [:]
+    private var currentEffort: String?
+    private var isLiveRead = false
 
     init(sourceIdentity: String) { self.sourceIdentity = sourceIdentity }
 
@@ -59,7 +63,12 @@ struct GrokSessionParser: JSONLMetricParser {
         emittedTurnNumbers.removeAll(keepingCapacity: true)
         pendingEndedTurnNumbers.removeAll(keepingCapacity: true)
         nextPrimaryStartAtByTurnNumber.removeAll(keepingCapacity: true)
+        isLiveRead = false
     }
+
+    mutating func readWillBegin(wasCaughtUp: Bool) { isLiveRead = wasCaughtUp }
+
+    mutating func observeSessionEffort(_ effort: String?) { currentEffort = effort }
 
     mutating func consume(line: Data) -> TurnMetric? {
         guard line.count <= JSONLFileReader.maximumLineBytes,
@@ -95,13 +104,17 @@ struct GrokSessionParser: JSONLMetricParser {
         var replacement: [Int: UsageTurn] = [:]
         var duplicateNumbers: Set<Int> = []
         for entry in entries {
-            guard let number = nonnegativeInteger(entry["turnNumber"]),
+            // events.jsonl numbers turns from 0 while the usage ledger numbers them from 1.
+            // Convert at this boundary so every join below uses the event numbering; a
+            // ledger number below 1 cannot map to any event turn.
+            guard let ledgerNumber = nonnegativeInteger(entry["turnNumber"]), ledgerNumber >= 1,
                   let endedAt = parseDate(entry["endedAt"]),
                   let outputTokens = nonnegativeInteger(entry["outputTokens"]),
                   endedAt <= updatedAt.addingTimeInterval(1),
                   entry["usageIsIncomplete"] as? Bool != true,
                   validTurnCount(entry["turnCount"])
             else { continue }
+            let number = ledgerNumber - 1
             let model = soleModelUsage(entry["modelUsage"])
             let reasoningTokens = nonnegativeInteger(entry["reasoningTokens"]).flatMap { $0 <= outputTokens ? $0 : nil }
             let value = UsageTurn(endedAt: endedAt, outputTokens: outputTokens, reasoningTokens: reasoningTokens, model: model)
@@ -152,7 +165,8 @@ struct GrokSessionParser: JSONLMetricParser {
                 metricVersion: "grok-observed-work-turn-v1",
                 reasoningOutputTokens: usage.reasoningTokens,
                 sourceKind: "primary",
-                provider: "unknown"
+                provider: "unknown",
+                reasoningEffort: confirmedEffort(eventTurn.start)
             ))
             emittedTurnNumbers.insert(number)
         }
@@ -208,7 +222,7 @@ struct GrokSessionParser: JSONLMetricParser {
             return
         }
         seenPrimaryTurnNumbers.insert(number)
-        let start = TurnStart(number: number, startedAt: timestamp, sessionID: id)
+        let start = TurnStart(number: number, startedAt: timestamp, sessionID: id, effort: isLiveRead ? currentEffort : nil)
         activeStart = start
         stack = [.primary(number)]
     }
@@ -244,6 +258,13 @@ struct GrokSessionParser: JSONLMetricParser {
     private mutating func invalidateActivePrimary() {
         if let activeStart { ambiguousTurnNumbers.insert(activeStart.number) }
         activeStart = nil
+    }
+
+    /// The effort lives in a per-session file the user can change between turns. It is attributed only
+    /// when it was observed as the turn began and is unchanged now; backfilled turns stay unknown.
+    private func confirmedEffort(_ start: TurnStart) -> String? {
+        guard let effort = start.effort, effort == currentEffort else { return nil }
+        return effort
     }
 
     private func soleModelUsage(_ value: Any?) -> String? {
@@ -288,6 +309,7 @@ public actor GrokSessionMonitor {
     private static let maximumPollBytes = 1_048_576
     private static let eventBatchBytes = 65_536
     private static let maximumUsageBytes = 262_144
+    private static let maximumSummaryBytes = 65_536
     private static let snapshotStabilitySeconds: TimeInterval = 4
 
     private struct WatchedSession {
@@ -297,6 +319,9 @@ public actor GrokSessionMonitor {
         var usageData: Data?
         var stableSince: Date?
         var usageReadCheckedAt = Date.distantPast
+        var summaryModifiedAt: Date?
+        var summarySize: Int?
+        var summaryEffort: String?
     }
 
     private let root: URL
@@ -333,6 +358,8 @@ public actor GrokSessionMonitor {
                     session.eventsModifiedAt = currentEventDate
                     session.stableSince = nil
                 }
+                refreshSummaryEffort(of: &session, sessionURL: URL(fileURLWithPath: key).deletingLastPathComponent(), budget: &budget)
+                session.events.observeSessionEffort(session.summaryEffort)
                 let newEvents = try session.events.poll(maxBytes: min(Self.eventBatchBytes, budget))
                 records += newEvents
                 let eventBytesRead = session.events.bytesReadLastPoll
@@ -423,6 +450,32 @@ public actor GrokSessionMonitor {
         sessions = sessions.filter { seen.contains($0.key) }
         watchedSessionCount = sessions.count
         nextSessionIndex = sessions.isEmpty ? 0 : nextSessionIndex % sessions.count
+    }
+
+    /// Retains only the lowercase `reasoning_effort` string from summary.json; nothing else is read out.
+    private func refreshSummaryEffort(of session: inout WatchedSession, sessionURL: URL, budget: inout Int) {
+        let summaryURL = sessionURL.appendingPathComponent("summary.json")
+        guard let date = try? sessionFileDate(at: summaryURL), let size = try? sessionFileSize(at: summaryURL) else {
+            session.summaryModifiedAt = nil
+            session.summarySize = nil
+            session.summaryEffort = nil
+            return
+        }
+        guard date != session.summaryModifiedAt || size != session.summarySize else { return }
+        guard size <= Self.maximumSummaryBytes else {
+            session.summaryModifiedAt = date
+            session.summarySize = size
+            session.summaryEffort = nil
+            return
+        }
+        guard size <= budget, let data = try? Data(contentsOf: summaryURL) else { return }
+        budget -= data.count
+        session.summaryModifiedAt = date
+        session.summarySize = size
+        session.summaryEffort = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+            .flatMap { $0["reasoning_effort"] as? String }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
     }
 
     private func sessionFileDate(at url: URL) throws -> Date {

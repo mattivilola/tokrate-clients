@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AppStore } from "./store";
+import { AppStore, SHARING_NOTICE_VERSION } from "./store";
 import type { Bridge, Snapshot } from "./types";
 
 const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
@@ -7,7 +7,8 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
     sharing: false,
     monitoring: true,
     showSpeed: true,
-    selection: "latest",
+    showProviderBadge: true,
+    selection: "auto",
     days: 1,
     root: "",
     claudeRoot: "",
@@ -94,14 +95,14 @@ describe("AppStore", () => {
     expect(store.getState().error).not.toBe("");
   });
 
-  it("falls back to the latest cohort when a filter changes", async () => {
+  it("returns to Auto when a filter changes", async () => {
     const update = vi.fn(async (patch) =>
       snapshot({ settings: { ...snapshot().settings, ...patch }, consentPromptRequired: false }),
     );
     const store = new AppStore(bridge({ updateSettings: update }));
     await store.refresh();
     store.setToolFilter("claude-code");
-    await vi.waitFor(() => expect(update).toHaveBeenCalledWith({ selection: "latest" }));
+    await vi.waitFor(() => expect(update).toHaveBeenCalledWith({ selection: "auto" }));
     expect(store.getState().ui.toolFilter).toBe("claude-code");
   });
 
@@ -127,6 +128,21 @@ describe("AppStore", () => {
     release(snapshot({ consentPromptRequired: false, revision: 1, settings: { ...snapshot().settings, sharing: true } }));
     await stale;
     expect(store.getState().snapshot.settings.sharing).toBe(false);
+  });
+
+  it("starts on response speed with the response-ranked model list", () => {
+    const store = new AppStore(bridge());
+    expect(store.getState().ui).toMatchObject({
+      chartMetric: "response",
+      modelsView: "response",
+      sort: "throughput",
+    });
+    store.setModelsView("turn");
+    expect(store.getState().ui.modelsView).toBe("turn");
+  });
+
+  it("uses the consent notice version 2", () => {
+    expect(SHARING_NOTICE_VERSION).toBe("2026-10-05-v2");
   });
 
   it("opens settings at an anchor once", () => {

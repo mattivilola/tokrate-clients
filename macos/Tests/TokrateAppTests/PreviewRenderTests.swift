@@ -70,17 +70,22 @@ final class PreviewRenderTests: XCTestCase {
             history.store.stopMonitoring()
 
             // Gauge states and brand.
-            let metric = PreviewData.records().max { $0.completedAt < $1.completedAt }
+            let first = PreviewData.series[0]
+            let cohort = ModelCohort(model: first.model, provider: first.provider, clientVersion: first.clientVersion, reasoningEffort: first.effort, client: first.client, parserVersion: first.parser, metricVersion: first.metric)
+            let liveReading = HeroReading(kind: .live, value: 112.4, model: first.model, provider: first.provider, effort: first.effort, chip: nil, completedAt: Date.now.addingTimeInterval(-120), responseCount: 5, cohort: cohort)
+            let turnReading = HeroReading(kind: .turnFallback, value: 62.4, model: "grok-code-fast-1", provider: "xai", effort: nil, chip: "Work turn", completedAt: Date.now.addingTimeInterval(-3 * 3_600), responseCount: nil, cohort: ModelCohort(model: "grok-code-fast-1", provider: "xai", clientVersion: nil, client: "grok-build", parserVersion: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1"))
             render(
                 HStack(alignment: .top, spacing: 24) {
-                    ThroughputGaugeView(metric: metric, compact: true, delta: SpeedDelta(latest: 62.4, median: MetricStats(values: [50, 52, 55, 56, 58])))
+                    ThroughputGaugeView(reading: liveReading, compact: true, delta: SpeedDelta(latest: 112.4, median: MetricStats(values: [98, 104, 110, 108, 101])))
                         .frame(width: 328)
-                    ThroughputGaugeView(metric: nil, compact: true).frame(width: 328)
+                    ThroughputGaugeView(reading: .empty, compact: true).frame(width: 328)
+                    ThroughputGaugeView(reading: turnReading, compact: true).frame(width: 328)
                 }
                 .padding(24).background(DashboardStyle.surface),
                 dark: dark, to: output, name: "gauge-states-\(mode)"
             )
             render(BrandPreview(), dark: dark, to: output, name: "brand-\(mode)")
+            render(MenuBarPreview(dark: dark), dark: dark, to: output, name: "menubar-items-\(mode)")
         }
     }
 
@@ -124,7 +129,7 @@ final class PreviewRenderTests: XCTestCase {
         let updates: AppUpdates
     }
 
-    private func makeFixture(work: URL, sharing: SharingChoice, records: [TurnMetric], monitoring: Bool = true) async throws -> Fixture {
+    private func makeFixture(work: URL, sharing: SharingChoice, records: [TurnMetric], monitoring: Bool = true, live: Bool = true) async throws -> Fixture {
         let root = work.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let codex = root.appendingPathComponent("codex", isDirectory: true)
         let claude = root.appendingPathComponent("claude", isDirectory: true)
@@ -158,6 +163,7 @@ final class PreviewRenderTests: XCTestCase {
             initialRecords: records
         )
         if monitoring { store.startMonitoring() }
+        if monitoring, live { store.recordLiveResponses(PreviewData.liveResponses()) }
         return Fixture(store: store, updates: AppUpdates(info: [:]))
     }
 }
@@ -178,14 +184,16 @@ enum PreviewData {
         let spread: Double
         let turns: Int
         let ttft: Bool
+        /// Response speed relative to turn speed; nil for sources without per-response timing.
+        var responseFactor: Double? = 1.9
     }
 
     static let series: [Series] = [
-        Series(model: "claude-opus-4-1", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v2", metric: "claude-observed-turn-v1", sourceKind: "primary", effort: "high", base: 58, spread: 14, turns: 70, ttft: false),
-        Series(model: "claude-sonnet-4-5", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v2", metric: "claude-observed-subagent-turn-v1", sourceKind: "subagent", effort: nil, base: 112, spread: 28, turns: 36, ttft: false),
-        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v1", metric: "turn-v1", sourceKind: "primary", effort: "medium", base: 74, spread: 16, turns: 55, ttft: true),
-        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v1", metric: "turn-v1", sourceKind: "primary", effort: "high", base: 48, spread: 12, turns: 24, ttft: true),
-        Series(model: "grok-code-fast-1", provider: "xai", client: "grok-build", clientVersion: "unknown", parser: "grok-session-v1", metric: "grok-observed-work-turn-v1", sourceKind: "primary", effort: nil, base: 131, spread: 32, turns: 18, ttft: false)
+        Series(model: "claude-opus-4-1", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v4", metric: "claude-observed-turn-v1", sourceKind: "primary", effort: "high", base: 58, spread: 14, turns: 70, ttft: false),
+        Series(model: "claude-sonnet-4-5", provider: "anthropic", client: "claude-code", clientVersion: "2.1.0", parser: "claude-transcript-v4", metric: "claude-observed-subagent-turn-v1", sourceKind: "subagent", effort: nil, base: 112, spread: 28, turns: 36, ttft: false),
+        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v2", metric: "turn-v1", sourceKind: "primary", effort: "medium", base: 74, spread: 16, turns: 55, ttft: true),
+        Series(model: "gpt-5-codex", provider: "openai", client: "codex", clientVersion: "0.159.2", parser: "codex-rollout-v2", metric: "turn-v1", sourceKind: "primary", effort: "high", base: 48, spread: 12, turns: 24, ttft: true),
+        Series(model: "grok-code-fast-1", provider: "xai", client: "grok-build", clientVersion: "unknown", parser: "grok-session-v1", metric: "grok-observed-work-turn-v1", sourceKind: "primary", effort: nil, base: 131, spread: 32, turns: 18, ttft: false, responseFactor: nil)
     ]
 
     /// Deterministic synthetic turns spread over seven days. The first series' latest turn lands two
@@ -204,6 +212,8 @@ enum PreviewData {
                 if slowLatest, seriesIndex == 0, hoursAgo < 24 { speed *= 0.5 }
                 if seriesIndex == 0, turn == 0 { speed = slowLatest ? 27.5 : 62.4 }
                 let tokens = 220 + Int(generator.next() * 1_800)
+                let responseTokens = item.responseFactor.map { _ in Int(Double(tokens) * 0.9) }
+                let responseSpeed = item.responseFactor.map { speed * $0 }
                 records.append(TurnMetric(
                     id: "preview-\(seriesIndex)-\(turn)",
                     completedAt: now.addingTimeInterval(-hoursAgo * 3_600 - (seriesIndex == 0 && turn == 0 ? 120 : 0)),
@@ -218,11 +228,26 @@ enum PreviewData {
                     metricVersion: item.metric,
                     sourceKind: item.sourceKind,
                     provider: item.provider,
-                    reasoningEffort: item.effort
+                    reasoningEffort: item.effort,
+                    responseOutputTokens: responseTokens,
+                    responseDurationSeconds: responseTokens.flatMap { tokens in responseSpeed.map { Double(tokens) / $0 } },
+                    responseCount: responseTokens == nil ? nil : 1 + turn % 5
                 ))
             }
         }
         return records
+    }
+
+    /// The last few live responses of the first series' model, finishing within the last two minutes.
+    static func liveResponses(now: Date = .now, model: String = series[0].model, provider: String = series[0].provider, speeds: [Double] = [118.2, 104.7, 121.5, 109.9, 112.4]) -> [LiveResponse] {
+        speeds.enumerated().map { index, speed in
+            LiveResponse(
+                id: "live-\(model)-\(index)", model: model, provider: provider, client: "claude-code", sourceKind: "primary",
+                metricVersion: "claude-observed-turn-v1", reasoningEffort: "high",
+                completedAt: now.addingTimeInterval(-120 + Double(speeds.count - 1 - index) * -20 + 100),
+                outputTokens: 600, durationSeconds: 600 / speed
+            )
+        }
     }
 
     struct LCG {
@@ -288,5 +313,30 @@ private struct BrandPreview: View {
         }
         .padding(28)
         .background(DashboardStyle.surface)
+    }
+}
+
+/// The menu-bar item for each maker, with and without a live value, on a bar-coloured strip.
+private struct MenuBarPreview: View {
+    let dark: Bool
+
+    private var readouts: [(ModelMaker, String)] {
+        [(.anthropic, "112.4 tok/s"), (.openAI, "74.1 tok/s"), (.xAI, "131.0 tok/s"), (.unknown, "— tok/s")]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(readouts.enumerated()), id: \.offset) { _, item in
+                MenuBarLabel(
+                    readout: MenuBarReadout(speedText: item.1, group: nil, maker: item.0, accessibilityLabel: item.0.title),
+                    showsSpeed: true, showsBadge: true
+                )
+                .foregroundStyle(dark ? Color.white : Color.black)
+            }
+            MenuBarLabel(readout: MenuBarReadout(speedText: "112.4 tok/s", group: nil, maker: .anthropic, accessibilityLabel: ""), showsSpeed: true, showsBadge: false)
+                .foregroundStyle(dark ? Color.white : Color.black)
+        }
+        .padding(16)
+        .background(dark ? Color(white: 0.16) : Color(white: 0.9))
     }
 }

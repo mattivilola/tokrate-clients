@@ -60,7 +60,7 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 - Track: `line` color, round caps. Active arc: `arc-start → arc-end` gradient up to the value.
 - Needle: `needle` color, round cap, hub dot in `needle`; drawn only when a value exists.
 - Readout sits in the open lower segment of the arc, fully below the hub: large tabular number + unit `tok/s` on the next line in `muted`. The needle (length ≈ radius − 14) and hub never overlap the readout.
-- Scale: the "nice" ceiling of 1.25 × the largest median within the selected value's measurement group (same coding tool, metric version and source kind), using steps 20, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000; minimum 20. Label only 0 and max. Values from other measurement definitions never stretch the scale.
+- Scale: the "nice" ceiling of 1.25 × the largest median within the selected value's measurement group (same coding tool, metric version and source kind), using steps 20, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000; minimum 20. Label only 0 and max. Values from other measurement definitions never stretch the scale. Response speed is a single definition across coding tools, so its scale uses the 24 h medians of every model's per-turn response speed.
 - Empty state: track only, readout "—", caption "Waiting for a completed turn".
 - One eased transition (≈400 ms) when the value changes; none under `prefers-reduced-motion`.
 
@@ -75,7 +75,8 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 
 | Use | Instead of |
 |---|---|
-| **Turn speed** · `tok/s` | whole-turn throughput, t/s, tokens / whole-turn second |
+| **Response speed** · `tok/s` (primary metric) | streaming speed, generation speed, live decode rate |
+| **Turn speed** · `tok/s` (secondary) | whole-turn throughput, t/s, tokens / whole-turn second |
 | Measurement group names: **Codex · Turn speed**, **Claude Code · Turn speed**, **Claude Code · Subagent turn speed**, **Grok Build · Work-turn speed** | "Whole-turn throughput", "Transcript-observed turn throughput" (the precise definition lives in the ⓘ explanation) |
 | **First token** · `s` | TTFT, reported first-token wait |
 | **Turns** | eligible turns, samples |
@@ -86,7 +87,7 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 | **Collecting data** | insufficient data, building evidence |
 | Relative times ("5 min ago") with exact time in tooltip | locale timestamps inline |
 
-The one-line definition shown next to a turn-speed readout: "Whole turn, including tools and waiting." The info affordance links to the full methodology.
+The one-line definition shown next to a response-speed readout: "Output tokens per second while the model is responding — tools and your time excluded." The one next to a turn-speed readout: "Whole turn, including tools and waiting." The info affordance links to the full methodology.
 
 ## Information architecture
 
@@ -99,9 +100,9 @@ The one-line definition shown next to a turn-speed readout: "Whole turn, includi
 
 ### Mac popover / Windows-Linux tray flyout (same IA)
 1. Header: mark, model picker (single control), gear menu.
-2. Hero: latest turn speed (large), model + effort chip, change vs your 24 h median.
+2. Hero: live response speed (large; median of the last 5 responses in the last 10 minutes, caption "last 5 responses · 2 min ago"), provider badge + model + effort chip, change vs your 24 h response-speed median. The header picker offers Auto (most active), Auto within a coding tool, and pinned models.
 3. Sparkline for the selected model (24 h / 7 d).
-4. "Your models" list: model, effort, median, mini bar; click selects.
+4. "Your models" list: model + provider badge, tool chips, response-speed median, mini bar, turn speed as secondary text; click selects.
 5. Community line (when sharing): community median and your relative position.
 6. Footer: monitoring + sharing status dot, "Open tokrate.dev".
 Settings live in a proper Settings window (General, Sharing, Sources, Updates). Full history stays available from the gear menu.

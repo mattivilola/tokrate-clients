@@ -4,7 +4,7 @@ import TokrateCore
 struct SharingView: View {
     let preferences: SharingPreferences
     let selection: DashboardSelection
-    let latestCohort: ModelCohort?
+    let resolvedCohort: ModelCohort?
     var compact = true
     var showToggle = true
     var showConsentDisclosure = true
@@ -133,7 +133,7 @@ struct SharingView: View {
 
     private var selectedCohort: ModelCohort? {
         switch selection {
-        case .latest: latestCohort
+        case .auto, .autoTool: resolvedCohort
         case .cohort(let cohort): cohort
         case .all: nil
         }

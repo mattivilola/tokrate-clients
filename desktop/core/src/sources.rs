@@ -1,4 +1,4 @@
-use crate::{GrokMonitor, Monitor, TurnMetric};
+use crate::{GrokMonitor, Monitor, ResponseMetric, TurnMetric};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::io;
@@ -134,6 +134,20 @@ impl SourceMonitor {
 
     pub fn bytes_read_last_poll(&self) -> usize {
         self.bytes_read_last_poll
+    }
+
+    /// Live responses completed since the last call, oldest first (Grok has no per-response
+    /// timing and contributes none).
+    pub fn take_live_responses(&mut self) -> Vec<ResponseMetric> {
+        let mut responses = self.codex.take_live_responses();
+        responses.extend(self.claude.take_live_responses());
+        responses.extend(self.claude_subagents.take_live_responses());
+        responses.sort_by(|left, right| {
+            left.completed_at
+                .cmp(&right.completed_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        responses
     }
 
     pub fn had_source_error(&self) -> bool {

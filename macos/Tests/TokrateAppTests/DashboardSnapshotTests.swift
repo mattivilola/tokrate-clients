@@ -16,7 +16,7 @@ final class DashboardSnapshotTests: XCTestCase {
         ttft: Double? = nil,
         reasoningEffort: String? = nil,
         client: String = "codex",
-        parserVersion: String = "codex-rollout-v1",
+        parserVersion: String = "codex-rollout-v2",
         metricVersion: String = "turn-v1"
     ) -> TurnMetric {
         TurnMetric(
@@ -53,7 +53,7 @@ final class DashboardSnapshotTests: XCTestCase {
         let otherProvider = metric("provider", secondsAgo: 10, model: "gpt-s", provider: "other", clientVersion: "1.0", rate: 300)
         let records = [old, selected, otherVersion, otherProvider]
 
-        let latest = DashboardSnapshot(records: records, range: .week, selection: .latest, now: now)
+        let latest = DashboardSnapshot(records: records, range: .week, selection: .auto, now: now)
         XCTAssertEqual(latest.selectedCohort, ModelCohort(otherProvider))
         XCTAssertEqual(latest.records.map(\.id), [otherProvider.id])
 
@@ -118,7 +118,7 @@ final class DashboardSnapshotTests: XCTestCase {
         let selected = DashboardSnapshot(records: records, range: .day, selection: .cohort(high), now: now)
         XCTAssertEqual(selected.records.map(\.id), ["high"])
         XCTAssertEqual(DashboardSelection.restored(from: DashboardSelection.cohort(high).persistenceValue), .cohort(high))
-        XCTAssertEqual(high.communityBoardID, #"["gpt-s","openai","1.0","codex-rollout-v1","turn-v1","high","codex"]"#)
+        XCTAssertEqual(high.communityBoardID, #"["gpt-s","openai","1.0","codex-rollout-v2","turn-v1","high","codex"]"#)
 
         let oldParts = ["gpt-s", "openai", "1.0"].map { Data($0.utf8).base64EncodedString() }.joined(separator: ".")
         let restoredLegacy = try! XCTUnwrap(ModelCohort(id: oldParts))
@@ -348,7 +348,7 @@ final class DashboardSnapshotTests: XCTestCase {
         let sparse = DashboardSnapshot(records: sparseBaseline + sparseCurrent, range: .week, now: now, calendar: calendar)
         XCTAssertEqual(sparse.personalTrend?.status, .noLargeChange)
         XCTAssertFalse(try XCTUnwrap(sparse.personalTrend).comparesTTFT)
-        XCTAssertTrue(try XCTUnwrap(sparse.personalTrend).comparesThroughput)
+        XCTAssertTrue(try XCTUnwrap(sparse.personalTrend).comparesSpeed)
 
         let shortBaseline = (0..<20).map { index in
             metric("short-b-\(index)", secondsAgo: 40 * 3_600 + Double(index / 10) * 86_400 + Double(index), outputTokens: 10, rate: 10, ttft: 1)
@@ -359,7 +359,7 @@ final class DashboardSnapshotTests: XCTestCase {
         let shortTurns = DashboardSnapshot(records: shortBaseline + shortCurrent, range: .week, now: now, calendar: calendar)
         let shortTrend = try! XCTUnwrap(shortTurns.personalTrend)
         XCTAssertEqual(shortTrend.status, .slower)
-        XCTAssertFalse(shortTrend.comparesThroughput)
+        XCTAssertFalse(shortTrend.comparesSpeed)
         XCTAssertTrue(shortTrend.comparesTTFT)
         XCTAssertEqual(shortTrend.currentTTFT.count, 5)
         XCTAssertEqual(shortTrend.baselineTTFT.count, 20)

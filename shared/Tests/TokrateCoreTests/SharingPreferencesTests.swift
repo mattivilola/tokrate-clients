@@ -242,6 +242,82 @@ final class SharingPreferencesTests: XCTestCase {
         XCTAssertEqual(requests, 0)
     }
 
+    func testNoticeVersionTwoPausesNoticeOneContributionUntilTheUserChooses() async {
+        XCTAssertEqual(SharingPreferences.currentNoticeVersion, 2)
+        let identity = PreferenceIdentity(), transport = PreferenceTransport()
+        let versionOne = SharingConsentRecord(noticeVersion: 1, decidedAt: now.addingTimeInterval(-100), action: .contribute)
+        let preference = MemorySharingPreference(true, consentRecord: versionOne)
+        let session = SharingSession(identity: identity, transport: transport)
+        let model = SharingPreferences(session: session, store: preference)
+
+        // Paused: no identity access and no community requests until the user decides again.
+        XCTAssertFalse(model.isSharingRequested)
+        XCTAssertTrue(model.isConsentDisclosureVisible)
+        model.activate(now: now, startPolling: false)
+        await session.refresh(now: now)
+        XCTAssertFalse(session.isEnabled)
+        XCTAssertEqual(identity.calls, 0)
+        let paused = await transport.count()
+        XCTAssertEqual(paused, 0)
+
+        model.consentToShare(now: now, startPolling: false)
+        XCTAssertTrue(model.isSharingRequested)
+        XCTAssertFalse(model.isConsentDisclosureVisible)
+        XCTAssertEqual(preference.consentRecord?.noticeVersion, 2)
+        XCTAssertEqual(preference.consentRecord?.action, .contribute)
+
+        // Choosing local use also records the current notice and stays off.
+        let other = MemorySharingPreference(true, consentRecord: versionOne)
+        let localOnly = SharingPreferences(session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()), store: other)
+        localOnly.chooseLocalOnly(now: now)
+        XCTAssertEqual(other.consentRecord?.noticeVersion, 2)
+        XCTAssertEqual(other.sharingEnabled, false)
+        XCTAssertFalse(localOnly.isSharingRequested)
+    }
+
+    func testSavedOptOutStaysOffAcrossTheNoticeVersionBump() {
+        for record in [
+            SharingConsentRecord(noticeVersion: 1, decidedAt: now, action: .localOnly),
+            nil
+        ] {
+            let model = SharingPreferences(
+                session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()),
+                store: MemorySharingPreference(false, consentRecord: record)
+            )
+            XCTAssertFalse(model.isSharingRequested)
+            XCTAssertFalse(model.isConsentDisclosureVisible, "a saved OFF is never converted into a prompt or into consent")
+        }
+        // A version 1 local-only record without a saved switch also stays off.
+        let localOnly = SharingPreferences(
+            session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()),
+            store: MemorySharingPreference(nil, consentRecord: SharingConsentRecord(noticeVersion: 1, decidedAt: now, action: .localOnly))
+        )
+        XCTAssertFalse(localOnly.isSharingRequested)
+        XCTAssertFalse(localOnly.isConsentDisclosureVisible)
+        // First launch and legacy default-on (no record) still show the notice.
+        let legacy = SharingPreferences(
+            session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()),
+            store: MemorySharingPreference(true, consentRecord: nil)
+        )
+        XCTAssertTrue(legacy.isConsentDisclosureVisible)
+        XCTAssertFalse(legacy.isSharingRequested)
+        let fresh = SharingPreferences(
+            session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()),
+            store: MemorySharingPreference(nil, consentRecord: nil)
+        )
+        XCTAssertTrue(fresh.isConsentDisclosureVisible)
+    }
+
+    func testCurrentNoticeContributionConsentStaysOnAfterRelaunch() {
+        let record = SharingConsentRecord(noticeVersion: SharingPreferences.currentNoticeVersion, decidedAt: now, action: .contribute)
+        let model = SharingPreferences(
+            session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()),
+            store: MemorySharingPreference(true, consentRecord: record)
+        )
+        XCTAssertTrue(model.isSharingRequested)
+        XCTAssertFalse(model.isConsentDisclosureVisible)
+    }
+
     func testUserDefaultsStorePersistsNoticeVersionTimeAndAction() {
         let suiteName = "TokrateConsentTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

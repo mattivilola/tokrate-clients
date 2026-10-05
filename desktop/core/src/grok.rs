@@ -1,4 +1,6 @@
-use crate::model::{TurnMetric, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION};
+use crate::model::{
+    ReportedReasoningEffort, TurnMetric, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+};
 use crate::reader::{file_identity, FileIdentity, MAX_LINE_BYTES};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
@@ -11,6 +13,7 @@ use std::path::{Path, PathBuf};
 const MAX_DISCOVERED_PATHS: usize = 100_000;
 const MAX_SESSIONS: usize = 128;
 const MAX_USAGE_BYTES: u64 = 262_144;
+const MAX_SUMMARY_BYTES: u64 = 65_536;
 const MAX_COMPLETED_TURNS: usize = 4_096;
 const MAX_SESSIONS_PER_POLL: usize = 8;
 const PER_FILE_BUDGET: usize = 32_768;
@@ -20,6 +23,7 @@ struct Candidate {
     key: String,
     events_path: PathBuf,
     usage_path: PathBuf,
+    summary_path: PathBuf,
     modified_at: DateTime<Utc>,
 }
 
@@ -27,6 +31,8 @@ struct StartedTurn {
     number: u64,
     started_at: DateTime<Utc>,
     session_id: String,
+    /// Session reasoning effort when the turn began while Tokrate was watching.
+    effort: Option<String>,
     valid: bool,
 }
 
@@ -36,6 +42,7 @@ struct CompletedTurn {
     started_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
     session_id: String,
+    effort: Option<String>,
     next_primary_started_at: Option<DateTime<Utc>>,
     valid: bool,
 }
@@ -57,6 +64,11 @@ struct EventReader {
     identity: Option<FileIdentity>,
     state: EventState,
     bytes_read_last_poll: usize,
+    /// An earlier poll consumed the file to its end, so lines read now are newly written.
+    caught_up: bool,
+    live_read: bool,
+    /// The session's current reasoning effort, refreshed before every poll.
+    session_effort: Option<String>,
 }
 
 impl EventReader {
@@ -70,6 +82,9 @@ impl EventReader {
             pending: Vec::new(),
             state: EventState::default(),
             bytes_read_last_poll: 0,
+            caught_up: false,
+            live_read: false,
+            session_effort: None,
         }
     }
 
@@ -87,9 +102,12 @@ impl EventReader {
             self.offset = 0;
             self.pending.clear();
             self.state = EventState::default();
+            self.caught_up = false;
         }
         self.identity = identity;
+        self.live_read = self.caught_up;
         if metadata.len() <= self.offset {
+            self.caught_up = true;
             return Ok(());
         }
         let count = (metadata.len() - self.offset).min(budget as u64) as usize;
@@ -105,6 +123,7 @@ impl EventReader {
         }
         bytes.truncate(total);
         self.offset += total as u64;
+        self.caught_up = self.offset >= metadata.len();
         self.bytes_read_last_poll = total;
         self.pending.extend_from_slice(&bytes);
         self.consume_lines();
@@ -134,11 +153,13 @@ impl EventReader {
         let Some(event) = value.as_object() else {
             return;
         };
-        if event.get("schema_version").and_then(Value::as_str) != Some("1.0") {
-            return;
-        }
         match event.get("type").and_then(Value::as_str) {
-            Some("turn_started") => self.start(event),
+            // Real Grok logs stamp the schema version on turn_started but not on turn_ended.
+            Some("turn_started")
+                if event.get("schema_version").and_then(Value::as_str) == Some("1.0") =>
+            {
+                self.start(event)
+            }
             Some("turn_ended") => self.end(event),
             _ => {}
         }
@@ -224,6 +245,11 @@ impl EventReader {
             number,
             started_at,
             session_id: session_id.to_owned(),
+            effort: if self.live_read {
+                self.session_effort.clone()
+            } else {
+                None
+            },
             valid: !self.state.duplicate_numbers.contains(&number),
         });
     }
@@ -266,6 +292,7 @@ impl EventReader {
             started_at: active.started_at,
             completed_at,
             session_id: active.session_id,
+            effort: active.effort,
             next_primary_started_at: None,
             valid: true,
         });
@@ -313,7 +340,10 @@ impl UsageSnapshot {
             .filter_map(|value| {
                 let value = value.as_object()?;
                 Some(UsageTurn {
-                    number: value.get("turnNumber")?.as_u64()?,
+                    // events.jsonl numbers turns from 0 while the usage ledger numbers
+                    // them from 1. Convert at this boundary so every join uses the event
+                    // numbering; a ledger number of 0 cannot map to any event turn.
+                    number: value.get("turnNumber")?.as_u64()?.checked_sub(1)?,
                     ended_at: parse_date(value.get("endedAt")),
                     output_tokens: value.get("outputTokens").and_then(Value::as_i64),
                     reasoning_tokens: value.get("reasoningTokens").and_then(Value::as_i64),
@@ -444,10 +474,70 @@ impl UsageReader {
     }
 }
 
+/// Reads only the lowercase `reasoning_effort` string from a session's summary.json.
+struct SummaryReader {
+    path: PathBuf,
+    observed_len: Option<u64>,
+    observed_modified: Option<std::time::SystemTime>,
+    effort: Option<String>,
+    bytes_read_last_poll: usize,
+}
+
+impl SummaryReader {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            observed_len: None,
+            observed_modified: None,
+            effort: None,
+            bytes_read_last_poll: 0,
+        }
+    }
+
+    fn poll(&mut self, budget: usize) {
+        self.bytes_read_last_poll = 0;
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            self.observed_len = None;
+            self.observed_modified = None;
+            self.effort = None;
+            return;
+        };
+        let modified = metadata.modified().ok();
+        if self.observed_len == Some(metadata.len()) && self.observed_modified == modified {
+            return;
+        }
+        if metadata.len() > MAX_SUMMARY_BYTES {
+            self.observed_len = Some(metadata.len());
+            self.observed_modified = modified;
+            self.effort = None;
+            return;
+        }
+        if metadata.len() as usize > budget {
+            return;
+        }
+        let Ok(bytes) = fs::read(&self.path) else {
+            return;
+        };
+        self.bytes_read_last_poll = bytes.len();
+        self.observed_len = Some(metadata.len());
+        self.observed_modified = modified;
+        self.effort = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("reasoning_effort")
+                    .and_then(Value::as_str)
+                    .map(|effort| effort.trim().to_ascii_lowercase())
+            })
+            .filter(|effort| ReportedReasoningEffort::is_allowed(effort));
+    }
+}
+
 struct GrokSession {
     key: String,
     events: EventReader,
     usage: UsageReader,
+    summary: SummaryReader,
     last_emitted: HashMap<String, TurnMetric>,
 }
 
@@ -457,6 +547,7 @@ impl GrokSession {
             key: candidate.key.clone(),
             events: EventReader::new(candidate.events_path.clone()),
             usage: UsageReader::new(candidate.usage_path.clone()),
+            summary: SummaryReader::new(candidate.summary_path.clone()),
             last_emitted: HashMap::new(),
         }
     }
@@ -473,7 +564,6 @@ impl GrokSession {
         for turn in self.events.state.completed.iter().filter(|turn| turn.valid) {
             if snapshot.session_id.as_deref() != Some(turn.session_id.as_str())
                 || counts.get(&turn.number) != Some(&1)
-                || turn.number == 0
             {
                 continue;
             }
@@ -489,7 +579,8 @@ impl GrokSession {
                     .next_primary_started_at
                     .is_some_and(|next_start| ended_at > next_start)
                 || ended_at > snapshot.updated_at + Duration::seconds(1)
-                || row.incomplete != Some(false)
+                // Real Grok ledgers omit the flag on complete rows; only an explicit true is incomplete.
+                || row.incomplete == Some(true)
             {
                 continue;
             }
@@ -521,7 +612,11 @@ impl GrokSession {
                 reasoning_tokens,
                 Some("primary".to_owned()),
                 Some("unknown".to_owned()),
-                None,
+                // The setting can change between turns: attribute it only when it was
+                // observed as the turn began and is unchanged now.
+                turn.effort
+                    .clone()
+                    .filter(|effort| self.summary.effort.as_ref() == Some(effort)),
                 GROK_CLIENT,
                 GROK_PARSER_VERSION,
                 GROK_METRIC_VERSION,
@@ -595,6 +690,10 @@ impl GrokMonitor {
             };
             let per_file = PER_FILE_BUDGET.min(budget);
             let event_budget = per_file.min(per_file / 2);
+            session.summary.poll(PER_FILE_BUDGET.min(budget));
+            budget = budget.saturating_sub(session.summary.bytes_read_last_poll);
+            self.bytes_read_last_poll += session.summary.bytes_read_last_poll;
+            session.events.session_effort = session.summary.effort.clone();
             if let Ok(()) = session.events.poll(event_budget) {
                 let consumed = session.events.bytes_read_last_poll;
                 budget = budget.saturating_sub(consumed);
@@ -654,6 +753,7 @@ fn discover_candidates(root: &Path, cutoff: DateTime<Utc>) -> io::Result<Vec<Can
         let directory = entry.path();
         let events_path = directory.join("events.jsonl");
         let usage_path = directory.join("usage.json");
+        let summary_path = directory.join("summary.json");
         let Ok(events_meta) = fs::metadata(&events_path) else {
             continue;
         };
@@ -677,6 +777,7 @@ fn discover_candidates(root: &Path, cutoff: DateTime<Utc>) -> io::Result<Vec<Can
             key,
             events_path,
             usage_path,
+            summary_path,
             modified_at,
         });
     }

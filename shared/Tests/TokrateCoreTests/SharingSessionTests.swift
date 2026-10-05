@@ -114,8 +114,8 @@ final class SharingSessionTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
-        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]))
-        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.13")
+        XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"]))
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.14")
         XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
@@ -131,7 +131,7 @@ final class SharingSessionTests: XCTestCase {
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
         let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
-        XCTAssertEqual(reported.appVersion, "0.1.13")
+        XCTAssertEqual(reported.appVersion, "0.1.14")
         XCTAssertEqual(reported.reasoningEffort, "ultra")
         let missing = try XCTUnwrap(SharedSample(metric()))
         XCTAssertEqual(missing.reasoningEffort, "unknown")
@@ -197,6 +197,7 @@ final class SharingSessionTests: XCTestCase {
         XCTAssertNil(SharedSample(claude("claude-transcript-v1")))
         XCTAssertNil(SharedSample(claude("claude-transcript-v2")))
         XCTAssertNotNil(SharedSample(claude("claude-transcript-v3")))
+        XCTAssertNotNil(SharedSample(claude("claude-transcript-v4")))
         XCTAssertTrue(claude("claude-transcript-v2").isSupportedSourceTuple, "v2 stays displayable locally")
     }
 

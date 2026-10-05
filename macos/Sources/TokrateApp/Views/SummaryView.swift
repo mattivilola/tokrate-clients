@@ -7,10 +7,19 @@ struct SummaryView: View {
     var compact = false
 
     private var speedTitle: String { snapshot.selectedCohort?.measurement.title ?? "Turn speed" }
+    private var responseTitle: String { ResponseSpeedCopy.title }
 
     var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
+                metric(
+                    title: "\(snapshot.range.title) · \(responseTitle) median",
+                    stats: snapshot.response,
+                    unit: "tok/s",
+                    digits: 1,
+                    countLabel: "turns",
+                    help: "Median and observed range of per-turn response speed (\(snapshot.responseCount) responses of 200+ output tokens, merged across coding tools for this model). Tool runs and waiting are excluded."
+                )
                 metric(
                     title: "\(snapshot.range.title) · \(speedTitle) median",
                     stats: snapshot.throughput,
@@ -19,6 +28,8 @@ struct SummaryView: View {
                     countLabel: "turns",
                     help: "Median and observed range for completed turns with at least 20 output tokens. Whole-turn time includes tool work, waiting, and reasoning."
                 )
+            }
+            HStack(spacing: 8) {
                 metric(
                     title: "\(snapshot.range.title) · First token median",
                     stats: snapshot.ttft,
@@ -71,18 +82,19 @@ struct SummaryView: View {
     private func localComparison(_ comparison: LocalPeriodComparison) -> some View {
         container {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Selected model · local medians")
+                Text("Selected model · local medians (tok/s)")
                     .font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.ink)
                 HStack(spacing: 4) {
-                    Text("Period").frame(maxWidth: .infinity, alignment: .leading)
-                    Text(speedTitle).lineLimit(1).minimumScaleFactor(0.7).frame(width: 118, alignment: .trailing)
-                    Text("First token").frame(width: 84, alignment: .trailing)
+                    Text("Period").lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Response").lineLimit(1).minimumScaleFactor(0.7).frame(width: 80, alignment: .trailing)
+                    Text("Turn").lineLimit(1).minimumScaleFactor(0.7).frame(width: 80, alignment: .trailing)
+                    Text("First token").frame(width: 72, alignment: .trailing)
                 }
                 .font(DashboardStyle.Typography.captionEmphasis).foregroundStyle(DashboardStyle.muted)
-                comparisonRow("Recent 15 min", stats: comparison.recent15Minutes)
-                comparisonRow("Last 24 hours", stats: comparison.last24Hours)
-                comparisonRow("Previous 24 hours", stats: comparison.previous24Hours)
-                Text("24 h change vs previous 24 h: \(speedTitle) \(change(comparison.throughputChangePercent)) · first token \(change(comparison.ttftChangePercent))")
+                comparisonRow("15 min", stats: comparison.recent15Minutes)
+                comparisonRow("24 h", stats: comparison.last24Hours)
+                comparisonRow("Prev. 24 h", stats: comparison.previous24Hours)
+                Text("24 h change vs previous 24 h: response speed \(change(comparison.responseChangePercent)) · turn speed \(change(comparison.throughputChangePercent)) · first token \(change(comparison.ttftChangePercent))")
                     .font(DashboardStyle.Typography.footnoteEmphasis.monospacedDigit()).foregroundStyle(DashboardStyle.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Each metric has its own turn count. Change needs at least 5 values per period and a non-zero previous median.")
@@ -91,7 +103,7 @@ struct SummaryView: View {
                     Label(personalSignalTitle(trend.status), systemImage: trend.status == .slower ? "exclamationmark.circle.fill" : "chart.line.uptrend.xyaxis")
                         .font(DashboardStyle.Typography.footnoteEmphasis)
                         .foregroundStyle(trend.status == .slower ? DashboardStyle.warn : DashboardStyle.muted)
-                        .help("A personal whole-turn speed trend only; it does not measure answer quality or confirm provider health.")
+                        .help("A personal speed trend only; it does not measure answer quality or confirm provider health.")
                 }
                 if comparison.previousRange == nil {
                     Text("Previous 7 days unavailable · local history retains 7 days.")
@@ -104,11 +116,13 @@ struct SummaryView: View {
 
     private func comparisonRow(_ title: String, stats: PeriodMetricStats) -> some View {
         HStack(spacing: 4) {
-            Text(title).foregroundStyle(DashboardStyle.ink).frame(maxWidth: .infinity, alignment: .leading)
-            Text("\(format(stats.throughput.median, digits: 1)) tok/s · n=\(stats.throughput.count)")
-                .frame(width: 118, alignment: .trailing)
+            Text(title).foregroundStyle(DashboardStyle.ink).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+            Text("\(format(stats.response.median, digits: 1)) · n=\(stats.response.count)")
+                .frame(width: 80, alignment: .trailing)
+            Text("\(format(stats.throughput.median, digits: 1)) · n=\(stats.throughput.count)")
+                .frame(width: 80, alignment: .trailing)
             Text("\(format(stats.ttft.median, digits: 2)) s · n=\(stats.ttft.count)")
-                .frame(width: 84, alignment: .trailing)
+                .frame(width: 72, alignment: .trailing)
         }
         .font(DashboardStyle.Typography.caption).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
         .foregroundStyle(DashboardStyle.muted)
@@ -124,7 +138,7 @@ struct SummaryView: View {
         case .noRecentObservations: "Personal speed signal · no recent observations"
         case .buildingBaseline: "Personal speed signal · building baseline"
         case .noLargeChange: "Personal speed signal · no large change"
-        case .slower: "Personal speed signal · recent turns slower"
+        case .slower: "Personal speed signal · recent speed slower"
         }
     }
 }

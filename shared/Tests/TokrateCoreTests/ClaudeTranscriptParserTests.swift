@@ -14,11 +14,11 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertNil(parser.consume(line: try assistant(at: 5, id: "m1", output: 100, stop: "tool_use")))
         XCTAssertNil(parser.consume(line: try user(at: 20, id: "interjection")))
         XCTAssertNil(parser.consume(line: try toolResult(at: 21)))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 40, id: "m2", output: 300, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 40, id: "m2", output: 300, stop: "end_turn")))
         XCTAssertEqual(metric.durationSeconds, 40, accuracy: 0.001)
         XCTAssertEqual(metric.outputTokens, 400)
         XCTAssertEqual(metric.turnThroughputTPS, 10, accuracy: 0.001)
-        XCTAssertEqual(metric.parserVersion, "claude-transcript-v3")
+        XCTAssertEqual(metric.parserVersion, "claude-transcript-v4")
         XCTAssertEqual(metric.metricVersion, "claude-observed-turn-v1")
         XCTAssertEqual(metric.sourceKind, "primary")
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|prompt"), "turn identity stays the original prompt")
@@ -29,7 +29,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         _ = parser.consume(line: try user(at: 0, id: "stale-prompt"))
         _ = parser.consume(line: try assistant(at: 10, id: "m-stale", output: 50, stop: "tool_use"))
         XCTAssertNil(parser.consume(line: try user(at: 10 + 1_801, id: "fresh-prompt")))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 10 + 1_811, id: "m-fresh", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 10 + 1_811, id: "m-fresh", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.durationSeconds, 10, accuracy: 0.001)
         XCTAssertEqual(metric.outputTokens, 100)
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|fresh-prompt"))
@@ -38,7 +38,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         _ = boundary.consume(line: try user(at: 0, id: "prompt"))
         _ = boundary.consume(line: try assistant(at: 10, id: "m1", output: 50, stop: "tool_use"))
         _ = boundary.consume(line: try user(at: 10 + 1_800, id: "exactly-thirty-minutes"))
-        let continued = try XCTUnwrap(boundary.consume(line: assistant(at: 10 + 1_810, id: "m2", output: 50, stop: "end_turn")))
+        let continued = try XCTUnwrap(terminal(&boundary, assistant(at: 10 + 1_810, id: "m2", output: 50, stop: "end_turn")))
         XCTAssertEqual(continued.outputTokens, 100)
         XCTAssertEqual(continued.id, try expectedID("\(sessionID)|prompt"))
     }
@@ -49,10 +49,10 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             _ = parser.consume(line: try user(at: 0, id: "prompt"))
             _ = parser.consume(line: try assistant(at: 5, id: "m1", output: 100, stop: "tool_use"))
             XCTAssertNil(parser.consume(line: try user(at: 6, id: "interrupt", content: content)))
-            XCTAssertNil(parser.consume(line: try assistant(at: 7, id: "m-orphan", output: 100, stop: "end_turn")))
+            XCTAssertNil(terminal(&parser, try assistant(at: 7, id: "m-orphan", output: 100, stop: "end_turn")))
 
             _ = parser.consume(line: try user(at: 10, id: "next"))
-            let metric = try XCTUnwrap(parser.consume(line: assistant(at: 20, id: "m-next", output: 100, stop: "end_turn")))
+            let metric = try XCTUnwrap(terminal(&parser, assistant(at: 20, id: "m-next", output: 100, stop: "end_turn")))
             XCTAssertEqual(metric.outputTokens, 100)
             XCTAssertEqual(metric.durationSeconds, 10, accuracy: 0.001)
         }
@@ -64,25 +64,90 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         _ = parser.consume(line: try assistant(at: 5, id: "m1", output: 100, stop: "tool_use"))
         XCTAssertNil(parser.consume(line: try assistant(at: 6, id: "m-synthetic", model: "<synthetic>", output: 0, stop: "stop_sequence")))
         _ = parser.consume(line: try user(at: 10, id: "next"))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 20, id: "m-next", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 20, id: "m-next", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.model, "claude-sonnet-5-5")
 
         var withoutTerminal = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         _ = withoutTerminal.consume(line: try user(at: 0, id: "prompt"))
         _ = withoutTerminal.consume(line: try assistant(at: 1, id: "m-synthetic", model: "<synthetic>", output: nil, stop: nil))
-        XCTAssertNil(withoutTerminal.consume(line: try assistant(at: 5, id: "m-final", output: 100, stop: "end_turn")))
+        XCTAssertNil(terminal(&withoutTerminal, try assistant(at: 5, id: "m-final", output: 100, stop: "end_turn")))
+    }
+
+    func testStreamingResponseCutOffByAnInterruptionIsNeverDrained() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try assistant(at: 10, id: "m-cut", output: 500, stop: nil))
+        _ = parser.consume(line: try user(at: 11, id: "interrupt", content: "[Request interrupted by user]"))
+        _ = parser.consume(line: try assistant(at: 30, id: "m-next", output: 900, stop: "tool_use"))
+        _ = parser.pollEnded(now: base, isFinal: false)
+        let drained = parser.drainCompletedResponses()
+        XCTAssertEqual(drained.count, 1, "only the complete response after the interruption")
+        XCTAssertEqual(drained.first?.outputTokens, 900)
+        XCTAssertEqual(try XCTUnwrap(drained.first).durationSeconds, 19, accuracy: 0.001, "timed from the interruption record")
+    }
+
+    func testParentRecordSetsTheResponseStartAndMidResponseRecordsDoNotMoveIt() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        // The attachment written just before the request is the assistant record's parent.
+        _ = parser.consume(line: try attachment(at: 4, id: "attach-1"))
+        _ = parser.consume(line: try assistant(at: 10, id: "m1", output: 600, stop: nil, blocks: ["thinking"], parent: "attach-1"))
+        // A notification user record written while the response streams does not move the start.
+        _ = parser.consume(line: try user(at: 12, id: "notification", kind: "task-notification"))
+        _ = parser.consume(line: try assistant(at: 14, id: "m1", output: 600, stop: "end_turn", blocks: ["text"], parent: "record-m1"))
+        let metric = try XCTUnwrap(terminal(&parser, Data()))
+        XCTAssertEqual(metric.responseCount, 1)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 10, accuracy: 0.001, "start 4 s (parent) to end 14 s")
+        let drained = parser.drainCompletedResponses()
+        XCTAssertEqual(try XCTUnwrap(drained.first).durationSeconds, 10, accuracy: 0.001)
+    }
+
+    func testMissingOrLaterParentFallsBackToTheLatestUserRecord() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try toolResult(at: 5))
+        // Unknown parent: latest user-type record (the tool result at 5 s).
+        _ = parser.consume(line: try assistant(at: 15, id: "m1", output: 500, stop: "tool_use", parent: "never-seen"))
+        _ = parser.consume(line: try attachment(at: 30, id: "late-attach"))
+        // The parent was written after the response's own record: ignored.
+        _ = parser.consume(line: try assistant(at: 20, id: "m2", output: 400, stop: "tool_use", parent: "late-attach"))
+        _ = parser.consume(line: try toolResult(at: 21))
+        _ = parser.consume(line: try assistant(at: 40, id: "m3", output: 300, stop: "end_turn"))
+        let metric = try XCTUnwrap(terminal(&parser, Data()))
+        let responses = parser.drainCompletedResponses().sorted { $0.completedAt < $1.completedAt }
+        XCTAssertEqual(responses.map(\.durationSeconds), [10, 15, 19])
+        XCTAssertEqual(metric.responseCount, 3)
+    }
+
+    func testRememberedRecordsAreBoundedAndResetOnReplacement() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try attachment(at: 1, id: "first-attach"))
+        for index in 0..<ClaudeTranscriptParser.maximumRememberedRecords {
+            _ = parser.consume(line: try attachment(at: 2, id: "filler-\(index)"))
+        }
+        // The oldest record has been forgotten: fall back to the latest user-type record (the prompt, 0 s).
+        _ = parser.consume(line: try assistant(at: 10, id: "m1", output: 500, stop: "tool_use", parent: "first-attach"))
+        _ = parser.consume(line: try assistant(at: 20, id: "m2", output: 500, stop: "tool_use"))
+        let drained = parser.drainCompletedResponses()
+        XCTAssertEqual(try XCTUnwrap(drained.first).durationSeconds, 10, accuracy: 0.001)
+        parser.reset(sourceIdentity: "other")
+        _ = parser.consume(line: try user(at: 100, id: "prompt-2"))
+        _ = parser.consume(line: try assistant(at: 110, id: "m9", output: 500, stop: "tool_use", parent: "filler-4000"))
+        _ = parser.consume(line: try assistant(at: 120, id: "m10", output: 500, stop: "tool_use"))
+        XCTAssertEqual(try XCTUnwrap(parser.drainCompletedResponses().first).durationSeconds, 10, accuracy: 0.001, "the map was cleared by reset")
     }
 
     func testMetaUserRecordsAreIgnored() throws {
         var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         XCTAssertNil(parser.consume(line: try user(at: 0, id: "meta-start", meta: true)))
-        XCTAssertNil(parser.consume(line: try assistant(at: 5, id: "m-orphan", output: 100, stop: "end_turn")))
+        XCTAssertNil(terminal(&parser, try assistant(at: 5, id: "m-orphan", output: 100, stop: "end_turn")))
 
         _ = parser.consume(line: try user(at: 10, id: "prompt"))
         _ = parser.consume(line: try assistant(at: 15, id: "m1", output: 100, stop: "tool_use"))
         // A meta record far beyond the gap neither restarts nor continues the turn.
         XCTAssertNil(parser.consume(line: try user(at: 15 + 7_200, id: "meta-late", meta: true)))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 30, id: "m2", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 30, id: "m2", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.durationSeconds, 20, accuracy: 0.001)
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|prompt"))
     }
@@ -92,9 +157,9 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertNil(subagent.consume(line: try user(at: 0, id: "task", sidechain: true)))
         XCTAssertNil(subagent.consume(line: try assistant(at: 4, id: "s1", output: 60, stop: "tool_use", sidechain: true)))
         XCTAssertNil(subagent.consume(line: try toolResult(at: 5, sidechain: true)))
-        let first = try XCTUnwrap(subagent.consume(line: assistant(at: 10, id: "s2", output: 140, stop: "end_turn", sidechain: true)))
+        let first = try XCTUnwrap(terminal(&subagent, assistant(at: 10, id: "s2", output: 140, stop: "end_turn", sidechain: true)))
         XCTAssertEqual(first.client, "claude-code")
-        XCTAssertEqual(first.parserVersion, "claude-transcript-v3")
+        XCTAssertEqual(first.parserVersion, "claude-transcript-v4")
         XCTAssertEqual(first.metricVersion, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(first.sourceKind, "subagent")
         XCTAssertEqual(first.provider, "unknown")
@@ -108,7 +173,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertNotEqual(first.id, try expectedID("\(sessionID)|task"))
 
         XCTAssertNil(subagent.consume(line: try user(at: 100, id: "follow-up", sidechain: true)))
-        let second = try XCTUnwrap(subagent.consume(line: assistant(at: 104, id: "s3", output: 40, stop: "end_turn", sidechain: true)))
+        let second = try XCTUnwrap(terminal(&subagent, assistant(at: 104, id: "s3", output: 40, stop: "end_turn", sidechain: true)))
         XCTAssertEqual(second.outputTokens, 40)
         XCTAssertEqual(second.durationSeconds, 4, accuracy: 0.001)
         XCTAssertNotEqual(second.id, first.id)
@@ -116,25 +181,30 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         // Predicates are scope-specific: a sidechain record is invisible to the primary parser and vice versa.
         var primary = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         _ = primary.consume(line: try user(at: 0, id: "task", sidechain: true))
-        XCTAssertNil(primary.consume(line: try assistant(at: 10, id: "s1", output: 100, stop: "end_turn", sidechain: true)))
+        XCTAssertNil(terminal(&primary, try assistant(at: 10, id: "s1", output: 100, stop: "end_turn", sidechain: true)))
         var subagentOnly = ClaudeTranscriptParser(sourceIdentity: "synthetic", scope: .subagent)
         _ = subagentOnly.consume(line: try user(at: 0, id: "primary-prompt"))
-        XCTAssertNil(subagentOnly.consume(line: try assistant(at: 10, id: "m1", output: 100, stop: "end_turn")))
+        XCTAssertNil(terminal(&subagentOnly, try assistant(at: 10, id: "m1", output: 100, stop: "end_turn")))
     }
 
     func testSubagentSharingPayloadContainsOnlyAllowlistedKeys() throws {
         var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic", scope: .subagent)
         _ = parser.consume(line: try user(at: 0, id: "task", sidechain: true))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 10, id: "s1", output: 200, stop: "end_turn", sidechain: true)))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "s1", output: 200, stop: "end_turn", sidechain: true)))
         let sample = try XCTUnwrap(SharedSample(metric))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"])
+        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"])
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
-        XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v3")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.13")
+        XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.14")
         XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertTrue(json["ttftMs"] is NSNull)
+        // The only response (200 tokens in 10 s from the task prompt) qualifies.
+        XCTAssertEqual(json["responseOutputTokens"] as? Int, 200)
+        XCTAssertEqual(try XCTUnwrap(json["responseDurationMs"] as? Double), 10_000, accuracy: 0.001)
+        XCTAssertEqual(json["responseCount"] as? Int, 1)
+        XCTAssertTrue(json["providerRegion"] is NSNull)
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(sample), as: UTF8.self).contains("PRIVATE"))
     }
 
@@ -161,7 +231,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let monitor = ClaudeSessionMonitor(root: root)
         var collected: [String: TurnMetric] = [:]
         for step in 0..<4 {
-            for record in try await monitor.poll(now: Date.now.addingTimeInterval(Double(step) * 11)) { collected[record.id] = record }
+            for record in try await monitor.poll(now: Date.now.addingTimeInterval(Double(step) * 11)).metrics { collected[record.id] = record }
         }
         XCTAssertEqual(collected.count, 2)
         XCTAssertEqual(Set(collected.values.map(\.sourceKind)), ["primary", "subagent"])
@@ -176,17 +246,101 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(status.files, 2)
     }
 
+    // MARK: Live responses through the monitor
+
+    private func append(_ lines: [Data], to url: URL, modified: Date) throws {
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        for line in lines { try handle.write(contentsOf: line); try handle.write(contentsOf: Data([0x0A])) }
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+    }
+
+    func testMonitorReturnsOnlyResponsesCompletedSinceItStartedAndNeverTwice() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let project = root.appendingPathComponent("synthetic-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let liveSince = Date.now
+        let file = project.appendingPathComponent("\(sessionID).jsonl")
+        let result = [
+            try user(at: -100, id: "prompt", origin: liveSince),
+            try assistant(at: -90, id: "m1", output: 500, stop: "tool_use", origin: liveSince),
+            try user(at: -89, id: "tool-result", content: [["type": "tool_result", "content": "PRIVATE_RESPONSE"]], origin: liveSince),
+            try assistant(at: 10, id: "m2", output: 600, stop: "end_turn", origin: liveSince)
+        ]
+        try write(result, to: file)
+
+        let monitor = ClaudeSessionMonitor(root: root, liveSince: liveSince)
+        let first = try await monitor.poll(now: liveSince)
+        // The terminal turn of a text-last message is emitted by the poll that read it.
+        XCTAssertEqual(first.metrics.count, 1)
+        let turn = try XCTUnwrap(first.metrics.first)
+        XCTAssertEqual(turn.outputTokens, 1_100)
+        XCTAssertEqual(turn.responseCount, 2, "the turn counts both responses, including the one before liveSince")
+        XCTAssertEqual(turn.responseOutputTokens, 1_100)
+        XCTAssertEqual(try XCTUnwrap(turn.responseDurationSeconds), 109, accuracy: 0.001)
+        // m1 completed 90 s before the monitor started, so it is history, not live.
+        XCTAssertEqual(first.responses.map(\.outputTokens), [600])
+        XCTAssertEqual(try XCTUnwrap(first.responses.first).completedAt.timeIntervalSince(liveSince), 10, accuracy: 0.01)
+        XCTAssertEqual(first.responses.first?.durationSeconds ?? 0, 99, accuracy: 0.001)
+
+        // Nothing new: neither the turn nor the response is reported again.
+        let idle = try await monitor.poll(now: liveSince.addingTimeInterval(11))
+        XCTAssertTrue(idle.metrics.isEmpty)
+        XCTAssertTrue(idle.responses.isEmpty)
+
+        try append([
+            try user(at: 20, id: "second-prompt", origin: liveSince),
+            try assistant(at: 30, id: "m3", output: 300, stop: "end_turn", origin: liveSince)
+        ], to: file, modified: liveSince.addingTimeInterval(22))
+        let second = try await monitor.poll(now: liveSince.addingTimeInterval(22))
+        XCTAssertEqual(second.metrics.map(\.outputTokens), [300])
+        XCTAssertEqual(second.responses.map(\.outputTokens), [300])
+        XCTAssertEqual(second.responses.first?.durationSeconds ?? 0, 10, accuracy: 0.001)
+        let after = try await monitor.poll(now: liveSince.addingTimeInterval(33))
+        XCTAssertTrue(after.metrics.isEmpty)
+        XCTAssertTrue(after.responses.isEmpty)
+    }
+
+    func testMonitorHoldsAThinkingLastTerminalTurnUntilThirtySecondsOfPollClock() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let project = root.appendingPathComponent("synthetic-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let start = Date.now
+        try write([
+            try user(at: 0, id: "prompt", origin: start),
+            try assistant(at: 10, id: "m1", output: 300, stop: "end_turn", origin: start, blocks: ["thinking"])
+        ], to: project.appendingPathComponent("\(sessionID).jsonl"))
+        let monitor = ClaudeSessionMonitor(root: root, liveSince: start)
+        let first = try await monitor.poll(now: start)
+        XCTAssertTrue(first.metrics.isEmpty, "the text block may still follow")
+        XCTAssertTrue(first.responses.isEmpty)
+        let second = try await monitor.poll(now: start.addingTimeInterval(11))
+        XCTAssertTrue(second.metrics.isEmpty)
+        let third = try await monitor.poll(now: start.addingTimeInterval(31))
+        XCTAssertEqual(third.metrics.map(\.outputTokens), [300])
+        XCTAssertEqual(third.responses.map(\.outputTokens), [300])
+        let fourth = try await monitor.poll(now: start.addingTimeInterval(42))
+        XCTAssertTrue(fourth.metrics.isEmpty)
+        XCTAssertTrue(fourth.responses.isEmpty)
+    }
+
     // MARK: Origin-aware prompts (claude-transcript-v3)
 
     func testBackgroundNotificationAfterTheTerminalMessageStartsNoTurn() throws {
         var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         _ = parser.consume(line: try user(at: 0, id: "prompt", kind: "human"))
-        XCTAssertNotNil(parser.consume(line: try assistant(at: 5, id: "m1", output: 100, stop: "end_turn")))
-        XCTAssertNil(parser.consume(line: try user(at: 20, id: "notification", kind: "task-notification")))
+        XCTAssertNil(parser.consume(line: try assistant(at: 5, id: "m1", output: 100, stop: "end_turn")), "a terminal turn waits for the next record")
+        // The notification is the first record after the terminal message, so it closes that turn.
+        XCTAssertNotNil(parser.consume(line: try user(at: 20, id: "notification", kind: "task-notification")))
         XCTAssertNil(parser.consume(line: try assistant(at: 25, id: "m-reaction", output: 50, stop: "tool_use")))
-        XCTAssertNil(parser.consume(line: try assistant(at: 30, id: "m-reaction-final", output: 50, stop: "end_turn")))
+        XCTAssertNil(terminal(&parser, try assistant(at: 30, id: "m-reaction-final", output: 50, stop: "end_turn")))
         _ = parser.consume(line: try user(at: 100, id: "next", kind: "human"))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 110, id: "m-next", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 110, id: "m-next", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|next"))
         XCTAssertEqual(metric.durationSeconds, 10, accuracy: 0.001)
     }
@@ -198,7 +352,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         // Neither continues nor restarts the turn, but keeps it alive for a later human message.
         XCTAssertNil(parser.consume(line: try user(at: 1_500, id: "notification", kind: "task-notification")))
         XCTAssertNil(parser.consume(line: try user(at: 3_000, id: "interjection", kind: "human")))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 3_010, id: "m2", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 3_010, id: "m2", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|prompt"))
         XCTAssertEqual(metric.outputTokens, 200)
         XCTAssertEqual(metric.durationSeconds, 3_010, accuracy: 0.001)
@@ -206,10 +360,10 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         // A notification never starts a turn on its own, even from an idle parser.
         var idle = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         XCTAssertNil(idle.consume(line: try user(at: 0, id: "notification", kind: "task-notification")))
-        XCTAssertNil(idle.consume(line: try assistant(at: 5, id: "m1", output: 10, stop: "end_turn")))
+        XCTAssertNil(terminal(&idle, try assistant(at: 5, id: "m1", output: 10, stop: "end_turn")))
         // An origin object without a human kind is not a prompt either.
         XCTAssertNil(idle.consume(line: try user(at: 10, id: "other", kind: "something-new")))
-        XCTAssertNil(idle.consume(line: try assistant(at: 15, id: "m2", output: 10, stop: "end_turn")))
+        XCTAssertNil(terminal(&idle, try assistant(at: 15, id: "m2", output: 10, stop: "end_turn")))
     }
 
     func testRecordsWithoutOriginFollowTheV2Rules() throws {
@@ -217,17 +371,17 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         _ = parser.consume(line: try user(at: 0, id: "prompt"))
         _ = parser.consume(line: try assistant(at: 5, id: "m1", output: 100, stop: "tool_use"))
         _ = parser.consume(line: try user(at: 20, id: "interjection"))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 40, id: "m2", output: 300, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 40, id: "m2", output: 300, stop: "end_turn")))
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|prompt"))
         XCTAssertEqual(metric.outputTokens, 400)
         XCTAssertNil(parser.consume(line: try user(at: 50, id: "meta", meta: true)))
-        XCTAssertNil(parser.consume(line: try assistant(at: 55, id: "m3", output: 10, stop: "end_turn")))
+        XCTAssertNil(terminal(&parser, try assistant(at: 55, id: "m3", output: 10, stop: "end_turn")))
     }
 
     func testCoordinatorMetaFollowUpIsASecondSubagentTurn() throws {
         var subagent = ClaudeTranscriptParser(sourceIdentity: "synthetic", scope: .subagent)
         _ = subagent.consume(line: try user(at: 0, id: "task", sidechain: true))
-        let first = try XCTUnwrap(subagent.consume(line: assistant(at: 10, id: "s1", output: 100, stop: "end_turn", sidechain: true)))
+        let first = try XCTUnwrap(terminal(&subagent, assistant(at: 10, id: "s1", output: 100, stop: "end_turn", sidechain: true)))
         XCTAssertEqual(first.id, try expectedID("\(sessionID)|\(agentID)|task"))
 
         // Other meta records stay ignored in a subagent transcript.
@@ -235,10 +389,10 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertNil(subagent.consume(line: try user(at: 51, id: "plain-meta", sidechain: true, meta: true)))
         // A non-meta record with a foreign origin kind is activity only.
         XCTAssertNil(subagent.consume(line: try user(at: 51.5, id: "notification", sidechain: true, kind: "task-notification")))
-        XCTAssertNil(subagent.consume(line: try assistant(at: 52, id: "s-orphan", output: 5, stop: "end_turn", sidechain: true)))
+        XCTAssertNil(terminal(&subagent, try assistant(at: 52, id: "s-orphan", output: 5, stop: "end_turn", sidechain: true)))
 
         XCTAssertNil(subagent.consume(line: try user(at: 100, id: "follow-up", sidechain: true, meta: true, kind: "coordinator")))
-        let second = try XCTUnwrap(subagent.consume(line: assistant(at: 108, id: "s2", output: 80, stop: "end_turn", sidechain: true)))
+        let second = try XCTUnwrap(terminal(&subagent, assistant(at: 108, id: "s2", output: 80, stop: "end_turn", sidechain: true)))
         XCTAssertEqual(second.id, try expectedID("\(sessionID)|\(agentID)|follow-up"))
         XCTAssertEqual(second.durationSeconds, 8, accuracy: 0.001)
         XCTAssertEqual(second.outputTokens, 80)
@@ -246,7 +400,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         // The coordinator exception is subagent-only: in a primary transcript it is just an unknown origin.
         var primary = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         XCTAssertNil(primary.consume(line: try user(at: 0, id: "c", meta: true, kind: "coordinator")))
-        XCTAssertNil(primary.consume(line: try assistant(at: 5, id: "m", output: 5, stop: "end_turn")))
+        XCTAssertNil(terminal(&primary, try assistant(at: 5, id: "m", output: 5, stop: "end_turn")))
     }
 
     // MARK: Mid-file start synchronisation
@@ -257,10 +411,10 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         // The tail begins mid-turn: a human interjection (parent set) is not a reliable turn start.
         XCTAssertNil(parser.consume(line: try user(at: 0, id: "interjection", kind: "human")))
         XCTAssertNil(parser.consume(line: try assistant(at: 5, id: "m1", output: 9_000, stop: "tool_use")))
-        XCTAssertNil(parser.consume(line: try assistant(at: 10, id: "m2", output: 9_000, stop: "end_turn")))
+        XCTAssertNil(terminal(&parser, try assistant(at: 10, id: "m2", output: 9_000, stop: "end_turn")))
         // The terminal record synchronised the parser; the next prompt is measured.
         _ = parser.consume(line: try user(at: 100, id: "next", kind: "human"))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 110, id: "m3", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 110, id: "m3", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|next"))
         XCTAssertEqual(metric.outputTokens, 100)
     }
@@ -270,7 +424,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         parser.markStartedMidFile()
         XCTAssertNil(parser.consume(line: try toolResult(at: 0)))
         _ = parser.consume(line: try user(at: 1, id: "root", rootPrompt: true))
-        let metric = try XCTUnwrap(parser.consume(line: assistant(at: 11, id: "m1", output: 100, stop: "end_turn")))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 11, id: "m1", output: 100, stop: "end_turn")))
         XCTAssertEqual(metric.id, try expectedID("\(sessionID)|root"))
 
         // A parser reset (file replaced) starts from the beginning again.
@@ -278,7 +432,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         replaced.markStartedMidFile()
         replaced.reset(sourceIdentity: "synthetic")
         _ = replaced.consume(line: try user(at: 0, id: "p"))
-        XCTAssertNotNil(replaced.consume(line: try assistant(at: 5, id: "m", output: 10, stop: "end_turn")))
+        XCTAssertNotNil(terminal(&replaced, try assistant(at: 5, id: "m", output: 10, stop: "end_turn")))
     }
 
     func testAbsentParentUuidDoesNotSynchroniseATailStartedParser() throws {
@@ -288,7 +442,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         record.removeValue(forKey: "parentUuid")
         XCTAssertNil(parser.consume(line: try JSONSerialization.data(withJSONObject: record)))
         XCTAssertNil(parser.consume(line: try assistant(at: 5, id: "m1", output: 10, stop: "tool_use")))
-        XCTAssertNil(parser.consume(line: try assistant(at: 6, id: "m2", output: 10, stop: "end_turn")), "still unsynchronised before the terminal record")
+        XCTAssertNil(terminal(&parser, try assistant(at: 6, id: "m2", output: 10, stop: "end_turn")), "still unsynchronised before the terminal record")
     }
 
     func testLiveTailSkipsTheTurnItJoinedMidwayWhileTheArchiveReaderMeasuresItWhole() async throws {
@@ -317,7 +471,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         var collected: [String: TurnMetric] = [:]
         var all: [TurnMetric] = []
         for step in 0..<12 {
-            let records = try await monitor.poll(now: Date.now.addingTimeInterval(Double(step) * 11))
+            let records = try await monitor.poll(now: Date.now.addingTimeInterval(Double(step) * 11)).metrics
             all += records
             for record in records { collected[record.id] = record }
         }
@@ -351,7 +505,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
                 stop: last ? "end_turn" : "tool_use", sidechain: sidechain, requestID: record.requestID
             ))
         }
-        return result
+        return result ?? parser.pollEnded(now: base, isFinal: false)
     }
 
     func testProviderIsAttributedFromExplicitMessageAndRequestIdentifiers() throws {
@@ -396,9 +550,9 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         // A later turn is judged on its own records.
         var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         _ = parser.consume(line: try user(at: 0, id: "p1"))
-        XCTAssertEqual(parser.consume(line: try assistant(at: 5, id: "m1", output: 5, stop: "end_turn"))?.provider, "unknown")
+        XCTAssertEqual(terminal(&parser, try assistant(at: 5, id: "m1", output: 5, stop: "end_turn"))?.provider, "unknown")
         _ = parser.consume(line: try user(at: 10, id: "p2"))
-        XCTAssertEqual(parser.consume(line: try assistant(at: 15, id: bedrockMessage, output: 5, stop: "end_turn"))?.provider, "amazon-bedrock")
+        XCTAssertEqual(terminal(&parser, try assistant(at: 15, id: bedrockMessage, output: 5, stop: "end_turn"))?.provider, "amazon-bedrock")
     }
 
     func testClaudeModelIdentifiersAreNormalisedAcrossPlatforms() throws {
@@ -450,9 +604,9 @@ final class ClaudeTranscriptParserTests: XCTestCase {
     func testSharedSampleProviderAllowlistDependsOnClient() throws {
         func sample(client: String, provider: String) -> SharedSample? {
             let (parser, metricVersion): (String, String) = switch client {
-            case "claude-code": ("claude-transcript-v3", "claude-observed-turn-v1")
+            case "claude-code": ("claude-transcript-v4", "claude-observed-turn-v1")
             case "grok-build": ("grok-session-v1", "grok-observed-work-turn-v1")
-            default: ("codex-rollout-v1", "turn-v1")
+            default: ("codex-rollout-v2", "turn-v1")
             }
             return SharedSample(TurnMetric(
                 id: "id", completedAt: base, model: "m", outputTokens: 10, durationSeconds: 2, codexTTFTSeconds: nil,
@@ -471,10 +625,522 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             XCTAssertNil(sample(client: "grok-build", provider: provider))
         }
         XCTAssertNil(sample(client: "claude-code", provider: "azure"))
-        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])))?.appVersion, "0.1.13")
+        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])))?.appVersion, "0.1.14")
+    }
+
+    // MARK: Response speed (response-v1)
+
+    func testToolLoopMeasuresEachResponseFromItsOwnTrigger() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(parser.consume(line: try assistant(at: 10, id: "m1", output: 500, stop: "tool_use")))
+        XCTAssertNil(parser.consume(line: try toolResult(at: 12)))
+        XCTAssertNil(parser.consume(line: try assistant(at: 20, id: "m2", output: 400, stop: "end_turn")))
+        XCTAssertTrue(parser.hasPendingWork)
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertFalse(parser.hasPendingWork)
+
+        XCTAssertEqual(metric.outputTokens, 900)
+        XCTAssertEqual(metric.durationSeconds, 20, accuracy: 0.001)
+        XCTAssertEqual(metric.responseOutputTokens, 900)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 18, accuracy: 0.001, "m1 runs 0 to 10 s, m2 runs from the tool result at 12 s to 20 s")
+        XCTAssertEqual(metric.responseCount, 2)
+        XCTAssertEqual(try XCTUnwrap(metric.responseSpeedTPS), 50, accuracy: 0.001)
+
+        let responses = parser.drainCompletedResponses()
+        XCTAssertEqual(responses.map(\.outputTokens), [500, 400])
+        XCTAssertEqual(responses.map(\.durationSeconds), [10, 8])
+        XCTAssertEqual(responses.map(\.completedAt), [base.addingTimeInterval(10), base.addingTimeInterval(20)])
+    }
+
+    func testMultiBlockMessageEndsAtItsLastRecordAndTurnCompletesThere() throws {
+        // Thinking block, then the text block of the same terminal message.
+        var thinking = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = thinking.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(thinking.consume(line: try assistant(at: 3, id: "m1", output: 120, stop: nil)))
+        XCTAssertFalse(thinking.hasPendingWork, "a record without a stop reason is still streaming")
+        XCTAssertNil(thinking.consume(line: try assistant(at: 9, id: "m1", output: 400, stop: "end_turn")))
+        let metric = try XCTUnwrap(thinking.pollEnded(now: base, isFinal: false))
+        XCTAssertEqual(metric.completedAt, base.addingTimeInterval(9), "the turn completes at the last record of the terminal message")
+        XCTAssertEqual(metric.durationSeconds, 9, accuracy: 0.001)
+        XCTAssertEqual(metric.outputTokens, 400, "the message counts its largest usage once")
+        XCTAssertEqual(metric.responseOutputTokens, 400)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 9, accuracy: 0.001)
+        XCTAssertEqual(metric.responseCount, 1)
+
+        // Records that already carry the terminal stop reason keep extending the message.
+        var repeated = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = repeated.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(repeated.consume(line: try assistant(at: 3, id: "m1", output: 200, stop: "end_turn")))
+        XCTAssertNil(repeated.consume(line: try assistant(at: 9, id: "m1", output: 450, stop: "end_turn")))
+        let second = try XCTUnwrap(repeated.pollEnded(now: base, isFinal: false))
+        XCTAssertEqual(second.completedAt, base.addingTimeInterval(9))
+        XCTAssertEqual(second.responseOutputTokens, 450)
+        XCTAssertEqual(try XCTUnwrap(second.responseDurationSeconds), 9, accuracy: 0.001)
+        XCTAssertNil(repeated.pollEnded(now: base, isFinal: false), "a closed turn is not emitted twice")
+    }
+
+    func testStreamingToolResultBetweenRecordsOfOneMessageDoesNotMoveItsStart() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(parser.consume(line: try assistant(at: 3, id: "m1", output: 100, stop: nil)))
+        XCTAssertNil(parser.consume(line: try toolResult(at: 5)))
+        XCTAssertNil(parser.consume(line: try assistant(at: 9, id: "m1", output: 300, stop: "tool_use")))
+        XCTAssertNil(parser.consume(line: try assistant(at: 15, id: "m2", output: 250, stop: "end_turn")))
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
+        // m1 still starts at the prompt (9 s); m2 starts at the tool result (5 s to 15 s).
+        XCTAssertEqual(metric.responseOutputTokens, 550)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 19, accuracy: 0.001)
+        XCTAssertEqual(metric.responseCount, 2)
+        XCTAssertEqual(parser.drainCompletedResponses().map(\.durationSeconds), [9, 10])
+    }
+
+    func testResponsesUnderTwoHundredTokensAreExcluded() throws {
+        XCTAssertEqual(ResponseSpeed.minimumOutputTokens, 200)
+        func metric(tokens: Int) throws -> TurnMetric {
+            var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+            _ = parser.consume(line: try user(at: 0, id: "prompt"))
+            return try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "m1", output: tokens, stop: "end_turn")))
+        }
+        let short = try metric(tokens: 199)
+        XCTAssertNil(short.responseOutputTokens)
+        XCTAssertNil(short.responseDurationSeconds)
+        XCTAssertNil(short.responseCount)
+        XCTAssertNil(short.responseSpeedTPS)
+        XCTAssertEqual(short.outputTokens, 199, "the turn metric itself is unaffected")
+        let boundary = try metric(tokens: 200)
+        XCTAssertEqual(boundary.responseOutputTokens, 200)
+        XCTAssertEqual(boundary.responseCount, 1)
+
+        // Only the qualifying response of a loop contributes, with its own duration.
+        var loop = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = loop.consume(line: try user(at: 0, id: "prompt"))
+        _ = loop.consume(line: try assistant(at: 5, id: "m1", output: 150, stop: "tool_use"))
+        _ = loop.consume(line: try toolResult(at: 6))
+        let mixed = try XCTUnwrap(terminal(&loop, assistant(at: 16, id: "m2", output: 300, stop: "end_turn")))
+        XCTAssertEqual(mixed.outputTokens, 450)
+        XCTAssertEqual(mixed.responseOutputTokens, 300)
+        XCTAssertEqual(try XCTUnwrap(mixed.responseDurationSeconds), 10, accuracy: 0.001)
+        XCTAssertEqual(mixed.responseCount, 1)
+        XCTAssertEqual(loop.drainCompletedResponses().map(\.outputTokens), [300])
+    }
+
+    func testResponsesLongerThanTenMinutesAreExcludedAndExactlyTenMinutesIsKept() throws {
+        XCTAssertEqual(ResponseSpeed.maximumDurationSeconds, 600)
+        func metric(seconds: Double) throws -> TurnMetric {
+            var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+            _ = parser.consume(line: try user(at: 0, id: "prompt"))
+            return try XCTUnwrap(terminal(&parser, assistant(at: seconds, id: "m1", output: 1_000, stop: "end_turn")))
+        }
+        let stalled = try metric(seconds: 601)
+        XCTAssertNil(stalled.responseOutputTokens)
+        XCTAssertNil(stalled.responseCount)
+        XCTAssertEqual(stalled.outputTokens, 1_000)
+        let limit = try metric(seconds: 600)
+        XCTAssertEqual(limit.responseOutputTokens, 1_000)
+        XCTAssertEqual(try XCTUnwrap(limit.responseDurationSeconds), 600, accuracy: 0.001)
+
+        var live = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = live.consume(line: try user(at: 0, id: "prompt"))
+        _ = terminal(&live, try assistant(at: 601, id: "m1", output: 1_000, stop: "end_turn"))
+        XCTAssertTrue(live.drainCompletedResponses().isEmpty)
+    }
+
+    func testSyntheticMessageNeverCountsAndInvalidatesTheTurn() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(parser.consume(line: try assistant(at: 10, id: "m-synthetic", model: "<synthetic>", output: 900, stop: "tool_use")))
+        XCTAssertNil(parser.consume(line: try toolResult(at: 11)))
+        XCTAssertNil(terminal(&parser, try assistant(at: 20, id: "m-final", output: 500, stop: "end_turn")), "the turn is invalid")
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+        let responses = parser.drainCompletedResponses()
+        XCTAssertFalse(responses.contains { $0.id.contains("m-synthetic") }, "a synthetic message is never a response")
+        XCTAssertEqual(responses.map(\.outputTokens), [500], "the live stream still times genuine responses on their own data")
+
+        // A terminal synthetic message discards the turn outright.
+        var terminalSynthetic = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = terminalSynthetic.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(terminal(&terminalSynthetic, try assistant(at: 10, id: "m-synthetic", model: "<synthetic>", output: 900, stop: "stop_sequence")))
+        XCTAssertTrue(terminalSynthetic.drainCompletedResponses().isEmpty)
+    }
+
+    func testInterruptedTurnEmitsNoTurnAndItsStreamingResponseIsNeverDrained() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try assistant(at: 10, id: "m1", output: 500, stop: "tool_use"))
+        _ = parser.consume(line: try toolResult(at: 11))
+        // m2 is still streaming (no stop reason) when the user interrupts.
+        _ = parser.consume(line: try assistant(at: 30, id: "m2", output: 600, stop: nil))
+        XCTAssertNil(parser.consume(line: try user(at: 31, id: "interrupt", content: "[Request interrupted by user]")))
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertFalse(parser.hasPendingWork)
+        // m1 completed before the interruption and was already reported; m2 never completed.
+        XCTAssertEqual(parser.drainCompletedResponses().map(\.outputTokens), [500])
+
+        // A completed response of an interrupted turn is still reported, but no turn is.
+        var completed = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = completed.consume(line: try user(at: 0, id: "prompt"))
+        _ = completed.consume(line: try assistant(at: 10, id: "m1", output: 500, stop: "tool_use"))
+        _ = completed.consume(line: try user(at: 11, id: "interrupt", content: "[Request interrupted by user for tool use]"))
+        XCTAssertNil(completed.pollEnded(now: base, isFinal: false))
+        XCTAssertEqual(completed.drainCompletedResponses().map(\.outputTokens), [500])
+    }
+
+    func testMidFileReaderMeasuresNoTurnButDrainsResponsesWithTheirOwnTrigger() throws {
+        var tail = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        tail.markStartedMidFile()
+        _ = tail.consume(line: try user(at: 0, id: "interjection", kind: "human"))
+        _ = tail.consume(line: try assistant(at: 10, id: "m1", output: 500, stop: "tool_use"))
+        XCTAssertNil(tail.pollEnded(now: base, isFinal: false))
+        let responses = tail.drainCompletedResponses()
+        XCTAssertEqual(responses.map(\.outputTokens), [500])
+        XCTAssertEqual(responses.first?.durationSeconds ?? 0, 10, accuracy: 0.001)
+
+        // Without any user record before it the response has no trigger and cannot be timed.
+        var untimed = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        untimed.markStartedMidFile()
+        _ = untimed.consume(line: try assistant(at: 10, id: "m1", output: 500, stop: "tool_use"))
+        XCTAssertNil(untimed.pollEnded(now: base, isFinal: false))
+        XCTAssertTrue(untimed.drainCompletedResponses().isEmpty)
+    }
+
+    func testResponseOutsideAHumanTurnIsDrainedButNeverCountedInATurn() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        // A background notification triggers a response while no human turn is active.
+        XCTAssertNil(parser.consume(line: try user(at: 0, id: "notification", kind: "task-notification")))
+        XCTAssertNil(parser.consume(line: try assistant(at: 10, id: "m-reaction", output: 400, stop: "end_turn")))
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false), "no turn exists to emit")
+        let reaction = parser.drainCompletedResponses()
+        XCTAssertEqual(reaction.map(\.outputTokens), [400])
+        XCTAssertEqual(reaction.first?.durationSeconds ?? 0, 10, accuracy: 0.001)
+        XCTAssertEqual(reaction.first?.sourceKind, "primary")
+
+        // The next human turn's totals contain only its own response.
+        _ = parser.consume(line: try user(at: 20, id: "prompt", kind: "human"))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 30, id: "m-next", output: 300, stop: "end_turn")))
+        XCTAssertEqual(metric.outputTokens, 300)
+        XCTAssertEqual(metric.responseOutputTokens, 300)
+        XCTAssertEqual(metric.responseCount, 1)
+        XCTAssertEqual(parser.drainCompletedResponses().map(\.outputTokens), [300])
+
+        // A response left open when a turn starts belongs to no turn either.
+        var open = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = open.consume(line: try user(at: 0, id: "notification", kind: "task-notification"))
+        _ = open.consume(line: try assistant(at: 10, id: "m-reaction", output: 400, stop: "end_turn"))
+        _ = open.consume(line: try user(at: 20, id: "prompt", kind: "human"))
+        let second = try XCTUnwrap(terminal(&open, assistant(at: 30, id: "m-next", output: 300, stop: "end_turn")))
+        XCTAssertEqual(second.responseOutputTokens, 300, "the reaction began before the turn")
+        XCTAssertEqual(second.responseCount, 1)
+        XCTAssertEqual(open.drainCompletedResponses().map(\.outputTokens), [400, 300])
+    }
+
+    func testTurnWithoutQualifyingResponsesStillEmitsWithNilResponseFields() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(at: 5, id: "m1", output: 50, stop: "end_turn")))
+        XCTAssertEqual(metric.outputTokens, 50)
+        XCTAssertNil(metric.responseOutputTokens)
+        XCTAssertNil(metric.responseDurationSeconds)
+        XCTAssertNil(metric.responseCount)
+        XCTAssertNil(metric.responseSpeedTPS)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+    }
+
+    func testMetaAndNotificationRecordsAreTriggersForTheNextResponse() throws {
+        // A meta record (for example injected context) is a trigger even though it is never a prompt.
+        var meta = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = meta.consume(line: try user(at: 0, id: "prompt"))
+        _ = meta.consume(line: try assistant(at: 10, id: "m1", output: 300, stop: "tool_use"))
+        _ = meta.consume(line: try user(at: 12, id: "meta", meta: true))
+        let first = try XCTUnwrap(terminal(&meta, assistant(at: 20, id: "m2", output: 400, stop: "end_turn")))
+        XCTAssertEqual(first.responseOutputTokens, 700)
+        XCTAssertEqual(try XCTUnwrap(first.responseDurationSeconds), 18, accuracy: 0.001, "m1 10 s plus m2 8 s from the meta record")
+
+        // The latest trigger wins: a background notification after the meta record.
+        var notification = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = notification.consume(line: try user(at: 0, id: "prompt", kind: "human"))
+        _ = notification.consume(line: try assistant(at: 10, id: "m1", output: 300, stop: "tool_use"))
+        _ = notification.consume(line: try user(at: 12, id: "meta", meta: true))
+        _ = notification.consume(line: try user(at: 15, id: "notification", kind: "task-notification"))
+        let second = try XCTUnwrap(terminal(&notification, assistant(at: 20, id: "m2", output: 400, stop: "end_turn")))
+        XCTAssertEqual(try XCTUnwrap(second.responseDurationSeconds), 15, accuracy: 0.001, "m1 10 s plus m2 5 s from the notification")
+        XCTAssertEqual(second.durationSeconds, 20, accuracy: 0.001)
+    }
+
+    func testPollEndedClosesTerminalTurnsAndCompletedResponsesOnly() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertFalse(parser.hasPendingWork)
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false), "a turn without records has nothing to close")
+
+        // A response that is still streaming (no stop reason yet) is never cut.
+        _ = parser.consume(line: try assistant(at: 4, id: "m1", output: 300, stop: nil))
+        XCTAssertFalse(parser.hasPendingWork)
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+
+        // The same message completes; it is held until a record or the end of a poll proves it is complete.
+        _ = parser.consume(line: try assistant(at: 8, id: "m1", output: 320, stop: "tool_use"))
+        XCTAssertTrue(parser.hasPendingWork)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false), "a non-terminal response finalises but emits no turn")
+        XCTAssertFalse(parser.hasPendingWork)
+        let finalised = parser.drainCompletedResponses()
+        XCTAssertEqual(finalised.map(\.outputTokens), [320])
+        XCTAssertEqual(finalised.first?.durationSeconds ?? 0, 8, accuracy: 0.001)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+
+        // The turn carries on and the terminal message waits for the end of the poll.
+        _ = parser.consume(line: try toolResult(at: 9))
+        XCTAssertNil(parser.consume(line: try assistant(at: 15, id: "m2", output: 250, stop: "end_turn")))
+        XCTAssertTrue(parser.hasPendingWork)
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertEqual(metric.outputTokens, 570)
+        XCTAssertEqual(metric.responseCount, 2)
+        XCTAssertFalse(parser.hasPendingWork)
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+    }
+
+    // MARK: Pending terminal messages that end in a thinking block
+
+    func testThinkingFirstTerminalMessageReportsItsFinalUsageAndLastRecordTime() throws {
+        for endPollBetweenRecords in [false, true] {
+            var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+            _ = parser.consume(line: try user(at: 0, id: "prompt"))
+            XCTAssertNil(parser.consume(line: try assistant(at: 3, id: "m1", output: 50, stop: "end_turn", blocks: ["thinking"])))
+            if endPollBetweenRecords {
+                XCTAssertNil(parser.pollEnded(now: base, isFinal: false), "a thinking-last message may still receive its text")
+            }
+            XCTAssertNil(parser.consume(line: try assistant(at: 9, id: "m1", output: 400, stop: "end_turn", blocks: ["text"])))
+            let metric = try XCTUnwrap(parser.pollEnded(now: base.addingTimeInterval(1), isFinal: false), "a text-last message closes at once")
+            XCTAssertEqual(metric.outputTokens, 400, "the final usage, not the partial one")
+            XCTAssertEqual(metric.completedAt, base.addingTimeInterval(9))
+            XCTAssertEqual(metric.durationSeconds, 9, accuracy: 0.001)
+            XCTAssertEqual(metric.responseOutputTokens, 400)
+            XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 9, accuracy: 0.001)
+            XCTAssertEqual(parser.drainCompletedResponses().map(\.outputTokens), [400])
+        }
+    }
+
+    func testThinkingLastTerminalMessageSurvivesPollEndsUntilTextOrALaterRecordArrives() throws {
+        // Closed by a later record: the turn ends at the thinking record.
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(parser.consume(line: try assistant(at: 3, id: "m1", output: 300, stop: "end_turn", blocks: ["thinking"])))
+        XCTAssertTrue(parser.hasPendingWork)
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertNil(parser.pollEnded(now: base.addingTimeInterval(10), isFinal: false))
+        XCTAssertTrue(parser.hasPendingWork)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+        let metric = try XCTUnwrap(parser.consume(line: try user(at: 20, id: "next")))
+        XCTAssertEqual(metric.completedAt, base.addingTimeInterval(3))
+        XCTAssertEqual(metric.outputTokens, 300)
+        XCTAssertEqual(parser.drainCompletedResponses().map(\.durationSeconds), [3])
+    }
+
+    func testThinkingLastTerminalMessageTimesOutAfterThirtySecondsOfPollClock() throws {
+        XCTAssertEqual(ClaudeTranscriptParser.pendingTimeout, 30)
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try assistant(at: 3, id: "m1", output: 300, stop: "end_turn", blocks: ["thinking"]))
+        let t0 = base.addingTimeInterval(100)
+        XCTAssertNil(parser.pollEnded(now: t0, isFinal: false), "the first call starts the clock")
+        XCTAssertNil(parser.pollEnded(now: t0.addingTimeInterval(29), isFinal: false))
+        let metric = try XCTUnwrap(parser.pollEnded(now: t0.addingTimeInterval(30), isFinal: false))
+        XCTAssertEqual(metric.completedAt, base.addingTimeInterval(3))
+        XCTAssertFalse(parser.hasPendingWork)
+        XCTAssertNil(parser.pollEnded(now: t0.addingTimeInterval(60), isFinal: false))
+
+        // A text record that arrives before the timeout closes it at the next poll end instead.
+        var text = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = text.consume(line: try user(at: 0, id: "prompt"))
+        _ = text.consume(line: try assistant(at: 3, id: "m1", output: 300, stop: "end_turn", blocks: ["thinking"]))
+        XCTAssertNil(text.pollEnded(now: t0, isFinal: false))
+        _ = text.consume(line: try assistant(at: 9, id: "m1", output: 420, stop: "end_turn", blocks: ["text"]))
+        let closed = try XCTUnwrap(text.pollEnded(now: t0.addingTimeInterval(1), isFinal: false))
+        XCTAssertEqual(closed.completedAt, base.addingTimeInterval(9))
+        XCTAssertEqual(closed.outputTokens, 420)
+    }
+
+    func testFinalPollEndClosesAThinkingLastMessageImmediately() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try assistant(at: 3, id: "m1", output: 300, stop: "end_turn", blocks: ["thinking"]))
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: true))
+        XCTAssertEqual(metric.completedAt, base.addingTimeInterval(3))
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: true))
+
+        // A non-terminal thinking-last response (a tool call is still to come) also closes.
+        var loop = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = loop.consume(line: try user(at: 0, id: "prompt"))
+        _ = loop.consume(line: try assistant(at: 5, id: "m1", output: 300, stop: "tool_use", blocks: ["thinking"]))
+        XCTAssertNil(loop.pollEnded(now: base, isFinal: false))
+        XCTAssertTrue(loop.drainCompletedResponses().isEmpty)
+        XCTAssertNil(loop.pollEnded(now: base, isFinal: true))
+        XCTAssertEqual(loop.drainCompletedResponses().map(\.outputTokens), [300])
+    }
+
+    func testTerminalTurnIsEmittedByTheNextRecordThatIsNotItsOwn() throws {
+        // The next prompt returns the previous turn and starts its own.
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "first"))
+        XCTAssertNil(parser.consume(line: try assistant(at: 10, id: "m1", output: 300, stop: "end_turn")))
+        XCTAssertNil(parser.consume(line: try assistant(at: 11, id: "m1", output: 300, stop: "end_turn")), "more records of the terminal message do not close it")
+        let first = try XCTUnwrap(parser.consume(line: try user(at: 40, id: "second")))
+        XCTAssertEqual(first.id, try expectedID("\(sessionID)|first"))
+        XCTAssertEqual(first.completedAt, base.addingTimeInterval(11))
+        let second = try XCTUnwrap(terminal(&parser, assistant(at: 50, id: "m2", output: 300, stop: "end_turn")))
+        XCTAssertEqual(second.id, try expectedID("\(sessionID)|second"))
+        XCTAssertEqual(second.responseDurationSeconds ?? 0, 10, accuracy: 0.001, "the second response starts at the second prompt")
+
+        // Another message after the terminal one also closes the turn; it belongs to no turn.
+        var other = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = other.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(other.consume(line: try assistant(at: 10, id: "m1", output: 300, stop: "end_turn")))
+        XCTAssertNotNil(other.consume(line: try assistant(at: 12, id: "m-other", output: 300, stop: "tool_use")))
+        XCTAssertNil(other.pollEnded(now: base, isFinal: false))
+
+        // Without a later record the end of the poll emits the turn, exactly once.
+        var idle = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = idle.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(idle.consume(line: try assistant(at: 10, id: "m1", output: 300, stop: "end_turn")))
+        XCTAssertNotNil(idle.pollEnded(now: base, isFinal: false))
+        XCTAssertNil(idle.pollEnded(now: base, isFinal: false))
+    }
+
+    func testLiveResponsesAreDrainedOnceWithTheirDescriptors() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        let requestA = "req_011CABCDEFGHIJKLMNOPQRST", requestB = "req_011CZYXWVUTSRQPONMLKJIHG"
+        _ = parser.consume(line: try user(at: 0, id: "prompt", kind: "human"))
+        _ = parser.consume(line: try assistant(at: 10, id: anthropicMessage, output: 500, stop: "tool_use", requestID: requestA, effort: "high"))
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty, "a response is final only once a later record arrives")
+        _ = parser.consume(line: try toolResult(at: 12))
+        _ = parser.consume(line: try assistant(at: 20, id: "msg_01ZYXWVUTSRQPONMLKJIHGFE", output: 400, stop: "end_turn", requestID: requestB, effort: "high"))
+
+        let first = parser.drainCompletedResponses()
+        XCTAssertEqual(first.count, 1)
+        let response = try XCTUnwrap(first.first)
+        XCTAssertEqual(response.id, "\(sessionID)||\(anthropicMessage)")
+        XCTAssertEqual(response.model, "claude-sonnet-5-5")
+        XCTAssertEqual(response.provider, "anthropic")
+        XCTAssertEqual(response.client, "claude-code")
+        XCTAssertEqual(response.sourceKind, "primary")
+        XCTAssertEqual(response.metricVersion, "claude-observed-turn-v1")
+        XCTAssertEqual(response.reasoningEffort, "high")
+        XCTAssertEqual(response.completedAt, base.addingTimeInterval(10))
+        XCTAssertEqual(response.outputTokens, 500)
+        XCTAssertEqual(response.durationSeconds, 10, accuracy: 0.001)
+        XCTAssertEqual(response.tokensPerSecond, 50, accuracy: 0.001)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty, "a drained response is not reported again")
+
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
+        let last = try XCTUnwrap(parser.drainCompletedResponses().first)
+        XCTAssertEqual(last.id, "\(sessionID)||msg_01ZYXWVUTSRQPONMLKJIHGFE")
+        XCTAssertEqual(last.completedAt, metric.completedAt)
+        XCTAssertEqual(last.durationSeconds, 8, accuracy: 0.001)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+        XCTAssertNil(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty, "ending the poll twice finalises nothing twice")
+    }
+
+    func testSubagentResponsesFollowTheSameRulesAndCarrySubagentDescriptors() throws {
+        var parser = ClaudeSubagentTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "task", sidechain: true))
+        _ = parser.consume(line: try assistant(at: 10, id: "s1", output: 500, stop: "tool_use", sidechain: true))
+        _ = parser.consume(line: try toolResult(at: 12, sidechain: true))
+        XCTAssertNil(parser.consume(line: try assistant(at: 20, id: "s2", output: 400, stop: "end_turn", sidechain: true)))
+        XCTAssertTrue(parser.hasPendingWork)
+        let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
+        XCTAssertEqual(metric.sourceKind, "subagent")
+        XCTAssertEqual(metric.responseOutputTokens, 900)
+        XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 18, accuracy: 0.001)
+        XCTAssertEqual(metric.responseCount, 2)
+        let responses = parser.drainCompletedResponses()
+        XCTAssertEqual(responses.map(\.id), ["\(sessionID)|\(agentID)|s1", "\(sessionID)|\(agentID)|s2"])
+        XCTAssertEqual(Set(responses.map(\.sourceKind)), ["subagent"])
+        XCTAssertEqual(Set(responses.map(\.metricVersion)), ["claude-observed-subagent-turn-v1"])
+        XCTAssertEqual(Set(responses.map(\.client)), ["claude-code"])
+        XCTAssertEqual(responses.map(\.durationSeconds), [10, 8])
+
+        // The primary parser never sees sidechain records, so it reports nothing for them.
+        var primary = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = primary.consume(line: try user(at: 0, id: "task", sidechain: true))
+        _ = primary.consume(line: try assistant(at: 10, id: "s1", output: 500, stop: "end_turn", sidechain: true))
+        XCTAssertNil(primary.pollEnded(now: base, isFinal: false))
+        XCTAssertTrue(primary.drainCompletedResponses().isEmpty)
+    }
+
+    // MARK: Bedrock inference-profile region
+
+    func testBedrockProviderRegionComesFromTheInferenceProfilePrefix() throws {
+        let cases: [(model: String, region: String)] = [
+            ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us"),
+            ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "eu"),
+            ("apac.anthropic.claude-sonnet-4-5-20250929-v1:0", "apac"),
+            ("global.anthropic.claude-opus-4-6-v1", "global"),
+            ("jp.anthropic.claude-sonnet-4-5-20250929-v1:0", "jp"),
+            ("au.anthropic.claude-sonnet-4-5-20250929-v1:0", "au"),
+            ("ca.anthropic.claude-sonnet-4-5-20250929-v1:0", "ca"),
+            ("us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-gov"),
+            // No prefix, an unrecognised prefix, or a model id that is not a Bedrock one.
+            ("anthropic.claude-3-haiku-20240307-v1:0", "unknown"),
+            ("xx.anthropic.claude-sonnet-4-5-20250929-v1:0", "unknown"),
+            ("claude-sonnet-5-5", "unknown")
+        ]
+        for (model, region) in cases {
+            let result = try XCTUnwrap(metric(records: [(bedrockMessage, nil, model)]), model)
+            XCTAssertEqual(result.provider, "amazon-bedrock", model)
+            XCTAssertEqual(result.providerRegion, region, model)
+        }
+        // Model normalisation is unchanged by the region.
+        XCTAssertEqual(try metric(records: [(bedrockMessage, nil, "us.anthropic.claude-sonnet-4-5-20250929-v1:0")])?.model, "claude-sonnet-4-5-20250929")
+
+        // Messages that disagree on the region leave it unknown; agreement keeps it.
+        let secondMessage = "msg_bdrk_01ZYXWVUTSRQPONMLKJI"
+        XCTAssertEqual(try metric(records: [
+            (bedrockMessage, nil, "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            (secondMessage, nil, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        ])?.providerRegion, "unknown")
+        XCTAssertEqual(try metric(records: [
+            (bedrockMessage, nil, "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            (secondMessage, nil, "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        ])?.providerRegion, "us")
+        for scope in [ClaudeTranscriptParser.Scope.primary, .subagent] {
+            XCTAssertEqual(try metric(scope: scope, records: [(bedrockMessage, nil, "global.anthropic.claude-opus-4-6-v1")])?.providerRegion, "global")
+        }
+    }
+
+    func testProviderRegionIsNilForEveryNonBedrockProvider() throws {
+        let bedrockModel = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        for records in [
+            [(anthropicMessage, Optional(anthropicRequest), bedrockModel)],
+            [(vertexMessage, nil, bedrockModel)],
+            [("msg-no-evidence", nil, bedrockModel)],
+            [(bedrockMessage, nil, bedrockModel), (anthropicMessage, anthropicRequest, bedrockModel)]
+        ] {
+            let result = try XCTUnwrap(metric(records: records))
+            XCTAssertNotEqual(result.provider, "amazon-bedrock")
+            XCTAssertNil(result.providerRegion)
+        }
+        XCTAssertNil(try metric(records: [(anthropicMessage, anthropicRequest, "claude-sonnet-5-5")])?.providerRegion)
+    }
+
+    func testBedrockRegionReachesTheSharedSample() throws {
+        let result = try XCTUnwrap(metric(records: [(bedrockMessage, nil, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")]))
+        let sample = try XCTUnwrap(SharedSample(result))
+        XCTAssertEqual(sample.providerRegion, "eu")
+        XCTAssertEqual(sample.provider, "amazon-bedrock")
     }
 
     // MARK: Synthetic fixtures
+
+    /// Feeds a terminal record. A terminal turn closes on the next record or at the end of a poll, so
+    /// a fixture that ends with it ends the poll when `consume` did not already return the turn.
+    private func terminal(_ parser: inout ClaudeTranscriptParser, _ line: Data) -> TurnMetric? {
+        if let metric = parser.consume(line: line) { return metric }
+        return parser.pollEnded(now: base, isFinal: false)
+    }
 
     private func timestamp(_ seconds: Double, origin: Date) -> String {
         let formatter = ISO8601DateFormatter()
@@ -503,22 +1169,38 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 
+    private func attachment(at seconds: Double, id: String) throws -> Data {
+        var value = envelope(sidechain: false)
+        value["type"] = "attachment"
+        value["uuid"] = id
+        value["parentUuid"] = "previous-record"
+        value["timestamp"] = timestamp(seconds, origin: base)
+        value["attachment"] = ["type": "PRIVATE_ATTACHMENT"]
+        return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    }
+
     private func toolResult(at seconds: Double, sidechain: Bool = false) throws -> Data {
         try user(at: seconds, id: "tool-result-\(Int(seconds))", sidechain: sidechain, content: [["type": "tool_result", "content": "PRIVATE_RESPONSE"]])
     }
 
     private func assistant(
         at seconds: Double, id: String, model: String = "claude-sonnet-5-5", output: Int?, stop: String?,
-        sidechain: Bool = false, origin: Date? = nil, requestID: String? = nil
+        sidechain: Bool = false, origin: Date? = nil, requestID: String? = nil, effort: String? = nil,
+        blocks: [String]? = nil, parent: String? = nil
     ) throws -> Data {
         var value = envelope(sidechain: sidechain)
+        if let parent { value["parentUuid"] = parent }
         if let requestID { value["requestId"] = requestID }
+        if let effort { value["perTurnEffort"] = effort }
         var usage: [String: Any] = [:]
         if let output { usage["output_tokens"] = output }
         value["type"] = "assistant"
         value["uuid"] = "record-\(id)"
         value["timestamp"] = timestamp(seconds, origin: origin ?? base)
-        value["message"] = ["id": id, "role": "assistant", "model": model, "content": "PRIVATE_RESPONSE", "stop_reason": stop ?? NSNull(), "usage": usage]
+        let content: Any = blocks.map { types in
+            types.map { type -> [String: Any] in type == "thinking" ? ["type": type, "thinking": "PRIVATE_RESPONSE"] : ["type": type, "text": "PRIVATE_RESPONSE"] }
+        } ?? "PRIVATE_RESPONSE"
+        value["message"] = ["id": id, "role": "assistant", "model": model, "content": content, "stop_reason": stop ?? NSNull(), "usage": usage]
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 

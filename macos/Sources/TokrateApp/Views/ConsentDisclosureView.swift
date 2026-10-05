@@ -28,8 +28,10 @@ struct ConsentDisclosureView: View {
                         .font(secondaryFont).foregroundStyle(DashboardStyle.muted)
                 }
             }
-            Text("Tokrate sends eligible completed-turn measurements to its community service: a rounded 5-minute time, client and app/parser/metric versions, model, provider, reasoning effort, source kind, token counts, turn duration, and TTFT when available.")
+            Text("Tokrate sends eligible completed-turn measurements to its community service: a rounded 5-minute time, client and app/parser/metric versions, model, provider (and, for Claude on Amazon Bedrock, its inference-profile region), reasoning effort, source kind, token counts, turn duration, response-speed totals, and TTFT when available.")
                 .font(primaryFont).foregroundStyle(DashboardStyle.ink).fixedSize(horizontal: false, vertical: true)
+            Text("From 0.1.14 the server derives your continent from the connection's country when a sample arrives (via Cloudflare). Only the continent is stored, never the country or your IP address, and a region is shown publicly only when at least 3 contributors report from it.")
+                .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("Uploads contain no names, prompts, responses, code, or local session IDs. Each sample has a random ID and uploads use a stable public-key pseudonym, so records can be linked over time.")
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("Early community data may include aggregates based on a single install.")
@@ -59,7 +61,7 @@ struct ConsentDisclosureView: View {
     private var payloadDisclosure: some View {
         DisclosureGroup(isExpanded: $showsPayload) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("An example upload with made-up values. Real uploads contain these same fields and nothing else.")
+                Text("An example upload with made-up values. Real uploads contain these same fields and nothing else. Region is derived by the server, not sent by the app.")
                     .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(SamplePayload.exampleJSON())

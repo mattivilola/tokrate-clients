@@ -4,6 +4,7 @@ import type {
   AppState,
   Bridge,
   ChartMetric,
+  ModelsView,
   ProviderFilter,
   SettingsPatch,
   Snapshot,
@@ -16,7 +17,7 @@ import type {
 } from "./types";
 
 /** Bump together with the notice text in docs and the Rust constant. */
-export const SHARING_NOTICE_VERSION = "2026-10-04-v1";
+export const SHARING_NOTICE_VERSION = "2026-10-05-v2";
 const MONITOR_UNREACHABLE =
   "Cannot reach the local monitor. Restart Tokrate to reconnect.";
 const AUTOMATIC_UPDATE_REVISIT_MS = 60 * 60 * 1000;
@@ -29,7 +30,8 @@ const EMPTY_SNAPSHOT: Snapshot = {
     sharing: false,
     monitoring: true,
     showSpeed: true,
-    selection: "latest",
+    showProviderBadge: true,
+    selection: "auto",
     days: 1,
     root: "",
     claudeRoot: "",
@@ -85,8 +87,9 @@ export class AppStore {
         view: options.initialView ?? "home",
         toolFilter: "all",
         providerFilter: "all",
-        chartMetric: "throughput",
-        sort: "recent",
+        chartMetric: "response",
+        sort: "throughput",
+        modelsView: "response",
         onboardingStep: 0,
         settingsAnchor: null,
         consentSheetOpen: false,
@@ -154,18 +157,19 @@ export class AppStore {
   clearSettingsAnchor = () => this.setUi({ settingsAnchor: null });
   setChartMetric = (chartMetric: ChartMetric) => this.setUi({ chartMetric });
   setSort = (sort: UiState["sort"]) => this.setUi({ sort });
+  setModelsView = (modelsView: ModelsView) => this.setUi({ modelsView });
   setOnboardingStep = (onboardingStep: UiState["onboardingStep"]) =>
     this.setUi({ onboardingStep });
   setConsentSheet = (consentSheetOpen: boolean) =>
     this.setUi({ consentSheetOpen });
-  /** Changing a filter falls back to the latest exact cohort, as before. */
+  /** Changing a filter returns to Auto (most active), the default selection. */
   setToolFilter = (toolFilter: ToolFilter) => {
     this.setUi({ toolFilter });
-    void this.patch({ selection: "latest" });
+    void this.patch({ selection: "auto" });
   };
   setProviderFilter = (providerFilter: ProviderFilter) => {
     this.setUi({ providerFilter });
-    void this.patch({ selection: "latest" });
+    void this.patch({ selection: "auto" });
   };
 
   // --- commands -----------------------------------------------------------

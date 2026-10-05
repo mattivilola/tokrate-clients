@@ -1,5 +1,5 @@
 use crate::claude_parser::is_subagent_transcript_path;
-use crate::model::TurnMetric;
+use crate::model::{ResponseMetric, TurnMetric};
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
@@ -44,6 +44,7 @@ pub struct Monitor {
     next_caught_up_index: usize,
     next_archive_index: usize,
     bytes_read_last_poll: usize,
+    live_responses: Vec<ResponseMetric>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -88,7 +89,21 @@ impl Monitor {
             next_caught_up_index: 0,
             next_archive_index: 0,
             bytes_read_last_poll: 0,
+            live_responses: Vec::new(),
         }
+    }
+
+    /// Qualifying responses the live (recent-tail) readers completed since the last call, in
+    /// completion order. History replay never contributes. The first poll after a start can
+    /// include responses that finished before the start; the host filters by its own launch time.
+    pub fn take_live_responses(&mut self) -> Vec<ResponseMetric> {
+        let mut responses = std::mem::take(&mut self.live_responses);
+        responses.sort_by(|left, right| {
+            left.completed_at
+                .cmp(&right.completed_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        responses
     }
 
     pub fn poll(&mut self, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
@@ -127,7 +142,9 @@ impl Monitor {
             if limit == 0 {
                 break;
             }
-            if let Ok(records) = file.live.poll(limit) {
+            let polled = file.live.poll(limit, now);
+            self.live_responses.extend(file.live.take_responses());
+            if let Ok(records) = polled {
                 live_records.extend(
                     records.into_iter().filter(|record| {
                         !file.archive_ids_while_live_catches_up.contains(&record.id)
@@ -169,7 +186,7 @@ impl Monitor {
                 }
                 let limit = READER_BATCH_BYTES.min(byte_budget);
                 let archive_result = file.archive.as_mut().map(|archive| {
-                    archive.poll(limit).map(|records| {
+                    archive.poll(limit, now).map(|records| {
                         (
                             records,
                             archive.bytes_read_last_poll(),

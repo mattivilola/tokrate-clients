@@ -17,15 +17,39 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         case subagent
     }
 
-    static let parserVersion = "claude-transcript-v3"
+    static let parserVersion = "claude-transcript-v4"
     static let primaryMetricVersion = "claude-observed-turn-v1"
     static let subagentMetricVersion = "claude-observed-subagent-turn-v1"
     static let maximumInterjectionGap: TimeInterval = 30 * 60
     private static let syntheticModel = "<synthetic>"
     private static let interruptionPrefix = "[Request interrupted by user"
 
+    /// Turn accounting for one API message (every record sharing a `message.id`).
     private struct MessageUsage: Sendable {
         var outputTokens: Int?
+        /// Timestamp of the message's latest assistant record.
+        var endedAt: Date?
+    }
+
+    /// The API response being timed, independent of any turn: the live stream times responses
+    /// file-wide, while a turn counts only the responses that began inside it.
+    private struct ResponseTrack: Sendable {
+        let id: String
+        /// The latest user-type record before the response's first record.
+        let startedAt: Date?
+        var endedAt: Date?
+        var outputTokens: Int?
+        var model: String?
+        var provider: String?
+        var effort: String?
+        /// The latest record carries a stop reason: the response is complete in live files.
+        var hasStopReason = false
+        /// The latest record's last content block is `thinking`: a text block may still follow.
+        var endsInThinking = false
+        /// The turn the response began in, when there was one.
+        let turnID: String?
+        let sessionID: String?
+        let agentID: String?
     }
 
     private struct TurnState: Sendable {
@@ -35,6 +59,14 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         let agentID: String?
         var lastActivityAt: Date
         var messages: [String: MessageUsage] = [:]
+        /// Set once a record carries a terminal stop reason. The turn is then pending: further records
+        /// of that message still extend it, and it closes by the rules on `closeOpenResponse`.
+        var terminalMessageID: String?
+        var responseTokens = 0
+        var responseSeconds = 0.0
+        var responseCount = 0
+        /// Bedrock inference-profile regions seen across the turn's counted records.
+        var regions: Set<String> = []
         var hasIncompleteUsage = false
         var hasModellessMessage = false
         var hasSyntheticMessage = false
@@ -53,6 +85,21 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     private var sourceIdentity: String
     private var turn: TurnState?
     private var emittedUserTurnIDs: Set<String> = []
+    private var completedResponses: [LiveResponse] = []
+    /// Timestamp of the latest user-type record (human prompt, tool result, notification or meta
+    /// record): the request for the next response is sent after it.
+    private var lastTriggerAt: Date?
+    private var openResponse: ResponseTrack?
+    /// uuid → timestamp of the latest accepted records of this file (any type), bounded; the parent
+    /// of a response's first assistant record is its request trigger.
+    private var recordTimestamps: [String: Date] = [:]
+    private var recordOrder: [String] = []
+    static let maximumRememberedRecords = 4_096
+    private var finalizedMessageIDs: Set<String> = []
+    /// The poll clock reading when the open response was first seen pending (stop reason present).
+    private var pendingSince: Date?
+    /// A pending thinking-last message waits this long for its text block before it closes.
+    static let pendingTimeout: TimeInterval = 30
     /// False while a reader that started mid-file has not yet reached a reliable turn boundary.
     private var isSynchronised = true
 
@@ -68,6 +115,13 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         turn = nil
         isSynchronised = true
         emittedUserTurnIDs.removeAll(keepingCapacity: true)
+        completedResponses.removeAll(keepingCapacity: true)
+        lastTriggerAt = nil
+        openResponse = nil
+        recordTimestamps.removeAll(keepingCapacity: true)
+        recordOrder.removeAll(keepingCapacity: true)
+        finalizedMessageIDs.removeAll(keepingCapacity: true)
+        pendingSince = nil
     }
 
     /// A reader that starts mid-file can see the end of a turn whose start it never saw. Until the
@@ -78,6 +132,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         isSynchronised = false
     }
 
+    /// A response that carries its stop reason is waiting to be closed.
+    var hasPendingWork: Bool { openResponse?.hasStopReason == true }
+
     mutating func consume(line: Data) -> TurnMetric? {
         guard line.count <= JSONLFileReader.maximumLineBytes,
               let root = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
@@ -86,18 +143,85 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         else { return nil }
 
         if emittedUserTurnIDs.count > 8_192 { emittedUserTurnIDs.removeAll(keepingCapacity: true) }
+        // A terminal message can still receive records (for example text after thinking), so its turn
+        // closes at the first accepted record that is not one of them.
+        rememberRecord(root)
+        var closed: TurnMetric?
+        if let terminalID = turn?.terminalMessageID {
+            let message = root["message"] as? [String: Any]
+            let continues = type == "assistant" && message?["id"] as? String == terminalID
+            if !continues { closed = closeTurn() }
+        }
         switch type {
         case "user":
             consumeUser(root)
-            return nil
         case "assistant":
-            return consumeAssistant(root)
+            consumeAssistant(root)
         default:
-            return nil
+            break
+        }
+        return closed
+    }
+
+    private mutating func rememberRecord(_ root: [String: Any]) {
+        guard let uuid = safeIdentifier(root["uuid"] as? String, maximum: 120), let timestamp = parseDate(root["timestamp"]) else { return }
+        if recordTimestamps.updateValue(timestamp, forKey: uuid) == nil {
+            recordOrder.append(uuid)
+            if recordOrder.count > Self.maximumRememberedRecords {
+                let overflow = recordOrder.count - Self.maximumRememberedRecords
+                for key in recordOrder.prefix(overflow) { recordTimestamps.removeValue(forKey: key) }
+                recordOrder.removeFirst(overflow)
+            }
         }
     }
 
+    /// The request trigger of a response whose first assistant record is `root`: its parent record
+    /// when this file showed it and it was written no later than the response; otherwise the latest
+    /// user-type record.
+    private func requestStart(for root: [String: Any], at timestamp: Date?) -> Date? {
+        if let parent = safeIdentifier(root["parentUuid"] as? String, maximum: 120),
+           let parentAt = recordTimestamps[parent], let timestamp, parentAt <= timestamp {
+            return parentAt
+        }
+        return lastTriggerAt
+    }
+
+    /// Called when a reader is caught up with its file at the end of a poll. A response whose latest
+    /// record carries a stop reason closes now unless its last block is `thinking`, in which case the
+    /// text block may still follow: it waits up to `pendingTimeout` seconds of poll clock. A final
+    /// read (archive, CLI) closes it unconditionally. Closing a terminal message emits its turn.
+    mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? {
+        guard let open = openResponse, open.hasStopReason else {
+            pendingSince = nil
+            return nil
+        }
+        if !isFinal {
+            guard !open.endsInThinking else {
+                let since = pendingSince ?? now
+                pendingSince = since
+                guard now.timeIntervalSince(since) >= Self.pendingTimeout else { return nil }
+                return closeOpenResponse()
+            }
+        }
+        return closeOpenResponse()
+    }
+
+    /// Finishes the open response; when it is the pending turn's terminal message, emits the turn.
+    private mutating func closeOpenResponse() -> TurnMetric? {
+        pendingSince = nil
+        if let terminalID = turn?.terminalMessageID, openResponse?.id == terminalID { return closeTurn() }
+        finalizeOpenResponse()
+        return nil
+    }
+
+    mutating func drainCompletedResponses() -> [LiveResponse] {
+        defer { completedResponses.removeAll(keepingCapacity: true) }
+        return completedResponses
+    }
+
     private mutating func consumeUser(_ root: [String: Any]) {
+        // Any user-type record is a trigger: the next request is sent after it.
+        if let triggered = parseDate(root["timestamp"]) { lastTriggerAt = max(lastTriggerAt ?? triggered, triggered) }
         guard let content = (root["message"] as? [String: Any])?["content"],
               let timestamp = parseDate(root["timestamp"])
         else { return }
@@ -120,6 +244,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             return
         }
         if isInterruption(content) {
+            // A response that was still streaming is cut off and never reported; a complete one is final.
+            if openResponse?.hasStopReason == true { finalizeOpenResponse() } else { openResponse = nil }
             turn = nil
             return
         }
@@ -148,14 +274,29 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         turn = state
     }
 
-    private mutating func consumeAssistant(_ root: [String: Any]) -> TurnMetric? {
-        if !isSynchronised {
-            let stopReason = (root["message"] as? [String: Any])?["stop_reason"] as? String
-            if stopReason == "end_turn" || stopReason == "stop_sequence" { isSynchronised = true }
-        }
-        guard var state = turn, let message = root["message"] as? [String: Any] else { return nil }
+    private mutating func consumeAssistant(_ root: [String: Any]) {
+        let stopReason = (root["message"] as? [String: Any])?["stop_reason"] as? String
+        let isTerminal = stopReason == "end_turn" || stopReason == "stop_sequence"
+        if !isSynchronised, isTerminal { isSynchronised = true }
+        guard let message = root["message"] as? [String: Any] else { return }
+        let timestamp = parseDate(root["timestamp"])
 
-        if let timestamp = parseDate(root["timestamp"]) { state.lastActivityAt = max(state.lastActivityAt, timestamp) }
+        if message["model"] as? String == Self.syntheticModel {
+            // Anything before this record is a different response, and it is complete.
+            finalizeOpenResponse()
+            if var state = turn {
+                if let timestamp { state.lastActivityAt = max(state.lastActivityAt, timestamp) }
+                state.hasSyntheticMessage = true
+                turn = isTerminal ? nil : state
+            }
+            return
+        }
+        let messageID = safeIdentifier(message["id"] as? String, maximum: 120)
+        if openResponse?.id != messageID { finalizeOpenResponse() }
+        if let messageID { trackResponse(messageID, root: root, message: message, timestamp: timestamp, stopReason: stopReason) }
+        guard var state = turn else { return }
+
+        if let timestamp { state.lastActivityAt = max(state.lastActivityAt, timestamp) }
         if let sessionID = safeIdentifier(root["sessionId"] as? String, maximum: 120),
            let original = state.sessionID, sessionID != original {
             state.hasIncompleteUsage = true
@@ -169,56 +310,112 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         }
         updateEffort(root, message: message, in: &state)
 
-        if message["model"] as? String == Self.syntheticModel {
-            state.hasSyntheticMessage = true
-        } else {
-            guard let messageID = safeIdentifier(message["id"] as? String, maximum: 120) else {
-                state.hasIncompleteUsage = true
-                turn = state
-                return nil
-            }
-            if state.messages[messageID] == nil && state.messages.count >= 4_096 {
-                state.hasIncompleteUsage = true
-                turn = state
-                return nil
-            }
-            if let provider = ClaudeProviderEvidence.provider(
-                messageID: message["id"] as? String, requestID: root["requestId"] as? String
-            ) {
-                state.providers.insert(provider)
-            } else {
-                state.hasRecordWithoutProviderEvidence = true
-            }
-            if let model = safeIdentifier(ClaudeModelID.normalized(message["model"] as? String), maximum: 80) {
-                if let existing = state.model, existing != model { state.modelIsAmbiguous = true }
-                else if state.model == nil { state.model = model }
-            } else {
-                state.hasModellessMessage = true
-            }
-
-            let output = nonnegativeInteger((message["usage"] as? [String: Any])?["output_tokens"])
-            if var existing = state.messages[messageID] {
-                if let prior = existing.outputTokens, let output, output < prior { state.hasIncompleteUsage = true }
-                if let output, existing.outputTokens.map({ output >= $0 }) ?? true {
-                    existing.outputTokens = output
-                }
-                state.messages[messageID] = existing
-            } else {
-                state.messages[messageID] = MessageUsage(outputTokens: output)
-            }
-        }
-        let stopReason = message["stop_reason"] as? String
-        guard stopReason == "end_turn" || stopReason == "stop_sequence" else {
+        guard let messageID else {
+            state.hasIncompleteUsage = true
             turn = state
-            return nil
+            return
+        }
+        if state.messages[messageID] == nil && state.messages.count >= 4_096 {
+            state.hasIncompleteUsage = true
+            turn = state
+            return
         }
 
+        let provider = ClaudeProviderEvidence.provider(messageID: message["id"] as? String, requestID: root["requestId"] as? String)
+        if let provider {
+            state.providers.insert(provider)
+        } else {
+            state.hasRecordWithoutProviderEvidence = true
+        }
+        let rawModel = message["model"] as? String
+        if let model = safeIdentifier(ClaudeModelID.normalized(rawModel), maximum: 80) {
+            if let existing = state.model, existing != model { state.modelIsAmbiguous = true }
+            else if state.model == nil { state.model = model }
+        } else {
+            state.hasModellessMessage = true
+        }
+        state.regions.insert(ClaudeModelID.bedrockRegion(rawModel) ?? "unknown")
+
+        let output = nonnegativeInteger((message["usage"] as? [String: Any])?["output_tokens"])
+        var usage = state.messages[messageID] ?? MessageUsage()
+        if let prior = usage.outputTokens, let output, output < prior { state.hasIncompleteUsage = true }
+        if let output, usage.outputTokens.map({ output >= $0 }) ?? true { usage.outputTokens = output }
+        if let timestamp { usage.endedAt = max(usage.endedAt ?? timestamp, timestamp) } else { usage.endedAt = nil }
+        state.messages[messageID] = usage
+        if isTerminal { state.terminalMessageID = messageID }
+        turn = state
+    }
+
+    /// Times the response `messageID` belongs to. The start is fixed by its first record.
+    private mutating func trackResponse(_ messageID: String, root: [String: Any], message: [String: Any], timestamp: Date?, stopReason: String?) {
+        guard !finalizedMessageIDs.contains(messageID) else { return }
+        let output = nonnegativeInteger((message["usage"] as? [String: Any])?["output_tokens"])
+        let blocks = message["content"] as? [[String: Any]]
+        var track = openResponse ?? ResponseTrack(
+            id: messageID,
+            startedAt: requestStart(for: root, at: timestamp),
+            turnID: turn?.userTurnID,
+            sessionID: safeIdentifier(root["sessionId"] as? String, maximum: 120) ?? turn?.sessionID,
+            agentID: scope == .subagent ? safeIdentifier(root["agentId"] as? String, maximum: 120) : nil
+        )
+        if let output, track.outputTokens.map({ output >= $0 }) ?? true { track.outputTokens = output }
+        if let timestamp { track.endedAt = max(track.endedAt ?? timestamp, timestamp) } else { track.endedAt = nil }
+        track.model = safeIdentifier(ClaudeModelID.normalized(message["model"] as? String), maximum: 80)
+        track.provider = ClaudeProviderEvidence.provider(messageID: message["id"] as? String, requestID: root["requestId"] as? String) ?? "unknown"
+        track.effort = (root["perTurnEffort"] ?? root["effort"] ?? message["perTurnEffort"] ?? message["effort"]).flatMap { value in
+            (value as? String).flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
+        }
+        track.hasStopReason = stopReason != nil
+        track.endsInThinking = blocks?.last?["type"] as? String == "thinking"
+        openResponse = track
+    }
+
+    /// Completes the response in progress. A qualifying one joins the live stream and, when it began
+    /// inside the active turn, that turn's response totals.
+    private mutating func finalizeOpenResponse() {
+        guard let track = openResponse else { return }
+        openResponse = nil
+        pendingSince = nil
+        if finalizedMessageIDs.count > 8_192 { finalizedMessageIDs.removeAll(keepingCapacity: true) }
+        finalizedMessageIDs.insert(track.id)
+        guard let tokens = track.outputTokens, let start = track.startedAt, let end = track.endedAt else { return }
+        let duration = end.timeIntervalSince(start)
+        guard ResponseSpeed.qualifies(outputTokens: tokens, durationSeconds: duration) else { return }
+        if var state = turn, let turnID = track.turnID, state.userTurnID == turnID {
+            let (sum, overflow) = state.responseTokens.addingReportingOverflow(tokens)
+            if overflow {
+                state.hasIncompleteUsage = true
+            } else {
+                state.responseTokens = sum
+                state.responseSeconds += duration
+                state.responseCount += 1
+            }
+            turn = state
+        }
+        completedResponses.append(LiveResponse(
+            id: "\(track.sessionID ?? sourceIdentity)|\(track.agentID ?? "")|\(track.id)",
+            model: track.model,
+            provider: track.provider ?? "unknown",
+            client: "claude-code",
+            sourceKind: scope == .subagent ? "subagent" : "primary",
+            metricVersion: scope == .subagent ? Self.subagentMetricVersion : Self.primaryMetricVersion,
+            reasoningEffort: track.effort,
+            completedAt: end,
+            outputTokens: tokens,
+            durationSeconds: duration
+        ))
+    }
+
+    /// Emits the pending turn once its terminal message is complete.
+    private mutating func closeTurn() -> TurnMetric? {
+        finalizeOpenResponse()
+        guard let state = turn, let terminalID = state.terminalMessageID else { return nil }
         turn = nil
         guard !state.hasSyntheticMessage,
               !state.hasIncompleteUsage,
               !state.messages.isEmpty,
               state.messages.values.allSatisfy({ $0.outputTokens != nil }),
-              let completedAt = parseDate(root["timestamp"]),
+              let completedAt = state.messages[terminalID]?.endedAt,
               completedAt > state.startedAt
         else { return nil }
 
@@ -233,6 +430,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         let throughput = Double(total) / duration
         guard throughput.isFinite, throughput >= 0 else { return nil }
         emittedUserTurnIDs.insert(state.userTurnID)
+        let provider = state.hasRecordWithoutProviderEvidence || state.providers.count != 1
+            ? "unknown" : state.providers.first ?? "unknown"
+        let hasResponse = state.responseCount > 0
         return TurnMetric(
             id: identityDigest(for: state),
             completedAt: completedAt,
@@ -247,9 +447,12 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             parserVersion: Self.parserVersion,
             metricVersion: scope == .subagent ? Self.subagentMetricVersion : Self.primaryMetricVersion,
             sourceKind: scope == .subagent ? "subagent" : "primary",
-            provider: state.hasRecordWithoutProviderEvidence || state.providers.count != 1
-                ? "unknown" : state.providers.first ?? "unknown",
-            reasoningEffort: state.effortIsAmbiguous ? nil : state.reasoningEffort
+            provider: provider,
+            reasoningEffort: state.effortIsAmbiguous ? nil : state.reasoningEffort,
+            responseOutputTokens: hasResponse ? state.responseTokens : nil,
+            responseDurationSeconds: hasResponse ? state.responseSeconds : nil,
+            responseCount: hasResponse ? state.responseCount : nil,
+            providerRegion: provider == "amazon-bedrock" ? (state.regions.count == 1 ? state.regions.first : "unknown") : nil
         )
     }
 
@@ -365,6 +568,22 @@ enum ClaudeModelID {
     )
     private static let vertex = try! NSRegularExpression(pattern: "^(claude-[a-z0-9.-]+)@([0-9]{8})\\z")
 
+    private static let bedrockPrefix = try! NSRegularExpression(pattern: "^([a-z]{2,6}(?:-[a-z]+)?)\\.anthropic\\.claude-")
+    private static let bedrockRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov"]
+
+    /// The inference-profile region that `normalized` strips from a Bedrock model ID: the prefix when
+    /// it is a known region, `unknown` for a Bedrock ID without or with an unrecognised prefix, and
+    /// nil for any other model ID.
+    static func bedrockRegion(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let range = NSRange(raw.startIndex..., in: raw)
+        if let match = bedrockPrefix.firstMatch(in: raw, range: range), let prefix = Range(match.range(at: 1), in: raw) {
+            let region = String(raw[prefix])
+            return bedrockRegions.contains(region) ? region : "unknown"
+        }
+        return raw.hasPrefix("anthropic.claude-") ? "unknown" : nil
+    }
+
     static func normalized(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let range = NSRange(raw.startIndex..., in: raw)
@@ -384,7 +603,10 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
     private var parser: ClaudeTranscriptParser
 
     init(sourceIdentity: String) { parser = ClaudeTranscriptParser(sourceIdentity: sourceIdentity, scope: .subagent) }
+    var hasPendingWork: Bool { parser.hasPendingWork }
     mutating func consume(line: Data) -> TurnMetric? { parser.consume(line: line) }
+    mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { parser.pollEnded(now: now, isFinal: isFinal) }
+    mutating func drainCompletedResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
     mutating func reset(sourceIdentity: String) { parser.reset(sourceIdentity: sourceIdentity) }
     mutating func markStartedMidFile() { parser.markStartedMidFile() }
 }
@@ -398,23 +620,28 @@ public actor ClaudeSessionMonitor {
     private let primary: JSONLSourceSessionMonitor<ClaudeTranscriptParser>
     private let subagents: JSONLSourceSessionMonitor<ClaudeSubagentTranscriptParser>
 
-    public init(root: URL) {
-        primary = JSONLSourceSessionMonitor(root: root) { url in
+    /// `liveSince` is the moment from which completed responses count as live; earlier responses are
+    /// history and never reach the live stream.
+    public init(root: URL, liveSince: Date = .now) {
+        primary = JSONLSourceSessionMonitor(root: root, liveSince: liveSince) { url in
             url.pathExtension.lowercased() == "jsonl"
                 && !url.lastPathComponent.hasPrefix("agent-")
                 && !url.pathComponents.contains("subagents")
         }
-        subagents = JSONLSourceSessionMonitor(root: root) { url in
+        subagents = JSONLSourceSessionMonitor(root: root, liveSince: liveSince) { url in
             url.pathExtension.lowercased() == "jsonl" && Self.isSubagentTranscript(url)
         }
     }
 
-    public func poll(now: Date = .now) async throws -> [TurnMetric] {
-        let primaryRecords = try await primary.poll(now: now)
+    public func poll(now: Date = .now) async throws -> MonitorUpdate {
+        let primaryUpdate = try await primary.poll(now: now)
         // Discovery is the only throwing step and runs before any bytes are consumed, so a failed
         // subagent poll loses nothing and is retried on the next cycle.
-        let subagentRecords = (try? await subagents.poll(now: now)) ?? []
-        return (primaryRecords + subagentRecords).sorted { $0.completedAt > $1.completedAt }
+        let subagentUpdate = (try? await subagents.poll(now: now)) ?? MonitorUpdate()
+        return MonitorUpdate(
+            metrics: (primaryUpdate.metrics + subagentUpdate.metrics).sorted { $0.completedAt > $1.completedAt },
+            responses: (primaryUpdate.responses + subagentUpdate.responses).sorted { $0.completedAt > $1.completedAt }
+        )
     }
 
     public func status() async -> (rootAvailable: Bool, files: Int) {

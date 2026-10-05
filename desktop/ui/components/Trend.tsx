@@ -11,10 +11,11 @@ import { TrendChart } from "./TrendChart";
 export const supportsFirstToken = (sample: Metric | undefined) =>
   !sample || client(sample) === "codex";
 
+/** Response speed pools the model's turns across tools; turn speed and first token stay on one cohort. */
 export function useTrendBuckets(
   dashboard: Dashboard,
   metric: ChartMetric,
-  source: Metric[] = dashboard.inRange,
+  source: Metric[] = metric === "response" ? dashboard.responseInRange : dashboard.inRange,
 ) {
   return useMemo(
     () => buckets(source, dashboard.now, dashboard.days, metric),
@@ -30,9 +31,10 @@ export function MetricToggle({ dashboard }: { dashboard: Dashboard }) {
     <Segmented
       label="Chart metric"
       size="sm"
-      value={firstToken ? metric : "throughput"}
+      value={!firstToken && metric === "ttft" ? "response" : metric}
       onChange={(v) => store.setChartMetric(v)}
       options={[
+        { value: "response", label: "Response speed" },
         { value: "throughput", label: "Turn speed" },
         {
           value: "ttft",
@@ -66,19 +68,18 @@ export function RangeToggle() {
 
 export function chartCopy(dashboard: Dashboard, metric: ChartMetric) {
   const firstToken = supportsFirstToken(dashboard.sample);
-  const effective: ChartMetric = firstToken ? metric : "throughput";
+  const effective: ChartMetric = !firstToken && metric === "ttft" ? "response" : metric;
   return {
     metric: effective,
-    unit: effective === "throughput" ? "tok/s" : "s",
-    title: effective === "throughput" ? "Turn speed" : "First token",
+    unit: effective === "ttft" ? "s" : "tok/s",
+    title: { response: "Response speed", throughput: "Turn speed", ttft: "First token" }[effective],
     empty:
-      effective === "throughput"
-        ? "Collecting data"
-        : "No first-token times in this range",
-    summary:
-      effective === "throughput"
-        ? dashboard.summary.throughput
-        : dashboard.summary.ttft,
+      effective === "ttft" ? "No first-token times in this range" : "Collecting data",
+    summary: {
+      response: dashboard.responseSummary,
+      throughput: dashboard.summary.throughput,
+      ttft: dashboard.summary.ttft,
+    }[effective],
   };
 }
 
@@ -115,6 +116,13 @@ export function Trend({ dashboard }: { dashboard: Dashboard }) {
           <>
             Median <strong>{num(summary.median)}</strong> {copy.unit} · {summary.count}{" "}
             {summary.count === 1 ? "turn" : "turns"} in {dayLabel}
+            {copy.metric === "response" && dashboard.responseTotals.responses > 0 && (
+              <>
+                {" "}
+                · {dashboard.responseTotals.responses}{" "}
+                {dashboard.responseTotals.responses === 1 ? "response" : "responses"}
+              </>
+            )}
           </>
         ) : (
           <>Collecting data</>
@@ -167,6 +175,11 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
     <div className="details">
       <dl className="stats">
         <StatRow
+          label={`Response speed · ${dayLabel}`}
+          unit="tok/s"
+          {...dashboard.responseSummary}
+        />
+        <StatRow
           label={`Turn speed · ${dayLabel}`}
           unit="tok/s"
           {...summary.throughput}
@@ -182,7 +195,12 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
           </div>
         )}
         <StatRow
-          label="Last 15 minutes"
+          label="Last 15 minutes · response speed"
+          unit="tok/s"
+          {...dashboard.recentResponse15m}
+        />
+        <StatRow
+          label="Last 15 minutes · turn speed"
           unit="tok/s"
           {...recent15m.throughput}
         />
@@ -190,7 +208,7 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
       <p className="detail-line">
         <strong>24 h vs previous 24 h</strong>
         <span>
-          Turn speed {pct(change.throughput)}
+          Response speed {pct(change.response)} · Turn speed {pct(change.throughput)}
           {firstToken && <> · First token {pct(change.ttft)}</>}
         </span>
         <small>Needs 5 turns in each period.</small>
@@ -202,6 +220,7 @@ export function TrendDetails({ dashboard }: { dashboard: Dashboard }) {
         <small>Your workload may have changed.</small>
       </p>
       <p className="detail-line detail-fine">
+        Response speed pools this model&apos;s responses across coding tools. Turn speed:{" "}
         {sample ? measurementLabel(sample) : "Turn speed"}.
         {firstToken && " First token is the wait Codex reports and does not claim first visible text."}{" "}
         Bucket medians, gaps mean no turns. Different workloads and measurement definitions affect

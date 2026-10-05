@@ -13,6 +13,26 @@ export interface Metric {
   durationSeconds: number;
   codexTTFTSeconds: number | null;
   turnThroughputTPS: number;
+  /** Bedrock inference-profile region (`us`, `eu`, ...); `unknown` without a prefix; null off Bedrock. */
+  providerRegion?: string | null;
+  /** Σ output tokens of the turn's qualifying API responses (200+ tokens each). */
+  responseOutputTokens?: number | null;
+  /** Σ seconds the model spent responding across those responses. */
+  responseDurationSeconds?: number | null;
+  responseCount?: number | null;
+}
+/** One qualifying API response from the live stream (local only, never persisted). */
+export interface LiveResponse {
+  id: string;
+  completedAt: string;
+  model: string | null;
+  provider: string | null;
+  client: string;
+  sourceKind: string | null;
+  metricVersion: string;
+  reasoningEffort: string | null;
+  outputTokens: number;
+  durationSeconds: number;
 }
 export interface Stats {
   median: number | null;
@@ -35,13 +55,28 @@ export const cohort = (m: Metric) =>
     metricVersion(m),
     m.model ?? null,
     m.provider ?? null,
+    m.providerRegion ?? null,
     m.reasoningEffort ?? null,
     m.sourceKind ?? null,
   ]);
-export const clientLabel = (m: Metric) =>
+/** Output tokens per second while the model was responding; null without response timing. */
+export const responseSpeed = (m: Metric): number | null => {
+  const tokens = m.responseOutputTokens;
+  const seconds = m.responseDurationSeconds;
+  return typeof tokens === "number" &&
+    typeof seconds === "number" &&
+    tokens > 0 &&
+    seconds > 0 &&
+    Number.isFinite(tokens / seconds)
+    ? tokens / seconds
+    : null;
+};
+/** Coding-tool name from its id ("claude-code" gives "Claude Code"). */
+export const toolLabel = (id: string) =>
   ({ codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build" })[
-    client(m)
+    id
   ] ?? "Coding tool";
+export const clientLabel = (m: Metric) => toolLabel(client(m));
 /** Inference provider ids a Tokrate client can attribute from explicit evidence. */
 export const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
@@ -152,6 +187,7 @@ export function stats(values: number[]): Stats {
 }
 export function summarize(records: Metric[]) {
   return {
+    response: stats(records.flatMap((m) => responseSpeed(m) ?? [])),
     throughput: stats(
       records
         .filter((m) => m.outputTokens >= 20)
@@ -179,12 +215,24 @@ export function change(current: Stats, previous: Stats) {
     ? (current.median / previous.median - 1) * 100
     : null;
 }
+/** Exact-cohort records. Automatic and pinned-model selections use the newest record's cohort. */
 export function select(records: Metric[], selection: string) {
   if (selection === "all") return [];
-  const key =
-    selection === "latest" ? records[0] && cohort(records[0]) : selection;
+  const key = isCohortSelection(selection)
+    ? selection
+    : records[0] && cohort(records[0]);
   return records.filter((m) => cohort(m) === key);
 }
+/** A pinned exact cohort is a JSON array of its nine identity parts. */
+export const isCohortSelection = (selection: string) => {
+  if (!selection.startsWith("[")) return false;
+  try {
+    const parts: unknown = JSON.parse(selection);
+    return Array.isArray(parts) && parts.length === 9;
+  } catch {
+    return false;
+  }
+};
 export function signal(
   records: Metric[],
   now: number,
@@ -217,7 +265,7 @@ export function buckets(
   records: Metric[],
   now: number,
   days: number,
-  metric: "throughput" | "ttft",
+  metric: "response" | "throughput" | "ttft",
 ) {
   const count = days === 1 ? 24 : 28,
     step = (days * DAY) / count,

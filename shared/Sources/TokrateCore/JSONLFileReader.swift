@@ -153,6 +153,9 @@ public struct JSONLFileReader: Sendable {
         isCaughtUp = tailStartup == nil && offset >= currentSize
     }
 
+    /// Qualifying responses completed since the last call.
+    public mutating func drainResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
+
     /// Drops buffered state and restores the configured beginning/tail start position.
     public mutating func reset() {
         offset = 0

@@ -8,7 +8,8 @@ import {
   type ReactNode,
 } from "react";
 import { ChevronDown, Info } from "lucide-react";
-import type { AppStore } from "../store/store";
+import { BADGE_LABEL, BADGE_LETTER, badgeFamily } from "../response";
+import { useStore, type AppStore } from "../store/store";
 
 export const StoreContext = createContext<AppStore | null>(null);
 export function useAppStore(): AppStore {
@@ -49,6 +50,44 @@ export function Mark({ size = 28 }: { size?: number }) {
         strokeLinecap="round"
       />
       <circle cx="24" cy="26" r="2.8" fill="#FF6B4A" />
+    </svg>
+  );
+}
+
+/**
+ * Filled circle with a white letter for the model's provider: A Anthropic, O OpenAI, X xAI, a
+ * plain grey dot when unknown. Letters only, no logos. Hidden when "Show provider badge" is off.
+ */
+export function ProviderBadge({
+  model,
+  provider,
+  size = 18,
+}: {
+  model: string | null | undefined;
+  provider: string | null | undefined;
+  size?: number;
+}) {
+  const store = useAppStore();
+  const enabled = useStore(store, (s) => s.snapshot.settings.showProviderBadge !== false);
+  if (!enabled) return null;
+  const family = badgeFamily(model, provider);
+  const letter = BADGE_LETTER[family];
+  return (
+    <svg
+      className={`provider-badge badge-${family}`}
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      role="img"
+      aria-label={BADGE_LABEL[family]}
+    >
+      <title>{BADGE_LABEL[family]}</title>
+      <circle cx="10" cy="10" r="10" className="badge-disc" />
+      {letter && (
+        <text x="10" y="14.2" textAnchor="middle" className="badge-letter">
+          {letter}
+        </text>
+      )}
     </svg>
   );
 }

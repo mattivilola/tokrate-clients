@@ -1,75 +1,96 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
-import {
-  clientLabel,
-  measurementChip,
-  measurementDefinition,
-  measurementExplanation,
-  measurementLabel,
-} from "../metrics";
+import { toolLabel } from "../metrics";
 import type { Dashboard } from "../model/dashboard";
-import { effortChip, exactTime, modelName, num, signedPercent } from "../model/format";
+import { effortChip, exactTime, num, signedPercent } from "../model/format";
 import { Gauge } from "./Gauge";
-import { Chip, InfoDisclosure } from "./primitives";
+import { Chip, InfoDisclosure, ProviderBadge } from "./primitives";
+
+/** Vocabulary definition shown next to the response-speed readout. */
+export const RESPONSE_DEFINITION =
+  "Output tokens per second while the model is responding — tools and your time excluded.";
+
+/** "last 5 responses · 2 min ago" for the live value; the newest turn's own timing otherwise. */
+export function heroCaption(dashboard: Dashboard): string {
+  const { hero, heroRelative } = dashboard;
+  if (hero.value === null) return "Waiting for a response";
+  if (hero.source === "live")
+    return `last ${hero.count} ${hero.count === 1 ? "response" : "responses"} · ${heroRelative}`;
+  return `latest turn · ${heroRelative}`;
+}
 
 export function Hero({ dashboard }: { dashboard: Dashboard }) {
-  const { latest, sample, delta } = dashboard;
-  const value = latest?.turnThroughputTPS ?? null;
-  const rounded = delta ? Math.round(delta.percent) : 0;
-  const chip = latest ? measurementChip(latest) : null;
+  const { hero, responseDelta, activeKey, sample, liveLatest, scopeTools } = dashboard;
+  const rounded = responseDelta ? Math.round(responseDelta.percent) : 0;
+  const caption = heroCaption(dashboard);
+  const effort = sample ? effortChip(sample) : liveLatest?.reasoningEffort ? `${liveLatest.reasoningEffort} effort` : null;
   const label =
-    value === null
-      ? "No completed turn yet"
-      : `Latest turn speed ${num(value)} tokens per second, ${measurementDefinition(latest).toLowerCase()}`;
+    hero.value === null
+      ? "No response yet"
+      : `Response speed ${num(hero.value)} tokens per second, ${caption}. ${RESPONSE_DEFINITION}`;
+  const completedAt =
+    hero.at === null ? null : new Date(hero.at).toISOString();
   return (
-    <section className="hero" aria-label="Latest turn speed">
+    <section className="hero" aria-label="Response speed">
       <Gauge
-        value={value}
+        value={hero.value}
         max={dashboard.gaugeMax}
         label={label}
-        caption={value === null ? "Waiting for a completed turn" : undefined}
+        caption={caption}
       />
-      {latest && sample ? (
+      {activeKey && hero.value !== null ? (
         <div className="hero-meta">
           <h1 className="hero-model">
-            <span className="hero-model-name">{modelName(latest)}</span>
-            <Chip tone={effortChip(latest) === "effort unknown" ? "neutral" : "accent"}>
-              {effortChip(latest)}
-            </Chip>
-            {chip && <Chip title={measurementDefinition(latest)}>{chip}</Chip>}
+            <ProviderBadge model={activeKey.model} provider={activeKey.provider} size={22} />
+            <span className="hero-model-name">{activeKey.model ?? "Unknown model"}</span>
+            {effort && (
+              <Chip tone={effort === "effort unknown" ? "neutral" : "accent"}>{effort}</Chip>
+            )}
           </h1>
           <p className="hero-sub">
-            <span>{clientLabel(latest)}</span>
-            <span aria-hidden="true">·</span>
-            <time
-              dateTime={latest.completedAt}
-              title={`Completed ${exactTime(latest.completedAt)}`}
-            >
-              {dashboard.latestRelative}
-            </time>
+            <span>
+              {(scopeTools.length
+                ? scopeTools.map(toolLabel)
+                : liveLatest
+                  ? [toolLabel(liveLatest.client)]
+                  : []
+              ).join(" + ")}
+            </span>
+            {completedAt && (
+              <>
+                <span aria-hidden="true">·</span>
+                <time dateTime={completedAt} title={`Updated ${exactTime(completedAt)}`}>
+                  {dashboard.heroRelative}
+                </time>
+              </>
+            )}
           </p>
-          {delta && (
+          {responseDelta && (
             <p
               className={`delta ${rounded > 0 ? "delta-up" : rounded < 0 ? "delta-down" : ""}`}
-              title={`Your 24 h median is ${num(delta.median)} tok/s across ${delta.turns} turns`}
+              title={`Your 24 h response-speed median is ${num(responseDelta.median)} tok/s across ${responseDelta.turns} turns`}
             >
               {rounded > 0 && <ArrowUp size={16} aria-hidden="true" />}
               {rounded < 0 && <ArrowDown size={16} aria-hidden="true" />}
               <span>
                 {rounded === 0
                   ? "On par with your 24 h median"
-                  : `${signedPercent(delta.percent)} vs your 24 h median`}
+                  : `${signedPercent(responseDelta.percent)} vs your 24 h median`}
               </span>
             </p>
           )}
           <p className="definition">
-            <span>{measurementDefinition(latest)}</span>
-            <InfoDisclosure label="About turn speed">
-              <strong>{measurementLabel(latest)}</strong>
-              {measurementExplanation(latest) && ` · ${measurementExplanation(latest)}`}
+            <span>{RESPONSE_DEFINITION}</span>
+            <InfoDisclosure label="About response speed">
+              <strong>Response speed</strong> · Each API response is timed from the request that
+              triggered it (your prompt, a tool result or a notification) to the response&apos;s
+              last output record. Only responses with at least 200 output tokens count, so tiny
+              check-ins never move it. The large number is the median of your last 5 responses
+              from the past 10 minutes, or the newest turn&apos;s own responses when none are
+              live.
               <br />
-              Turn speed is completed output tokens divided by the whole turn,
-              including tool time and waiting. It is not streaming speed, and
-              Tokrate never infers streaming speed.
+              Turn speed — a whole turn including tools and waiting — stays available as the
+              secondary measurement. Neither is streaming speed, and Tokrate never infers
+              streaming speed.
             </InfoDisclosure>
           </p>
         </div>
@@ -77,8 +98,8 @@ export function Hero({ dashboard }: { dashboard: Dashboard }) {
         <div className="hero-meta">
           <p className="hero-empty">
             {dashboard.hasRecords
-              ? "No turn matches this filter yet."
-              : "Complete a turn with at least 20 output tokens in a supported coding tool."}
+              ? "No response speed for this selection yet. Complete a response of at least 200 output tokens in Claude Code or Codex."
+              : "Complete a response of at least 200 output tokens in a supported coding tool."}
           </p>
         </div>
       )}

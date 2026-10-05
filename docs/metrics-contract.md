@@ -71,12 +71,12 @@ Optional public cohort fields `recent`, `comparison`, and `signals` keep older c
 
 | Tool | Parser | Metric | Scope |
 | --- | --- | --- | --- |
-| Codex | codex-rollout-v1 | turn-v1 | Existing completed-turn accounting |
-| Claude Code | claude-transcript-v3 | claude-observed-turn-v1 | Human prompt through terminal response in the primary transcript; unique API message usage |
-| Claude Code subagent | claude-transcript-v3 | claude-observed-subagent-turn-v1 | Subagent task prompt through its terminal response; sourceKind `subagent` |
+| Codex | codex-rollout-v2 (v1 before 0.1.14) | turn-v1 | Existing completed-turn accounting, plus response speed |
+| Claude Code | claude-transcript-v4 (v3 before 0.1.14) | claude-observed-turn-v1 | Human prompt through terminal response in the primary transcript; unique API message usage, plus response speed |
+| Claude Code subagent | claude-transcript-v4 (v3 before 0.1.14) | claude-observed-subagent-turn-v1 | Subagent task prompt through its terminal response; sourceKind `subagent` |
 | Grok Build | grok-session-v1 | grok-observed-work-turn-v1 | Matched completed work-turn events and usage; includes nested agent output |
 
-Claude/Grok TTFT and streaming rate are null. Reasoning token details are not added to output tokens. Exclude ambiguous/incomplete windows rather than fabricate timing. Claude tool-result records are not human turn starts; deduplicate repeated content blocks by API message ID. Primary turns exclude sidechains; subagent transcripts are measured separately (0.1.12, below). Grok usage timestamps record persistence after completion: require exact session/unique turn-number joins, usage time from one second before to 60 seconds after completion, and no later than the next known primary start. The 60-second cap is a conservative Tokrate bound; incomplete/colliding/ambiguous joins are excluded, repeated snapshots are deduplicated, and child sessions are not separately counted. Grok model attribution requires exactly one modelUsage entry: older missing breakdowns stay Unknown even if a selected/primary model is recorded.
+Claude/Grok TTFT and streaming rate are null. Reasoning token details are not added to output tokens. Exclude ambiguous/incomplete windows rather than fabricate timing. Claude tool-result records are not human turn starts; deduplicate repeated content blocks by API message ID. Primary turns exclude sidechains; subagent transcripts are measured separately (0.1.12, below). Grok usage timestamps record persistence after completion: require exact session/unique turn-number joins (Grok events `turn_number` is 0-based while the usage ledger `turnNumber` is 1-based, so event turn N joins ledger turn N+1), usage time from one second before to 60 seconds after completion, and no later than the next known primary start. The 60-second cap is a conservative Tokrate bound; incomplete/colliding/ambiguous joins are excluded, repeated snapshots are deduplicated, and child sessions are not separately counted. Grok model attribution requires exactly one modelUsage entry: older missing breakdowns stay Unknown even if a selected/primary model is recorded. Grok reasoning effort comes only from the session folder's `summary.json` `reasoning_effort` (64 KiB cap; nothing else is retained, and `chat_history.jsonl` is never read). Because the user can change it between turns, a turn gets an effort only when it started while Tokrate was already watching the session and the value read at start equals the value at emission; turns read during initial catch-up or after a change stay Unknown.
 
 Default roots are `~/.claude/projects` (or `CLAUDE_CONFIG_DIR/projects`) and `~/.grok/sessions` (or `GROK_HOME/sessions`). Only source metadata and numeric usage are retained. Raw messages, paths, session IDs, diagnostic logs and auth data are never uploaded. The same saved OFF and future-only sharing behavior applies to all tools. Unknown geography/provider/model must not be presented as a provider health signal. Rates with different metric versions cannot be ranked interchangeably.
 
@@ -140,3 +140,71 @@ Sharing accepts the providers `openai`, `anthropic`, `xai` and `unknown` for eve
 Limitation: subagent measurement requires Claude Code versions that write `<session>/subagents/agent-*.jsonl`. Older 2.0.x layouts place `agent-*.jsonl` directly in the project folder; their subagent turns are not measured, while primary turns are.
 
 On the Mac, the default roots can be overridden in Settings > Sources (Codex session folder, Claude Code projects folder, Grok Build sessions folder), because Finder-launched apps do not inherit `CLAUDE_CONFIG_DIR` or `GROK_HOME`. Environment variables remain the defaults when set. A chosen folder is persisted in user defaults as a path plus a security-scoped bookmark, applies only while monitoring is paused, and **Reset to default** removes it.
+
+
+## Response speed (0.1.14)
+
+Response speed (contract name `response-v1`) is the primary metric from 0.1.14. It is the output-token rate **while the model is responding**: tools and the user's own time are excluded. Turn speed stays as a secondary metric because it mostly measures workload (tool runs, automated check-ins): Sonnet subagents showed 3.6 tok/s turn speed against about 116 tok/s per response on real data. UI vocabulary: "Response speed · tok/s"; definition line "Output tokens per second while the model is responding — tools and your time excluded." Response speed is one definition across coding tools and source kinds; it never claims to be streaming speed.
+
+### What counts as a response
+
+A **response** is one API response. For each response:
+
+- **start** is the timestamp of the latest record that triggered the request, **end** is the timestamp of the response's last record, and `duration = end − start`.
+- It **qualifies** when its output tokens are at least 200 (`RESPONSE_MIN_OUTPUT_TOKENS`), `0 < duration ≤ 600 s`, and it is not synthetic. Output tokens include thinking/reasoning tokens, exactly as turn speed does.
+
+Per turn three optional fields are recorded: `responseOutputTokens` (sum of the qualifying responses' output tokens), `responseDurationSeconds` (sum of their durations) and `responseCount` (how many qualified). They are all absent when no response qualified or when the source cannot provide per-response timing. Turn response speed is `responseOutputTokens / responseDurationSeconds`. Only responses that began inside the reported turn are counted; a turn that is discarded (interrupted, synthetic, unsynchronised, incomplete usage) reports no turn and therefore no response fields. Metric versions are unchanged; the emitted record carries a new measurement, so parser versions are `claude-transcript-v4` and `codex-rollout-v2` (earlier parser versions stay displayable locally; records saved before 0.1.14 decode with no response fields and Codex records without a parser version decode as `codex-rollout-v1`). Cohorts of different parser versions stay separate for turn speed; response speed merges a model across them.
+
+### Claude Code
+
+A response is one unique `message.id` (all records that share it). Primary and subagent transcripts use the same rules.
+
+- **start**: the timestamp of the record whose `uuid` equals the `parentUuid` of the response's *first* assistant record, when that record was seen in this file (any type: real data shows the parent is usually an `attachment` record written just before the request, sometimes a meta or regular user record) and its timestamp is not later than the first assistant record's. Otherwise (parent missing, forgotten or later) the fallback is the timestamp of the latest user-type record before the response's first record: a human prompt, a `tool_result`, a notification or any `isMeta` record. A user record written while the response streams never moves its start. The parser remembers a bounded `uuid → timestamp` map of the last 4,096 accepted records per file, reset on file replacement.
+- **end**: the timestamp of the last assistant record with that `message.id`.
+- **tokens**: the largest `message.usage.output_tokens` over the message's records (live files carry partial counts on the earlier records and the final count on the last).
+- Messages with the model `<synthetic>`, a missing or unsafe `message.id`, or missing usage never qualify.
+
+**Terminal hold.** About a third of `end_turn` messages are written thinking-first: the first record already carries `stop_reason` `end_turn` with a partial usage snapshot and the text block follows in another record with the same `message.id`. After a terminal record (`end_turn` or `stop_sequence`) the turn is therefore **pending**. Further records with the same `message.id` update its usage and end time. The turn (and its final response) closes when:
+
+1. a record with a different `message.id`, or any user-type record, arrives; or
+2. at the end of a poll in which the reader is caught up with the file, the pending message's latest content block is not `thinking`; or
+3. the pending turn has waited 30 seconds (checked at the end of a poll with the injectable poll clock); or
+4. the read is an archive or command-line read and the end of the file is reached.
+
+The turn's `completedAt` is the timestamp of the terminal message's last record. A completed (stop-reason carrying) non-terminal response closes the same way (rules 1, 2, 3, 4) and is then final.
+
+### Codex
+
+Codex rollouts record one `token_usage_record` per API response. Its payload (`turn_id`, `response_id`, `usage`, `turn_token_usage`) has `usage`, the response's own token usage, and `turn_token_usage`, the cumulative turn total (the per-response outputs sum to the turn total). The record's own top-level `timestamp` is the response end. Per-response counts, types and timestamps were checked against real rollouts under Codex 0.159.2.
+
+- **tokens**: `usage.output_tokens` (includes reasoning output, as the turn metric's output does). The `token_count` event's `last_token_usage` repeats the same numbers, sometimes more than once per response; it is not used.
+- **start**: the timestamp of the latest *trigger* record before the response's first output item. Triggers are `event_msg` `task_started`, a `response_item` `message` with role `user`, any `response_item` whose type ends in `_output` (`function_call_output`, `custom_tool_call_output`, …) and a `response_item` `agent_message` (a message delivered from another agent). Output items are the other `response_item` types (`reasoning`, `function_call`, `custom_tool_call`, assistant `message`, …); developer messages are ignored. A trigger arriving after the first output item (before the usage record) does not move the start.
+- **end**: the usage record's `timestamp`. Records are deduplicated by `response_id` within a turn. A response needs a known start (a trigger seen by this parser instance).
+- The turn still completes at `task_complete` as before and must have been observed to start. Agent sessions are excluded as before.
+
+### Grok Build
+
+Not available. Grok's `events.jsonl` records turn, loop, phase, first-token and tool events with timestamps, and `usage.json` records output tokens per turn with a `modelCalls` count, but no per-response token counts. Splitting a turn's tokens across its model calls would be an estimate, so Grok turns carry no response fields and the UI shows Grok Build's work-turn speed instead.
+
+### Live response stream (local only)
+
+The parsers also expose each qualifying response as it completes (model, provider, client, sourceKind, metricVersion = the turn metric version, effort, completedAt, output tokens, duration). The Mac app keeps the latest 200 in memory. They are never persisted, uploaded or shared, and carry no prompt, response, path or session identifier. They come only from live (tail) readers or archive readers, and only for responses completed after the monitor started, so replaying history never fakes a "live" value.
+
+For the live stream responses are timed file-wide: also responses outside a human turn (for example after a notification) and in turns that are later discarded. A response is left out only for its own problems: synthetic, unsafe or missing id, missing usage, no trigger before it, tokens below 200 or a duration outside `(0, 600]`. Per-turn response fields still count only responses inside the turn.
+
+### Menu bar, gauge and automatic model
+
+- **Live value**: the median of the last 5 live responses of the followed model (model and provider) that completed within the last 10 minutes; "— tok/s" when there are none. The popover gauge shows the same value with the caption "last 5 responses · 2 min ago"; with no live value it shows the selected cohort's latest turn response speed and its relative time, and for a source without response data (Grok) its latest turn speed labelled as turn speed. The delta line compares with the 24-hour median of the model's per-turn response speed. The gauge scale rule is unchanged but computed over response speeds. Accessibility label pattern: "Tokrate, Anthropic, response speed: 112.4 tokens per second".
+- **Selection**: "Auto (most active)" is the default (a saved "latest" selection migrates to Auto); "Auto within a coding tool" restricts Auto to one tool; specific cohorts can still be pinned. Auto evaluates the live stream (qualifying responses only): the candidate is the model and provider with the most response output tokens in the last 10 minutes. The active model changes only when the candidate has led continuously for at least 2 minutes, or when the active model has had no qualifying response for 10 minutes. With no live responses at all it falls back to the cohort of the most recent turn with response data, else the most recent turn.
+- **Provider badge** (Settings > General, default on): a small filled circle with a white letter before the number: Anthropic (`claude-` models, or provider anthropic) terracotta `#D97757` "A"; OpenAI (`gpt-*`, `o<digit>*`, `codex*`, or provider openai) green `#10A37F` "O"; xAI (`grok-*`, or provider xai) black circle with a white "X" in a light menu bar and a white circle with a black "X" in a dark one; otherwise a neutral grey dot. Letters only, no company logos.
+- **Lists**: "Your models" and Compare all rank by the per-turn response speed median, grouped by model and provider across coding tools and source kinds, with turn speed as secondary text; Compare all can switch to Turn speed, which keeps the measurement groups. The trend chart defaults to response speed and can switch to turn speed (and first token when reported). The personal slower-than-usual signal and the 24-hour comparison use response speed, and fall back to turn speed for sources without response data; turn speed stays in Details. The history window adds a response-speed column (tok/s and response count).
+
+### Sharing
+
+`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; otherwise all three are null. `appVersion` is `0.1.14`.
+
+## Provider region and consent notice 2 (0.1.14)
+
+- **providerRegion.** For Claude models routed through Amazon Bedrock the inference-profile region prefix that model normalisation strips (`us`, `eu`, `apac`, `global`, `jp`, `au`, `ca`, `us-gov`) is kept as the new `TurnMetric.providerRegion`: that value, or `unknown` when the ID has no prefix, an unrecognised prefix, or the turn's messages disagree. It is nil for every other provider. It is part of the local cohort identity and is shared as `providerRegion` (always encoded for 0.1.14, null unless the provider is `amazon-bedrock`). It is not part of the public board's cohort ID.
+- **Region derivation.** From 0.1.14 the server derives the contributor's continent from the connection's country at upload time (via Cloudflare). Only the continent is stored: the country and IP address are not. Regions are shown publicly only with at least 3 contributors. The app sends no location field.
+- **Consent notice version 2.** The sharing consent notice version is 2 and mentions the region derivation and the response-speed fields. A saved consent for notice version 1 with sharing on is treated like a legacy default-on setting: sharing is paused, with no identity access and no community requests, and the consent choice is shown again until the user chooses. A saved OFF stays OFF.

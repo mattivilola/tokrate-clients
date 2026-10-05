@@ -2,6 +2,10 @@ import { useEffect, useRef } from "react";
 import { useStore } from "../store/store";
 import { Disclosure, useAppStore } from "./primitives";
 
+/** From notice version 2: the server, not the app, derives a coarse region. */
+export const REGION_NOTICE =
+  "From version 0.1.14 the server derives your continent from the country of your connection when it receives a report (through Cloudflare). Only the continent is stored — not the country and not your IP address — and regions are shown publicly only with at least 3 contributors.";
+
 /** Obviously fake values in the exact shape of the shared allowlist (see core/src/sharing.rs). */
 export function buildSentExample(): string {
   return JSON.stringify(
@@ -19,12 +23,16 @@ export function buildSentExample(): string {
           metricVersion: "example-metric-v0",
           model: "example-model",
           provider: "example-provider",
+          providerRegion: null,
           reasoningEffort: "example-effort",
           sourceKind: "example",
           outputTokens: 123,
           reasoningOutputTokens: 45,
           durationMs: 6789,
           ttftMs: null,
+          responseOutputTokens: 100,
+          responseDurationMs: 4321,
+          responseCount: 2,
         },
       ],
     },
@@ -65,6 +73,7 @@ export function SharingChoice({
           <ul>
             <li>Coding tool, model and effort</li>
             <li>Token counts and turn duration</li>
+            <li>Response timing within the turn</li>
             <li>First-token time, when available</li>
             <li>Time rounded to 5 minutes</li>
           </ul>
@@ -79,12 +88,18 @@ export function SharingChoice({
           </ul>
         </div>
       </div>
+      <p className="detail-fine region-notice">{REGION_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>
           <pre className="payload" tabIndex={0} aria-label="Example payload with fake values">
             {buildSentExample()}
           </pre>
+          <p className="detail-fine">
+            Region is derived by the server, not sent by the app. The Amazon Bedrock region
+            (providerRegion) is the one the model id itself names and is null for every other
+            route.
+          </p>
           <p className="detail-fine">
             A persistent pseudonymous signing key identifies this installation across reports.
             Its private key stays in your operating system’s secure credential store, and

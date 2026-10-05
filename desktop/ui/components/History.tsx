@@ -3,7 +3,14 @@ import { ModelPicker } from "./Header";
 import { Footer } from "./Footer";
 import { chartCopy, MetricToggle, RangeToggle, TrendDetails, useTrendBuckets } from "./Trend";
 import { TrendChart } from "./TrendChart";
-import { clientLabel, measurementChip, measurementTitle, providerRoute, relativeTime } from "../metrics";
+import {
+  clientLabel,
+  measurementChip,
+  measurementTitle,
+  providerRoute,
+  relativeTime,
+  responseSpeed,
+} from "../metrics";
 import type { Dashboard } from "../model/dashboard";
 import { effortChip, exactTime, modelName, num } from "../model/format";
 import { useStore } from "../store/store";
@@ -34,7 +41,8 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
             <h2>All models</h2>
             <p className="hint">
               Choose one model above to see its trend, ranges and baseline. Comparing all models
-              never pools their speeds; the table below lists every turn.
+              never pools their speeds; the table below lists every turn with its response speed
+              and turn speed.
             </p>
           </section>
         ) : (
@@ -72,6 +80,7 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                   <th scope="col">Completed</th>
                   <th scope="col">Coding tool and model</th>
                   <th scope="col" className="num">Tokens</th>
+                  <th scope="col" className="num">Response speed</th>
                   <th scope="col" className="num">Turn speed</th>
                   <th scope="col" className="num">First token</th>
                 </tr>
@@ -95,6 +104,18 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                       </span>
                     </td>
                     <td className="num">{m.outputTokens}</td>
+                    <td className="num">
+                      {responseSpeed(m) === null ? (
+                        "—"
+                      ) : (
+                        <>
+                          <strong>{num(responseSpeed(m))}</strong> tok/s
+                          <span className="table-sub">
+                            {m.responseCount ?? 0} {m.responseCount === 1 ? "response" : "responses"}
+                          </span>
+                        </>
+                      )}
+                    </td>
                     <td className="num">
                       <strong>{num(m.turnThroughputTPS)}</strong> tok/s
                       <span className="table-sub">{measurementTitle(m)}</span>

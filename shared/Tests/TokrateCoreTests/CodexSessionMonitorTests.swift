@@ -19,7 +19,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         let monitor = CodexSessionMonitor(root: directory)
         var found: [TurnMetric] = []
         for _ in 0..<6 {
-            found += try await monitor.poll(now: now)
+            found += try await monitor.poll(now: now).metrics
             let bytes = await monitor.bytesReadLastPoll
             XCTAssertLessThanOrEqual(bytes, CodexSessionMonitor.maximumPollBytes)
         }
@@ -41,7 +41,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         let monitor = CodexSessionMonitor(root: directory)
         var seen = Set<Int>()
         for _ in 0..<80 {
-            let records = try await monitor.poll(now: now)
+            let records = try await monitor.poll(now: now).metrics
             seen.formUnion(records.map(\.outputTokens))
             let bytes = await monitor.bytesReadLastPoll
             XCTAssertLessThanOrEqual(bytes, CodexSessionMonitor.maximumPollBytes)
@@ -63,7 +63,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         try handle.write(contentsOf: turn(id: "completed-after-monitoring-start", tokens: 123))
         try handle.close()
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(11)], ofItemAtPath: file.path)
-        let records = try await monitor.poll(now: now.addingTimeInterval(11))
+        let records = try await monitor.poll(now: now.addingTimeInterval(11)).metrics
         XCTAssertEqual(records.filter { $0.outputTokens == 123 }.count, 1)
     }
 
@@ -78,7 +78,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         var history = MetricHistory()
         let now = ISO8601DateFormatter().date(from: "2026-10-03T20:10:00Z")!
         for _ in 0..<10 {
-            for record in try await monitor.poll() { history.upsert(record, now: now) }
+            for record in try await monitor.poll().metrics { history.upsert(record, now: now) }
         }
         XCTAssertEqual(history.records.count, 1)
         XCTAssertEqual(history.records.first?.model, "reported-model")
@@ -95,10 +95,52 @@ final class CodexSessionMonitorTests: XCTestCase {
         try (metadata(id: "mid-turn") + begin + context + padding(bytes: CodexSessionMonitor.recentTailBytes + 4_096) + usage + complete).write(to: file)
         let monitor = CodexSessionMonitor(root: directory)
         var emitted: [TurnMetric] = []
-        for _ in 0..<10 { emitted += try await monitor.poll() }
+        for _ in 0..<10 { emitted += try await monitor.poll().metrics }
         XCTAssertEqual(emitted.count, 1, "the live tail emitted nothing; only the archive reader measured the turn")
         XCTAssertEqual(emitted.first?.model, "reported-model")
         XCTAssertEqual(emitted.first?.outputTokens, 555)
+    }
+
+    func testResponsesAreLiveOnlyAfterTheMonitorStartedAndAreNotReturnedTwice() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let liveSince = Date.now
+        let file = directory.appendingPathComponent("live.jsonl")
+        try (metadata(id: "mon-session")
+            + timedTurn(id: "before", start: -100, usageAt: -90, response: "resp-before", tokens: 400, liveSince: liveSince)
+            + timedTurn(id: "after", start: 10, usageAt: 21, response: "resp-after", tokens: 500, liveSince: liveSince)).write(to: file)
+
+        let monitor = CodexSessionMonitor(root: directory, liveSince: liveSince)
+        var metrics: [TurnMetric] = []
+        var responses: [LiveResponse] = []
+        for step in 0..<4 {
+            let update = try await monitor.poll(now: liveSince.addingTimeInterval(Double(step) * 11))
+            metrics += update.metrics
+            responses += update.responses
+        }
+        XCTAssertEqual(Set(metrics.map(\.outputTokens)), [400, 500], "both turns are history and reach the metrics")
+        XCTAssertEqual(metrics.first { $0.outputTokens == 400 }?.responseOutputTokens, 400)
+        XCTAssertEqual(metrics.first { $0.outputTokens == 400 }?.parserVersion, "codex-rollout-v2")
+        // resp-before completed 90 s before liveSince and is filtered; resp-after is live exactly once.
+        XCTAssertEqual(responses.map(\.id), ["mon-session|resp-after"])
+        XCTAssertEqual(responses.first?.outputTokens, 500)
+        XCTAssertEqual(responses.first?.durationSeconds ?? 0, 11, accuracy: 0.001, "from task_started to the usage record")
+        XCTAssertEqual(responses.first?.model, "gpt-test")
+
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: timedTurn(id: "later", start: 30, usageAt: 40, response: "resp-later", tokens: 600, liveSince: liveSince))
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: liveSince.addingTimeInterval(55)], ofItemAtPath: file.path)
+        var laterMetrics: [TurnMetric] = []
+        var laterResponses: [LiveResponse] = []
+        for step in 0..<3 {
+            let update = try await monitor.poll(now: liveSince.addingTimeInterval(55 + Double(step) * 11))
+            laterMetrics += update.metrics
+            laterResponses += update.responses
+        }
+        XCTAssertEqual(laterMetrics.map(\.outputTokens), [600])
+        XCTAssertEqual(laterResponses.map(\.id), ["mon-session|resp-later"])
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -108,6 +150,23 @@ final class CodexSessionMonitorTests: XCTestCase {
     }
     private func metadata(id: String) -> Data {
         Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(id)\",\"source\":\"vscode\",\"model_provider\":\"openai\"}}\n".utf8)
+    }
+    /// One turn with a single response, timed relative to `liveSince`.
+    private func timedTurn(id: String, start: Double, usageAt: Double, response: String, tokens: Int, liveSince: Date) -> Data {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func line(_ seconds: Double, _ type: String, _ payload: [String: Any]) -> String {
+            let object: [String: Any] = ["timestamp": formatter.string(from: liveSince.addingTimeInterval(seconds)), "type": type, "payload": payload]
+            return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self) + "\n"
+        }
+        let usage: [String: Any] = ["turn_id": id, "response_id": response, "usage": ["output_tokens": tokens], "turn_token_usage": ["output_tokens": tokens]]
+        return Data([
+            line(start, "event_msg", ["type": "task_started", "turn_id": id]),
+            line(start, "turn_context", ["turn_id": id, "model": "gpt-test"]),
+            line(start + 1, "response_item", ["type": "reasoning"]),
+            line(usageAt, "token_usage_record", usage),
+            line(usageAt + 1, "event_msg", ["type": "task_complete", "turn_id": id, "duration_ms": (usageAt + 1 - start) * 1_000])
+        ].joined().utf8)
     }
     private func padding(bytes: Int) -> Data { Data(repeating: 0x20, count: bytes) + Data([0x0A]) }
     private func turn(id: String, tokens: Int) -> Data {

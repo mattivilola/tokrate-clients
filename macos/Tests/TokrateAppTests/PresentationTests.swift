@@ -7,7 +7,7 @@ final class PresentationTests: XCTestCase {
 
     private func metric(
         _ id: String, secondsAgo: Double = 60, model: String? = "m", rate: Double,
-        client: String = "codex", parser: String = "codex-rollout-v1", metricVersion: String = "turn-v1",
+        client: String = "codex", parser: String = "codex-rollout-v2", metricVersion: String = "turn-v1",
         sourceKind: String? = nil, effort: String? = nil, version: String? = "1.0", provider: String? = "openai"
     ) -> TurnMetric {
         TurnMetric(id: id, completedAt: now.addingTimeInterval(-secondsAgo), model: model, outputTokens: 100, durationSeconds: 10,
@@ -40,17 +40,20 @@ final class PresentationTests: XCTestCase {
         records.append(metric("latest", secondsAgo: 120, rate: 75))
         let day = DashboardSnapshot(records: records, range: .day, now: now)
         let week = DashboardSnapshot(records: records, range: .week, now: now)
-        XCTAssertEqual(day.heroMetric?.id, "latest")
-        XCTAssertEqual(week.heroMetric?.id, "latest")
-        XCTAssertEqual(day.speedDelta?.roundedPercent, week.speedDelta?.roundedPercent)
-        XCTAssertNotNil(day.speedDelta)
+        // Records without per-response timing fall back to the latest turn speed.
+        let dayReading = day.heroReading(live: nil, liveGroup: nil), weekReading = week.heroReading(live: nil, liveGroup: nil)
+        XCTAssertEqual(dayReading.kind, .turnFallback)
+        XCTAssertEqual(dayReading.value, 75)
+        XCTAssertEqual(weekReading.value, 75)
+        XCTAssertEqual(day.speedDelta(for: dayReading)?.roundedPercent, week.speedDelta(for: weekReading)?.roundedPercent)
+        XCTAssertNotNil(day.speedDelta(for: dayReading))
     }
 
     func testHeroSurvivesAnEmptyTwentyFourHourRange() {
         let old = metric("old", secondsAgo: 3 * 86_400, rate: 40)
         let snapshot = DashboardSnapshot(records: [old], range: .day, now: now)
         XCTAssertNil(snapshot.latest)
-        XCTAssertEqual(snapshot.heroMetric?.id, "old")
+        XCTAssertEqual(snapshot.turnHero?.id, "old")
     }
 
     // MARK: Relative time
@@ -103,7 +106,7 @@ final class PresentationTests: XCTestCase {
         let all = [hero] + sameGroupOtherModel + subagent + codex + stale
         XCTAssertEqual(DashboardSnapshot.groupMedianMaximum(for: hero, in: all, now: now), 90)
         let snapshot = DashboardSnapshot(records: all, range: .day, selection: .cohort(ModelCohort(hero)), now: now)
-        XCTAssertEqual(snapshot.gaugeGroupMedian, 90)
+        XCTAssertEqual(snapshot.turnGaugeMedian, 90)
     }
 
     // MARK: Measurement and labels
@@ -148,9 +151,11 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(sections.map(\.title), ["Claude Code", "Codex"])
         XCTAssertEqual(sections[0].entries.map(\.title), ["sonnet", "opus"])
         XCTAssertEqual(sections[0].entries[0].menuTitle, "sonnet · Subagent")
-        XCTAssertEqual(ModelPickerGrouping.label(selection: .all, latest: codex, cohorts: [codex]), "All models")
-        XCTAssertEqual(ModelPickerGrouping.label(selection: .latest, latest: nil, cohorts: []), "Latest model")
-        XCTAssertEqual(ModelPickerGrouping.label(selection: .cohort(claude), latest: codex, cohorts: [codex, claude]), "opus")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .all, resolved: codex, cohorts: [codex]), "All models")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .auto, resolved: nil, cohorts: []), "Auto")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .auto, resolved: claude, cohorts: [claude]), "Auto · opus")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .autoTool("codex"), resolved: codex, cohorts: [codex]), "Auto in Codex · gpt")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .cohort(claude), resolved: codex, cohorts: [codex, claude]), "opus")
     }
 
     // MARK: Community line
@@ -208,8 +213,12 @@ final class PresentationTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["schemaVersion"] as? Int, 1)
         let sample = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
-        let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs"]
+        let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion"]
         XCTAssertEqual(Set(sample.keys), expected)
+        XCTAssertEqual(sample["appVersion"] as? String, "0.1.14")
+        XCTAssertEqual(sample["responseCount"] as? Int, 3)
+        XCTAssertTrue(sample["providerRegion"] is NSNull, "the region is derived by the server, not sent by the app")
+        XCTAssertTrue(SamplePayload.exampleJSON().contains("providerRegion"))
         XCTAssertEqual(sample["model"] as? String, "example-model")
         XCTAssertFalse(SamplePayload.exampleJSON().contains("example-local-id-never-uploaded"))
     }

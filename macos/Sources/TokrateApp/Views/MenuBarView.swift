@@ -15,6 +15,7 @@ struct MenuBarView: View {
     @State private var showsDetails: Bool
     @State private var contentHeight: CGFloat = MenuBarView.maximumHeight
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
+    @AppStorage("showProviderBadge") private var showProviderBadge = true
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -42,6 +43,7 @@ struct MenuBarView: View {
             records: store.records,
             range: range,
             selection: store.dashboardSelection,
+            activeModel: store.activeModel,
             now: now,
             clientFilter: store.clientFilter,
             providerFilter: store.providerFilter
@@ -71,13 +73,14 @@ struct MenuBarView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             BrandMarkView(size: 24)
             Text("Tokrate")
                 .font(DashboardStyle.Typography.title).tracking(-0.3)
                 .foregroundStyle(DashboardStyle.ink)
+                .lineLimit(1).fixedSize()
                 .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 6)
+            Spacer(minLength: 4)
             ModelPickerMenu(store: store)
             gearMenu
         }
@@ -103,7 +106,9 @@ struct MenuBarView: View {
                 if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
             }
             Toggle("Show speed in menu bar", isOn: $showMenuBarSpeed)
-                .help("Shows recent whole-turn speed for the selected model. All models shows Compare without a pooled speed.")
+                .help("Shows the live response speed of the followed model. All models shows Compare without a pooled speed.")
+            Toggle("Show provider badge", isOn: $showProviderBadge)
+                .help("Shows a letter badge for the model's maker before the speed in the menu bar.")
             Divider()
             Link("Privacy details", destination: URL(string: "https://tokrate.dev/privacy")!)
             Button("Quit Tokrate") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
@@ -130,17 +135,18 @@ struct MenuBarView: View {
                     store.dashboardSelection = .cohort(cohort)
                 }
             } else {
+                let reading = snapshot.heroReading(live: store.liveSpeed, liveGroup: store.liveSpeed == nil ? nil : store.menuBarReadout.group)
                 ThroughputGaugeView(
-                    metric: snapshot.heroMetric,
+                    reading: reading,
                     compact: true,
-                    delta: snapshot.speedDelta,
+                    delta: snapshot.speedDelta(for: reading),
                     slowerThanUsual: snapshot.personalTrend?.status == .slower,
-                    groupMedian: snapshot.gaugeGroupMedian,
+                    groupMedian: reading.usesResponseSpeed ? snapshot.responseGaugeMedian : snapshot.turnGaugeMedian,
                     now: now
                 )
                 separator
                 TrendChartView(snapshot: snapshot, range: $range, compact: true)
-                if snapshot.cohortSummaries.count > 1 {
+                if snapshot.responseSummaries.count > 1 {
                     separator
                     yourModels(snapshot: snapshot)
                 }
@@ -190,8 +196,9 @@ struct MenuBarView: View {
     private func yourModels(snapshot: DashboardSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             SectionLabel("Your models")
-            CohortListView(
-                summaries: snapshot.cohortSummaries,
+            ResponseListView(
+                summaries: snapshot.responseSummaries,
+                sort: .faster,
                 selected: snapshot.selectedCohort,
                 rowLimit: 3
             ) { cohort in
@@ -239,7 +246,7 @@ struct MenuBarView: View {
                 SharingView(
                     preferences: store.sharingPreferences,
                     selection: store.dashboardSelection,
-                    latestCohort: store.latestCohort,
+                    resolvedCohort: store.resolvedCohort,
                     showToggle: false,
                     showConsentDisclosure: false,
                     framed: false,
@@ -255,7 +262,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("How Tokrate measures speed")
                 .font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.ink)
-            Text("Turn speed is output tokens divided by whole-turn seconds, including tools, waiting and reasoning. It is not streaming speed, and speed ordering is not a quality ranking. First token is shown only when Codex reports it. Effort is read from session metadata when present; speed tier and workload are not controlled.")
+            Text("\(ResponseSpeedCopy.explanation) Turn speed is output tokens divided by whole-turn seconds, including tools, waiting and reasoning. Speed ordering is not a quality ranking. First token is shown only when Codex reports it. Effort is read from session metadata when present; speed tier and workload are not controlled.")
                 .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }

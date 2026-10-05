@@ -20,10 +20,21 @@ public actor CodexSessionMonitor {
     private var lastDiscovery = Date.distantPast
     private var nextArchiveIndex = 0
 
-    public init(root: URL) { self.root = root }
+    private let liveSince: Date
 
-    public func poll(now: Date = .now) throws -> [TurnMetric] {
+    /// `liveSince` is the moment from which completed responses count as live; earlier responses are
+    /// history and never reach the live stream.
+    public init(root: URL, liveSince: Date = .now) {
+        self.root = root
+        self.liveSince = liveSince
+    }
+
+    public func poll(now: Date = .now) throws -> MonitorUpdate {
         bytesReadLastPoll = 0
+        var responses: [String: LiveResponse] = [:]
+        func collect(_ completed: [LiveResponse]) {
+            for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
+        }
         if now.timeIntervalSince(lastDiscovery) >= 10 || files.isEmpty {
             try discoverFiles(now: now)
             lastDiscovery = now
@@ -43,6 +54,7 @@ public actor CodexSessionMonitor {
             guard liveBudget > 0, var file = files[key] else { break }
             do {
                 let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget))
+                collect(file.live.drainResponses())
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
                 let consumed = file.live.bytesReadLastPoll
                 liveBudget -= consumed
@@ -68,6 +80,7 @@ public actor CodexSessionMonitor {
                 guard var file = files[key], var archive = file.archive else { continue }
                 do {
                     let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget))
+                    collect(archive.drainResponses())
                     result += historical
                     if !file.live.isCaughtUp {
                         for record in historical where file.archiveIDsWhileLiveCatchesUp.count < 8192 {
@@ -90,7 +103,10 @@ public actor CodexSessionMonitor {
             unique[record.id] = record
         }
         bytesReadLastPoll = Self.maximumPollBytes - byteBudget
-        return unique.values.sorted { $0.completedAt > $1.completedAt }
+        return MonitorUpdate(
+            metrics: unique.values.sorted { $0.completedAt > $1.completedAt },
+            responses: responses.values.sorted { $0.completedAt > $1.completedAt }
+        )
     }
 
     private func discoverFiles(now: Date) throws {

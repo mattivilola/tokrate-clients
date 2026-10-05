@@ -1,6 +1,7 @@
 use crate::model::{
-    ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
-    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
+    bedrock_region_or_unknown, response_qualifies, ReportedReasoningEffort, ResponseMetric,
+    ResponseTotals, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
+    CLAUDE_SUBAGENT_METRIC_VERSION,
 };
 use crate::parser::JsonlEventParser;
 use chrono::{DateTime, Duration, Utc};
@@ -11,6 +12,13 @@ use std::path::Path;
 
 const MAX_TRACKED_MESSAGES: usize = 4_096;
 const MAX_EMITTED_TURNS: usize = 8_192;
+/// Records remembered per file to resolve response parents.
+const MAX_REMEMBERED_RECORDS: usize = 4_096;
+const MAX_CLOSED_RESPONSES: usize = 4_096;
+/// Completed responses wait here until the reader drains them after each poll.
+const MAX_PENDING_RESPONSES: usize = 1_024;
+/// A terminal message still ending in thinking may wait this long for its text.
+const PENDING_TURN_TIMEOUT_SECONDS: i64 = 30;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 /// A human message this soon after the turn's last activity continues that turn.
 const INTERJECTION_CONTINUATION_MINUTES: i64 = 30;
@@ -41,6 +49,8 @@ pub(crate) fn is_subagent_transcript_path(path: &Path) -> bool {
 
 #[derive(Default)]
 struct TurnState {
+    /// Distinguishes this turn from later ones, so a response is only counted by its own turn.
+    serial: u64,
     started_at: Option<DateTime<Utc>>,
     private_identity: String,
     session_identity: Option<String>,
@@ -56,6 +66,35 @@ struct TurnState {
     effort: Option<String>,
     effort_ambiguous: bool,
     provider: ProviderEvidence,
+    /// The turn's terminal message. The turn is pending until the message's remaining records
+    /// were read (see [`ClaudeTranscriptParser::flush_pending`]).
+    terminal_message: Option<String>,
+    /// The latest record of the terminal message ends with a thinking block: text still follows.
+    terminal_thinking: bool,
+    /// Bedrock inference-profile region evidence; only reported on the Bedrock route.
+    region: ProviderEvidence,
+    /// Qualifying API responses closed while this turn was active.
+    responses: ResponseTotals,
+}
+
+/// The API response (one unique `message.id`) whose records are currently being read.
+struct OpenResponse {
+    message_id: String,
+    /// Latest user-type record before this response's first record.
+    trigger: Option<DateTime<Utc>>,
+    last_at: Option<DateTime<Utc>>,
+    output_tokens: Option<i64>,
+    /// Missing timestamps, shrinking usage or a synthetic message: never measured.
+    unusable: bool,
+    model: Option<String>,
+    provider: Option<&'static str>,
+    effort: Option<String>,
+    session_identity: Option<String>,
+    agent_identity: Option<String>,
+    /// The turn that was active when the response began; only that turn counts it.
+    turn_serial: Option<u64>,
+    /// The latest record holds the message's final content block and its stop reason.
+    complete: bool,
 }
 
 /// Provider evidence accumulated over the assistant messages of one turn.
@@ -97,6 +136,16 @@ pub(crate) struct ClaudeTranscriptParser {
     turn: Option<TurnState>,
     emitted_ids: HashSet<String>,
     emitted_order: VecDeque<String>,
+    /// Timestamp of the latest user-type record (prompt, tool result, notification, meta).
+    latest_trigger: Option<DateTime<Utc>>,
+    /// Timestamps of the last records seen, by `uuid`: a response starts at its parent record.
+    record_times: HashMap<String, DateTime<Utc>>,
+    record_order: VecDeque<String>,
+    next_serial: u64,
+    open_response: Option<OpenResponse>,
+    closed_responses: HashSet<String>,
+    closed_order: VecDeque<String>,
+    responses: Vec<ResponseMetric>,
 }
 
 impl ClaudeTranscriptParser {
@@ -108,6 +157,13 @@ impl ClaudeTranscriptParser {
     #[cfg(test)]
     pub fn new_subagent(source_identity: String) -> Self {
         Self::with_scope(source_identity, RecordScope::Subagent)
+    }
+
+    /// Test helper: consumes a record and settles a pending terminal turn as a complete read would.
+    #[cfg(test)]
+    pub fn consume_settled(&mut self, line: &[u8]) -> Option<TurnMetric> {
+        let closed = self.consume(line);
+        closed.or_else(|| self.flush_pending(DateTime::<Utc>::MAX_UTC, true))
     }
 
     /// Chooses subagent or primary measurement from the transcript's location.
@@ -130,19 +186,42 @@ impl ClaudeTranscriptParser {
             turn: None,
             emitted_ids: HashSet::new(),
             emitted_order: VecDeque::new(),
+            latest_trigger: None,
+            record_times: HashMap::new(),
+            record_order: VecDeque::new(),
+            next_serial: 0,
+            open_response: None,
+            closed_responses: HashSet::new(),
+            closed_order: VecDeque::new(),
+            responses: Vec::new(),
         }
     }
 
     fn consume_value(&mut self, root: &Value) -> Option<TurnMetric> {
         let object = root.as_object()?;
+        // Parents of responses can be records of any type or scope, so every record is noted.
+        self.remember_record_time(object);
         if !self.accepts_record(object) {
             return None;
         }
+        // A turn whose terminal message had only started (its thinking block) closes at the first
+        // record that does not continue that message.
+        let closed = self.close_unfinished_terminal(object);
+        let produced = self.consume_record(object);
+        closed.or(produced)
+    }
+
+    fn consume_record(&mut self, object: &serde_json::Map<String, Value>) -> Option<TurnMetric> {
         self.observe_version(object.get("version"));
         let record_type = object.get("type")?.as_str()?;
         let message = object.get("message").and_then(Value::as_object);
         match record_type {
             "user" => {
+                // Any user-type record is the fallback trigger of the next request. It does not
+                // end the response in flight: notifications can be written mid-response.
+                if let Some(timestamp) = parse_date(object.get("timestamp")) {
+                    self.latest_trigger = Some(timestamp);
+                }
                 if !message.is_some_and(|message| {
                     message.get("role").and_then(Value::as_str) == Some("user")
                 }) {
@@ -215,7 +294,9 @@ impl ClaudeTranscriptParser {
                     .and_then(Value::as_str)
                     .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
                     .map(str::to_owned);
+                self.next_serial += 1;
                 self.turn = Some(TurnState {
+                    serial: self.next_serial,
                     started_at: Some(timestamp),
                     last_activity: Some(timestamp),
                     private_identity: identity,
@@ -225,7 +306,7 @@ impl ClaudeTranscriptParser {
                 });
                 return None;
             }
-            "assistant" => {}
+            "assistant" => self.track_response(object, message),
             _ => return None,
         }
 
@@ -319,6 +400,12 @@ impl ClaudeTranscriptParser {
                 message_id,
                 object.get("requestId").and_then(Value::as_str),
             ));
+            turn.region.observe(Some(bedrock_region_or_unknown(
+                message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .and_then(bedrock_profile_region),
+            )));
             if let Some(model) = message
                 .get("model")
                 .and_then(Value::as_str)
@@ -332,11 +419,258 @@ impl ClaudeTranscriptParser {
         observe_effort(object, message, turn);
 
         if terminal(object, message) {
-            let completed_at = parse_date(object.get("timestamp"));
-            self.finish_turn(completed_at)
-        } else {
-            None
+            turn.terminal_message = Some(message_id.to_owned());
         }
+        if turn.terminal_message.as_deref() == Some(message_id) {
+            turn.terminal_thinking = ends_with_thinking(message);
+        }
+        // A terminal message may still receive records (its text after the thinking block), so
+        // the turn stays pending and closes when something else arrives or the reader flushes.
+        None
+    }
+
+    fn remember_record_time(&mut self, root: &serde_json::Map<String, Value>) {
+        let (Some(uuid), Some(at)) = (
+            root.get("uuid")
+                .and_then(Value::as_str)
+                .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES)),
+            parse_date(root.get("timestamp")),
+        ) else {
+            return;
+        };
+        if self.record_times.insert(uuid.to_owned(), at).is_none() {
+            self.record_order.push_back(uuid.to_owned());
+            while self.record_order.len() > MAX_REMEMBERED_RECORDS {
+                if let Some(oldest) = self.record_order.pop_front() {
+                    self.record_times.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// The request that produced a response: the record named by its first record's
+    /// `parentUuid` when it was seen and is not later than that record, else the latest
+    /// user-type record.
+    fn response_trigger(
+        &self,
+        root: &serde_json::Map<String, Value>,
+        first_at: Option<DateTime<Utc>>,
+    ) -> Option<DateTime<Utc>> {
+        let parent = root
+            .get("parentUuid")
+            .and_then(Value::as_str)
+            .and_then(|uuid| self.record_times.get(uuid))
+            .copied();
+        match (parent, first_at) {
+            (Some(parent), Some(first)) if parent <= first => Some(parent),
+            _ => self.latest_trigger,
+        }
+    }
+
+    /// Finishes a turn pending on the rest of its terminal message.
+    fn close_unfinished_terminal(
+        &mut self,
+        root: &serde_json::Map<String, Value>,
+    ) -> Option<TurnMetric> {
+        let pending = self.turn.as_ref()?.terminal_message.as_deref()?;
+        let kind = root.get("type").and_then(Value::as_str);
+        let message_id = root
+            .get("message")
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_str);
+        // The terminal message's own records and unrelated record types leave the turn pending;
+        // a user-type record or another message ends it.
+        let ends = match kind {
+            Some("user") => true,
+            Some("assistant") => message_id != Some(pending),
+            _ => false,
+        };
+        if !ends {
+            return None;
+        }
+        self.finish_unfinished_terminal()
+    }
+
+    fn finish_unfinished_terminal(&mut self) -> Option<TurnMetric> {
+        self.close_response();
+        let completed_at = self.turn.as_ref()?.last_activity;
+        self.finish_turn(completed_at)
+    }
+
+    /// Follows the API response each assistant record belongs to. A response spans every record
+    /// with its `message.id`; it ends with the last of them and starts at the latest user-type
+    /// record before the first.
+    fn track_response(
+        &mut self,
+        root: &serde_json::Map<String, Value>,
+        message: Option<&serde_json::Map<String, Value>>,
+    ) {
+        let Some(message) = message
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        else {
+            self.close_response();
+            return;
+        };
+        let message_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES));
+        let Some(message_id) = message_id else {
+            self.close_response();
+            return;
+        };
+        let timestamp = parse_date(root.get("timestamp"));
+        let tokens = nonnegative_integer(
+            message
+                .get("usage")
+                .and_then(Value::as_object)
+                .and_then(|usage| usage.get("output_tokens")),
+        );
+        let continues = self
+            .open_response
+            .as_ref()
+            .is_some_and(|open| open.message_id == message_id);
+        if !continues {
+            self.close_response();
+            if self.closed_responses.contains(message_id) {
+                // Records of an already finished response resurfacing out of order.
+                return;
+            }
+            let synthetic = message.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL);
+            self.open_response = Some(OpenResponse {
+                message_id: message_id.to_owned(),
+                trigger: self.response_trigger(root, timestamp),
+                last_at: None,
+                output_tokens: None,
+                unusable: synthetic,
+                model: if synthetic {
+                    None
+                } else {
+                    message
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_claude_model)
+                },
+                provider: provider_evidence(
+                    message_id,
+                    root.get("requestId").and_then(Value::as_str),
+                ),
+                effort: None,
+                complete: false,
+                turn_serial: self.turn.as_ref().map(|turn| turn.serial),
+                session_identity: root
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
+                    .map(str::to_owned),
+                agent_identity: root
+                    .get("agentId")
+                    .and_then(Value::as_str)
+                    .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
+                    .map(str::to_owned),
+            });
+        }
+        let Some(open) = self.open_response.as_mut() else {
+            return;
+        };
+        match timestamp {
+            Some(timestamp) => {
+                if open.last_at.map_or(true, |last| timestamp > last) {
+                    open.last_at = Some(timestamp);
+                }
+            }
+            None => open.unusable = true,
+        }
+        // Usage snapshots of one message only grow; a smaller later value is not trustworthy.
+        match (open.output_tokens, tokens) {
+            (Some(previous), Some(current)) if current < previous => open.unusable = true,
+            (_, Some(current)) => open.output_tokens = Some(current),
+            _ => {}
+        }
+        open.complete = message_is_complete(root, message);
+        if open.effort.is_none() {
+            open.effort = root
+                .get("perTurnEffort")
+                .or_else(|| root.get("effort"))
+                .or_else(|| message.get("perTurnEffort"))
+                .or_else(|| message.get("effort"))
+                .and_then(Value::as_str)
+                .filter(|value| ReportedReasoningEffort::is_allowed(value))
+                .map(str::to_owned);
+        }
+    }
+
+    /// Finishes the response in flight: counts it in the active turn and publishes it on the
+    /// live list when it qualifies (200+ output tokens, 0 < duration <= 600 s, not synthetic).
+    fn close_response(&mut self) {
+        let Some(open) = self.open_response.take() else {
+            return;
+        };
+        self.closed_order.push_back(open.message_id.clone());
+        self.closed_responses.insert(open.message_id.clone());
+        while self.closed_order.len() > MAX_CLOSED_RESPONSES {
+            if let Some(oldest) = self.closed_order.pop_front() {
+                self.closed_responses.remove(&oldest);
+            }
+        }
+        if open.unusable {
+            return;
+        }
+        let (Some(trigger), Some(end), Some(tokens)) =
+            (open.trigger, open.last_at, open.output_tokens)
+        else {
+            return;
+        };
+        let Some(nanos) = (end - trigger).num_nanoseconds() else {
+            return;
+        };
+        let duration = nanos as f64 / 1e9;
+        if !response_qualifies(tokens, duration) {
+            return;
+        }
+        if let Some(turn) = self
+            .turn
+            .as_mut()
+            .filter(|turn| Some(turn.serial) == open.turn_serial)
+        {
+            turn.responses.add(tokens, duration);
+        }
+        if self.responses.len() >= MAX_PENDING_RESPONSES {
+            self.responses.remove(0);
+        }
+        let identity = open
+            .session_identity
+            .as_deref()
+            .unwrap_or(&self.source_identity);
+        let id = match (self.scope, open.agent_identity.as_deref()) {
+            (RecordScope::Subagent, Some(agent)) => {
+                digest_id(&["response", identity, agent, &open.message_id])
+            }
+            _ => digest_id(&["response", identity, &open.message_id]),
+        };
+        self.responses.push(ResponseMetric {
+            id,
+            completed_at: end,
+            model: open.model,
+            provider: Some(open.provider.unwrap_or("unknown").to_owned()),
+            client: CLAUDE_CLIENT.to_owned(),
+            source_kind: Some(
+                match self.scope {
+                    RecordScope::Primary => "primary",
+                    RecordScope::Subagent => "subagent",
+                }
+                .to_owned(),
+            ),
+            // Same metric version as the turns of this transcript scope.
+            metric_version: match self.scope {
+                RecordScope::Primary => CLAUDE_METRIC_VERSION,
+                RecordScope::Subagent => CLAUDE_SUBAGENT_METRIC_VERSION,
+            }
+            .to_owned(),
+            reasoning_effort: open.effort,
+            output_tokens: tokens,
+            duration_seconds: duration,
+        });
     }
 
     fn accepts_record(&self, root: &serde_json::Map<String, Value>) -> bool {
@@ -388,6 +722,8 @@ impl ClaudeTranscriptParser {
         if !throughput.is_finite() || throughput < 0.0 {
             return None;
         }
+        let (response_output_tokens, response_duration_seconds, response_count) =
+            turn.responses.fields();
         let identity = turn
             .session_identity
             .as_deref()
@@ -441,6 +777,11 @@ impl ClaudeTranscriptParser {
             } else {
                 turn.effort
             },
+            response_output_tokens,
+            response_duration_seconds,
+            response_count,
+            provider_region: (turn.provider.provider() == "amazon-bedrock")
+                .then(|| turn.region.provider().to_owned()),
         })
     }
 
@@ -480,6 +821,39 @@ impl JsonlEventParser for ClaudeTranscriptParser {
         // anything it started cannot be completed faithfully.
         self.turn = None;
         self.synchronized = false;
+        self.latest_trigger = None;
+        self.record_times.clear();
+        self.record_order.clear();
+        self.open_response = None;
+    }
+
+    fn take_responses(&mut self) -> Vec<ResponseMetric> {
+        std::mem::take(&mut self.responses)
+    }
+
+    fn flush_pending(&mut self, now: DateTime<Utc>, final_read: bool) -> Option<TurnMetric> {
+        if let Some(turn) = self
+            .turn
+            .as_ref()
+            .filter(|turn| turn.terminal_message.is_some())
+        {
+            // A pending turn closes at the end of a read unless its message still ends in
+            // thinking, and in any case once it has waited 30 s or the file is fully read.
+            let waited = turn.last_activity.map_or(true, |last| {
+                now - last >= Duration::seconds(PENDING_TURN_TIMEOUT_SECONDS)
+            });
+            return (final_read || !turn.terminal_thinking || waited)
+                .then(|| self.finish_unfinished_terminal())
+                .flatten();
+        }
+        if self
+            .open_response
+            .as_ref()
+            .is_some_and(|open| open.complete || final_read)
+        {
+            self.close_response();
+        }
+        None
     }
 }
 
@@ -492,6 +866,45 @@ fn terminal(
         .or_else(|| root.get("stop_reason"))
         .and_then(Value::as_str)
         .is_some_and(|reason| matches!(reason, "end_turn" | "stop_sequence"))
+}
+
+fn content_blocks(message: &serde_json::Map<String, Value>) -> &[Value] {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn last_block_type(message: &serde_json::Map<String, Value>) -> Option<&str> {
+    content_blocks(message)
+        .last()
+        .and_then(|block| block.get("type"))
+        .and_then(Value::as_str)
+}
+
+/// A terminal record whose content stops at a thinking block: the text is a later record.
+fn ends_with_thinking(message: &serde_json::Map<String, Value>) -> bool {
+    matches!(
+        last_block_type(message),
+        Some("thinking" | "redacted_thinking")
+    )
+}
+
+/// A record that carries the message's last content block (a tool call for `tool_use`, text
+/// for the other stop reasons) and its stop reason: nothing more of the message follows.
+fn message_is_complete(
+    root: &serde_json::Map<String, Value>,
+    message: &serde_json::Map<String, Value>,
+) -> bool {
+    let stop = message
+        .get("stop_reason")
+        .or_else(|| root.get("stop_reason"))
+        .and_then(Value::as_str);
+    match (stop, last_block_type(message)) {
+        (Some("tool_use"), Some("tool_use")) => true,
+        (Some(reason), Some("text")) => reason != "tool_use",
+        _ => false,
+    }
 }
 
 fn is_primary_record(root: &serde_json::Map<String, Value>) -> bool {
@@ -589,14 +1002,28 @@ fn is_digits(value: &str) -> bool {
 
 /// `^(?:[a-z]{2,6}(?:-[a-z]+)?\.)?anthropic\.(claude-[a-z0-9.-]+?)(?:-v[0-9]+(?::[0-9]+)?)?$`
 fn bedrock_model(raw: &str) -> Option<String> {
-    let rest = match raw.strip_prefix("anthropic.") {
-        Some(rest) => rest,
+    bedrock_parts(raw).map(|(model, _)| model)
+}
+
+/// The inference-profile prefix of a Bedrock model id (`us.anthropic.claude-...` gives `us`).
+/// Prefixes that name no allowlisted region still match the id shape and are mapped by the caller.
+pub(crate) fn bedrock_profile_region(raw: &str) -> Option<&str> {
+    bedrock_parts_ref(raw).and_then(|(_, region)| region)
+}
+
+fn bedrock_parts(raw: &str) -> Option<(String, Option<&str>)> {
+    bedrock_parts_ref(raw).map(|(model, region)| (model.to_owned(), region))
+}
+
+fn bedrock_parts_ref(raw: &str) -> Option<(&str, Option<&str>)> {
+    let (region, rest) = match raw.strip_prefix("anthropic.") {
+        Some(rest) => (None, rest),
         None => {
             let (region, rest) = raw.split_once('.')?;
             if !is_bedrock_region(region) {
                 return None;
             }
-            rest.strip_prefix("anthropic.")?
+            (Some(region), rest.strip_prefix("anthropic.")?)
         }
     };
     // The lazy group keeps at least one character after `claude-`, so an earlier "-v..."
@@ -608,7 +1035,7 @@ fn bedrock_model(raw: &str) -> Option<String> {
         _ => rest,
     };
     (body.starts_with("claude-") && body.len() > "claude-".len() && is_model_body(body))
-        .then(|| body.to_owned())
+        .then_some((body, region))
 }
 
 /// `[a-z]{2,6}(?:-[a-z]+)?`

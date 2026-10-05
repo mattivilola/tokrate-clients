@@ -164,7 +164,7 @@ fn grok_usage(session_id: &str, number: u64, output_tokens: i64) -> Value {
         "updatedAt":"2026-10-03T10:00:05Z",
         "session":{},
         "turns":[{
-            "turnNumber":number,
+            "turnNumber":number + 1,
             "endedAt":"2026-10-03T10:00:05Z",
             "outputTokens":output_tokens,
             "reasoningTokens":10,
@@ -315,12 +315,12 @@ fn claude_transcript_deduplicates_api_messages_skips_tool_users_and_omits_conten
     let start = "2026-10-03T10:00:00Z";
     let tool = "2026-10-03T10:00:02Z";
     let end = "2026-10-03T10:00:04Z";
-    parser.consume(&claude_user(
+    parser.consume_settled(&claude_user(
         start,
         "human-1",
         json!("SYNTHETIC_PROMPT_SENTINEL"),
     ));
-    parser.consume(&claude_message(
+    parser.consume_settled(&claude_message(
         "assistant",
         "assistant",
         tool,
@@ -331,13 +331,13 @@ fn claude_transcript_deduplicates_api_messages_skips_tool_users_and_omits_conten
         json!([{"type":"thinking","thinking":"SYNTHETIC_PRIVATE_SENTINEL"}]),
     ));
     // Claude stores tool output in a user-shaped transcript record. It is not a new turn.
-    parser.consume(&claude_user(
+    parser.consume_settled(&claude_user(
         tool,
         "tool-result",
         json!([{"type":"tool_result","content":"SYNTHETIC_TOOL_SENTINEL"}]),
     ));
     // A repeated API message ID is an update to that message's cumulative usage.
-    parser.consume(&claude_message(
+    parser.consume_settled(&claude_message(
         "assistant",
         "assistant",
         tool,
@@ -355,12 +355,12 @@ fn claude_transcript_deduplicates_api_messages_skips_tool_users_and_omits_conten
         "claude-opus-4-1",
         "end_turn",
         4,
-        json!([{"type":"thinking","thinking":"not summed separately"}]),
+        json!([{"type":"text","text":"not summed separately"}]),
     );
     let mut value: Value = serde_json::from_slice(&terminal).unwrap();
     value["effort"] = json!("high");
     terminal = serde_json::to_vec(&value).unwrap();
-    let result = parser.consume(&terminal).unwrap();
+    let result = parser.consume_settled(&terminal).unwrap();
     assert_eq!(result.output_tokens, 7);
     assert_eq!(result.duration_seconds, 4.0);
     assert_eq!(result.turn_throughput_tps, 1.75);
@@ -391,8 +391,8 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
     let t2 = "2026-10-03T10:00:02Z";
     let user = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
     let mut interjection = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    interjection.consume(&user("first", t0));
-    interjection.consume(&claude_message(
+    interjection.consume_settled(&user("first", t0));
+    interjection.consume_settled(&claude_message(
         "assistant",
         "assistant",
         t1,
@@ -402,10 +402,10 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
         2,
         json!([]),
     ));
-    interjection.consume(&user("interjection", t1));
+    interjection.consume_settled(&user("interjection", t1));
     // A message typed mid-turn continues the turn instead of failing it closed.
     let continued = interjection
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t2,
@@ -418,9 +418,9 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
         .unwrap();
     assert_eq!(continued.output_tokens, 4);
     assert_eq!(continued.duration_seconds, 2.0);
-    interjection.consume(&user("next-turn", t1));
+    interjection.consume_settled(&user("next-turn", t1));
     assert!(interjection
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t2,
@@ -433,8 +433,8 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
         .is_some());
 
     let mut mixed_model = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    mixed_model.consume(&user("model-conflict", t0));
-    mixed_model.consume(&claude_message(
+    mixed_model.consume_settled(&user("model-conflict", t0));
+    mixed_model.consume_settled(&claude_message(
         "assistant",
         "assistant",
         t1,
@@ -445,7 +445,7 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
         json!([]),
     ));
     let unknown = mixed_model
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t2,
@@ -459,7 +459,7 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
     assert_eq!(unknown.model, None);
 
     let mut conflict = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    conflict.consume(&user("effort-conflict", t0));
+    conflict.consume_settled(&user("effort-conflict", t0));
     let mut high = claude_message(
         "assistant",
         "assistant",
@@ -473,7 +473,7 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
     let mut value: Value = serde_json::from_slice(&high).unwrap();
     value["message"]["effort"] = json!("high");
     high = serde_json::to_vec(&value).unwrap();
-    conflict.consume(&high);
+    conflict.consume_settled(&high);
     let mut low = claude_message(
         "assistant",
         "assistant",
@@ -487,24 +487,24 @@ fn claude_fails_closed_for_interjections_model_or_effort_conflicts_and_sidechain
     let mut value: Value = serde_json::from_slice(&low).unwrap();
     value["message"]["effort"] = json!("low");
     low = serde_json::to_vec(&value).unwrap();
-    let unknown_effort = conflict.consume(&low).unwrap();
+    let unknown_effort = conflict.consume_settled(&low).unwrap();
     assert_eq!(unknown_effort.reasoning_effort, None);
 
     let mut sidechain = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    sidechain.consume(
+    sidechain.consume_settled(
         &serde_json::to_vec(
             &json!({"type":"assistant","isSidechain":true,"message":{"role":"assistant"}}),
         )
         .unwrap(),
     );
     assert!(!sidechain.excludes_session());
-    sidechain.consume(&claude_user(
+    sidechain.consume_settled(&claude_user(
         t0,
         "primary-after-sidechain",
         json!("synthetic"),
     ));
     assert!(sidechain
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t1,
@@ -527,9 +527,9 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
     let mut user: Value =
         serde_json::from_slice(&claude_user(t0, "missing-flags", json!("x"))).unwrap();
     user.as_object_mut().unwrap().remove("isSidechain");
-    missing_primary.consume(&serde_json::to_vec(&user).unwrap());
+    missing_primary.consume_settled(&serde_json::to_vec(&user).unwrap());
     assert!(missing_primary
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t1,
@@ -545,9 +545,9 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
     let mut user: Value =
         serde_json::from_slice(&claude_user(t0, "agent-user", json!("x"))).unwrap();
     user["agentId"] = json!("nested-agent");
-    agent.consume(&serde_json::to_vec(&user).unwrap());
+    agent.consume_settled(&serde_json::to_vec(&user).unwrap());
     assert!(agent
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t1,
@@ -560,7 +560,7 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
         .is_none());
 
     let mut missing_usage = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    missing_usage.consume(&claude_user(t0, "missing-usage", json!("x")));
+    missing_usage.consume_settled(&claude_user(t0, "missing-usage", json!("x")));
     let mut first: Value = serde_json::from_slice(&claude_message(
         "assistant",
         "assistant",
@@ -573,9 +573,9 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
     ))
     .unwrap();
     first["message"].as_object_mut().unwrap().remove("usage");
-    missing_usage.consume(&serde_json::to_vec(&first).unwrap());
+    missing_usage.consume_settled(&serde_json::to_vec(&first).unwrap());
     assert!(missing_usage
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t2,
@@ -588,8 +588,8 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
         .is_none());
 
     let mut decreasing = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    decreasing.consume(&claude_user(t0, "decreasing-usage", json!("x")));
-    decreasing.consume(&claude_message(
+    decreasing.consume_settled(&claude_user(t0, "decreasing-usage", json!("x")));
+    decreasing.consume_settled(&claude_message(
         "assistant",
         "assistant",
         t1,
@@ -600,7 +600,7 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
         json!([]),
     ));
     assert!(decreasing
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t2,
@@ -613,9 +613,9 @@ fn claude_requires_primary_flags_complete_usage_and_monotonic_snapshots() {
         .is_none());
 
     let mut modelless = crate::claude_parser::ClaudeTranscriptParser::new("file".into());
-    modelless.consume(&claude_user(t0, "modelless", json!("x")));
+    modelless.consume_settled(&claude_user(t0, "modelless", json!("x")));
     let unknown = modelless
-        .consume(&claude_message(
+        .consume_settled(&claude_message(
             "assistant",
             "assistant",
             t1,
@@ -673,19 +673,19 @@ fn claude_parser() -> crate::claude_parser::ClaudeTranscriptParser {
 fn claude_interjection_continues_one_turn_from_its_original_start() {
     let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
     let mut plain = claude_parser();
-    plain.consume(&human("turn", "2026-10-03T10:00:00Z"));
-    plain.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    plain.consume_settled(&human("turn", "2026-10-03T10:00:00Z"));
+    plain.consume_settled(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
     let baseline = plain
-        .consume(&assistant("2026-10-03T10:00:40Z", "call-2", "end_turn", 7))
+        .consume_settled(&assistant("2026-10-03T10:00:40Z", "call-2", "end_turn", 7))
         .unwrap();
 
     let mut parser = claude_parser();
-    parser.consume(&human("turn", "2026-10-03T10:00:00Z"));
-    parser.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
-    parser.consume(&human("typed-while-working", "2026-10-03T10:00:20Z"));
-    parser.consume(&assistant("2026-10-03T10:00:30Z", "call-1b", "tool_use", 3));
+    parser.consume_settled(&human("turn", "2026-10-03T10:00:00Z"));
+    parser.consume_settled(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    parser.consume_settled(&human("typed-while-working", "2026-10-03T10:00:20Z"));
+    parser.consume_settled(&assistant("2026-10-03T10:00:30Z", "call-1b", "tool_use", 3));
     let result = parser
-        .consume(&assistant("2026-10-03T10:00:40Z", "call-2", "end_turn", 7))
+        .consume_settled(&assistant("2026-10-03T10:00:40Z", "call-2", "end_turn", 7))
         .unwrap();
     assert_eq!(result.output_tokens, 15);
     assert_eq!(result.duration_seconds, 40.0);
@@ -693,7 +693,7 @@ fn claude_interjection_continues_one_turn_from_its_original_start() {
     assert_eq!(result.model.as_deref(), Some("claude-model"));
     assert_eq!(result.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(result.client_version.as_deref(), Some("1.2.3"));
-    assert_eq!(result.parser_version, "claude-transcript-v3");
+    assert_eq!(result.parser_version, "claude-transcript-v4");
     assert_eq!(result.metric_version, CLAUDE_METRIC_VERSION);
     assert_eq!(result.source_kind.as_deref(), Some("primary"));
     // Identity comes from the original human turn, so an interjection never changes it.
@@ -704,25 +704,25 @@ fn claude_interjection_continues_one_turn_from_its_original_start() {
 fn claude_interjection_gap_over_thirty_minutes_starts_a_new_turn() {
     let human = |id: &str, at: &str| claude_user(at, id, json!("synthetic"));
     let mut parser = claude_parser();
-    parser.consume(&human("old", "2026-10-03T10:00:00Z"));
-    parser.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    parser.consume_settled(&human("old", "2026-10-03T10:00:00Z"));
+    parser.consume_settled(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
     // 30 minutes after the last activity still continues the turn.
-    parser.consume(&human("boundary", "2026-10-03T10:30:10Z"));
-    parser.consume(&assistant("2026-10-03T10:30:20Z", "call-2", "tool_use", 4));
+    parser.consume_settled(&human("boundary", "2026-10-03T10:30:10Z"));
+    parser.consume_settled(&assistant("2026-10-03T10:30:20Z", "call-2", "tool_use", 4));
     // More than 30 minutes later the old turn is abandoned and a new one starts.
-    parser.consume(&human("new", "2026-10-03T11:00:21Z"));
+    parser.consume_settled(&human("new", "2026-10-03T11:00:21Z"));
     let result = parser
-        .consume(&assistant("2026-10-03T11:00:41Z", "call-3", "end_turn", 40))
+        .consume_settled(&assistant("2026-10-03T11:00:41Z", "call-3", "end_turn", 40))
         .unwrap();
     assert_eq!(result.output_tokens, 40);
     assert_eq!(result.duration_seconds, 20.0);
 
     let mut continued = claude_parser();
-    continued.consume(&human("old", "2026-10-03T10:00:00Z"));
-    continued.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
-    continued.consume(&human("boundary", "2026-10-03T10:30:10Z"));
+    continued.consume_settled(&human("old", "2026-10-03T10:00:00Z"));
+    continued.consume_settled(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    continued.consume_settled(&human("boundary", "2026-10-03T10:30:10Z"));
     let whole = continued
-        .consume(&assistant("2026-10-03T10:30:20Z", "call-2", "end_turn", 4))
+        .consume_settled(&assistant("2026-10-03T10:30:20Z", "call-2", "end_turn", 4))
         .unwrap();
     assert_eq!(whole.output_tokens, 9);
     assert_eq!(whole.duration_seconds, 1820.0);
@@ -731,49 +731,49 @@ fn claude_interjection_gap_over_thirty_minutes_starts_a_new_turn() {
 #[test]
 fn claude_tool_results_count_as_activity_for_long_tool_runs() {
     let mut parser = claude_parser();
-    parser.consume(&claude_user(
+    parser.consume_settled(&claude_user(
         "2026-10-03T10:00:00Z",
         "prompt",
         json!("synthetic"),
     ));
-    parser.consume(&assistant("2026-10-03T10:01:00Z", "call-1", "tool_use", 5));
+    parser.consume_settled(&assistant("2026-10-03T10:01:00Z", "call-1", "tool_use", 5));
     // The tool ran for 39 minutes; its result is activity and never starts a turn.
-    parser.consume(&claude_user(
+    parser.consume_settled(&claude_user(
         "2026-10-03T10:40:00Z",
         "tool-result",
         json!([{"type":"tool_result","content":"SYNTHETIC_TOOL_SENTINEL"}]),
     ));
-    parser.consume(&claude_user(
+    parser.consume_settled(&claude_user(
         "2026-10-03T10:41:00Z",
         "typed-after-tool",
         json!("synthetic"),
     ));
     let result = parser
-        .consume(&assistant("2026-10-03T10:42:00Z", "call-2", "end_turn", 7))
+        .consume_settled(&assistant("2026-10-03T10:42:00Z", "call-2", "end_turn", 7))
         .unwrap();
     assert_eq!(result.output_tokens, 12);
     assert_eq!(result.duration_seconds, 2520.0);
 
     let mut orphan = claude_parser();
-    orphan.consume(&claude_user(
+    orphan.consume_settled(&claude_user(
         "2026-10-03T10:00:00Z",
         "orphan-result",
         json!([{"type":"tool_result","content":"x"}]),
     ));
     assert!(orphan
-        .consume(&assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9))
+        .consume_settled(&assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9))
         .is_none());
 }
 
 #[test]
 fn claude_user_records_without_a_timestamp_are_ignored_entirely() {
     let mut parser = claude_parser();
-    parser.consume(&claude_user(
+    parser.consume_settled(&claude_user(
         "2026-10-03T10:00:00Z",
         "prompt",
         json!("synthetic"),
     ));
-    parser.consume(&assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5));
+    parser.consume_settled(&assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5));
     let without_time = |content: Value| {
         let mut value: Value =
             serde_json::from_slice(&claude_user("2026-10-03T10:00:06Z", "no-time", content))
@@ -782,18 +782,18 @@ fn claude_user_records_without_a_timestamp_are_ignored_entirely() {
         serde_json::to_vec(&value).unwrap()
     };
     // Neither a human prompt nor an interruption marker without a time touches the turn.
-    parser.consume(&without_time(json!("synthetic")));
-    parser.consume(&without_time(json!("[Request interrupted by user]")));
+    parser.consume_settled(&without_time(json!("synthetic")));
+    parser.consume_settled(&without_time(json!("[Request interrupted by user]")));
     let result = parser
-        .consume(&assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 7))
+        .consume_settled(&assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 7))
         .unwrap();
     assert_eq!(result.output_tokens, 12);
     assert_eq!(result.duration_seconds, 10.0);
 
     let mut idle = claude_parser();
-    idle.consume(&without_time(json!("synthetic")));
+    idle.consume_settled(&without_time(json!("synthetic")));
     assert!(idle
-        .consume(&assistant("2026-10-03T10:00:10Z", "call", "end_turn", 9))
+        .consume_settled(&assistant("2026-10-03T10:00:10Z", "call", "end_turn", 9))
         .is_none());
 }
 
@@ -805,16 +805,16 @@ fn claude_interruption_discards_the_turn_and_does_not_start_one() {
         json!([{"type":"text","text":"[Request interrupted by user for tool use]"}]),
     ] {
         let mut parser = claude_parser();
-        parser.consume(&human("interrupted", "2026-10-03T10:00:00Z"));
-        parser.consume(&assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5));
-        parser.consume(&claude_user("2026-10-03T10:00:06Z", "marker", marker));
+        parser.consume_settled(&human("interrupted", "2026-10-03T10:00:00Z"));
+        parser.consume_settled(&assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5));
+        parser.consume_settled(&claude_user("2026-10-03T10:00:06Z", "marker", marker));
         // The marker did not start a turn, so the trailing answer has nothing to attach to.
         assert!(parser
-            .consume(&assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 9))
+            .consume_settled(&assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 9))
             .is_none());
-        parser.consume(&human("after", "2026-10-03T10:01:00Z"));
+        parser.consume_settled(&human("after", "2026-10-03T10:01:00Z"));
         let result = parser
-            .consume(&assistant("2026-10-03T10:01:10Z", "call-3", "end_turn", 20))
+            .consume_settled(&assistant("2026-10-03T10:01:10Z", "call-3", "end_turn", 20))
             .unwrap();
         assert_eq!(result.output_tokens, 20);
         assert_eq!(result.duration_seconds, 10.0);
@@ -837,23 +837,23 @@ fn claude_synthetic_messages_invalidate_the_turn_without_model_ambiguity() {
         )
     };
     let mut only = claude_parser();
-    only.consume(&human("synthetic-only", "2026-10-03T10:00:00Z"));
+    only.consume_settled(&human("synthetic-only", "2026-10-03T10:00:00Z"));
     assert!(only
-        .consume(&synthetic("2026-10-03T10:00:02Z", "s1", "end_turn"))
+        .consume_settled(&synthetic("2026-10-03T10:00:02Z", "s1", "end_turn"))
         .is_none());
 
     let mut mixed = claude_parser();
-    mixed.consume(&human("synthetic-mixed", "2026-10-03T10:00:00Z"));
-    mixed.consume(&assistant("2026-10-03T10:00:01Z", "real-1", "tool_use", 5));
-    mixed.consume(&synthetic("2026-10-03T10:00:02Z", "s2", "tool_use"));
+    mixed.consume_settled(&human("synthetic-mixed", "2026-10-03T10:00:00Z"));
+    mixed.consume_settled(&assistant("2026-10-03T10:00:01Z", "real-1", "tool_use", 5));
+    mixed.consume_settled(&synthetic("2026-10-03T10:00:02Z", "s2", "tool_use"));
     assert!(mixed
-        .consume(&assistant("2026-10-03T10:00:03Z", "real-2", "end_turn", 6))
+        .consume_settled(&assistant("2026-10-03T10:00:03Z", "real-2", "end_turn", 6))
         .is_none());
 
     // The invalid turn is cleared at its terminal message; later turns are unaffected.
-    mixed.consume(&human("clean", "2026-10-03T10:01:00Z"));
+    mixed.consume_settled(&human("clean", "2026-10-03T10:01:00Z"));
     let clean = mixed
-        .consume(&assistant("2026-10-03T10:01:10Z", "real-3", "end_turn", 30))
+        .consume_settled(&assistant("2026-10-03T10:01:10Z", "real-3", "end_turn", 30))
         .unwrap();
     assert_eq!(clean.model.as_deref(), Some("claude-model"));
     assert_eq!(clean.output_tokens, 30);
@@ -869,15 +869,15 @@ fn claude_meta_user_records_neither_start_nor_interrupt_turns() {
         )
     };
     let mut starts = claude_parser();
-    starts.consume(&meta("meta-start", "2026-10-03T10:00:00Z"));
+    starts.consume_settled(&meta("meta-start", "2026-10-03T10:00:00Z"));
     assert!(starts
-        .consume(&assistant("2026-10-03T10:00:05Z", "call-1", "end_turn", 9))
+        .consume_settled(&assistant("2026-10-03T10:00:05Z", "call-1", "end_turn", 9))
         .is_none());
 
     // A meta record far past the continuation window must not replace the active turn.
     let mut meta_interrupt = claude_parser();
-    meta_interrupt.consume(&human("kept", "2026-10-03T10:00:00Z"));
-    meta_interrupt.consume(&with_fields(
+    meta_interrupt.consume_settled(&human("kept", "2026-10-03T10:00:00Z"));
+    meta_interrupt.consume_settled(&with_fields(
         claude_user(
             "2026-10-03T10:00:01Z",
             "meta-interrupt",
@@ -886,15 +886,15 @@ fn claude_meta_user_records_neither_start_nor_interrupt_turns() {
         json!({"isMeta": true}),
     ));
     assert!(meta_interrupt
-        .consume(&assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9))
+        .consume_settled(&assistant("2026-10-03T10:00:05Z", "call", "end_turn", 9))
         .is_some());
 
     let mut active = claude_parser();
-    active.consume(&human("real", "2026-10-03T10:00:00Z"));
-    active.consume(&assistant("2026-10-03T10:00:01Z", "call-1", "tool_use", 5));
-    active.consume(&meta("meta-later", "2026-10-03T10:45:00Z"));
+    active.consume_settled(&human("real", "2026-10-03T10:00:00Z"));
+    active.consume_settled(&assistant("2026-10-03T10:00:01Z", "call-1", "tool_use", 5));
+    active.consume_settled(&meta("meta-later", "2026-10-03T10:45:00Z"));
     let result = active
-        .consume(&assistant("2026-10-03T10:45:10Z", "call-2", "end_turn", 7))
+        .consume_settled(&assistant("2026-10-03T10:45:10Z", "call-2", "end_turn", 7))
         .unwrap();
     assert_eq!(result.output_tokens, 12);
     assert_eq!(result.duration_seconds, 2710.0);
@@ -915,13 +915,13 @@ fn claude_subagent_parser_emits_distinct_subagent_metrics_and_each_prompt_is_a_t
         as_subagent(assistant(at, id, stop, tokens), session, agent)
     };
     let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    parser.consume(&user("task-1", "2026-10-03T10:00:00Z"));
-    parser.consume(&reply("2026-10-03T10:00:04Z", "sub-call-1", "tool_use", 10));
+    parser.consume_settled(&user("task-1", "2026-10-03T10:00:00Z"));
+    parser.consume_settled(&reply("2026-10-03T10:00:04Z", "sub-call-1", "tool_use", 10));
     let first = parser
-        .consume(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
+        .consume_settled(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
         .unwrap();
     assert_eq!(first.client, CLAUDE_CLIENT);
-    assert_eq!(first.parser_version, "claude-transcript-v3");
+    assert_eq!(first.parser_version, "claude-transcript-v4");
     assert_eq!(first.metric_version, CLAUDE_SUBAGENT_METRIC_VERSION);
     assert_eq!(first.source_kind.as_deref(), Some("subagent"));
     assert_eq!(first.provider.as_deref(), Some("unknown"));
@@ -941,9 +941,9 @@ fn claude_subagent_parser_emits_distinct_subagent_metrics_and_each_prompt_is_a_t
     );
 
     // A later follow-up prompt that ends in another final answer is a separate turn.
-    parser.consume(&user("task-2", "2026-10-03T10:05:00Z"));
+    parser.consume_settled(&user("task-2", "2026-10-03T10:05:00Z"));
     let second = parser
-        .consume(&reply("2026-10-03T10:05:20Z", "sub-call-3", "end_turn", 60))
+        .consume_settled(&reply("2026-10-03T10:05:20Z", "sub-call-3", "end_turn", 60))
         .unwrap();
     assert_eq!(second.output_tokens, 60);
     assert_eq!(second.duration_seconds, 20.0);
@@ -951,18 +951,18 @@ fn claude_subagent_parser_emits_distinct_subagent_metrics_and_each_prompt_is_a_t
 
     // The same records measured as primary produce nothing, and the reverse holds too.
     let mut primary = claude_parser();
-    primary.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    primary.consume_settled(&user("task-1", "2026-10-03T10:00:00Z"));
     assert!(primary
-        .consume(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
+        .consume_settled(&reply("2026-10-03T10:00:10Z", "sub-call-2", "end_turn", 30))
         .is_none());
     let mut subagent = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    subagent.consume(&claude_user(
+    subagent.consume_settled(&claude_user(
         "2026-10-03T10:00:00Z",
         "primary-turn",
         json!("synthetic"),
     ));
     assert!(subagent
-        .consume(&assistant(
+        .consume_settled(&assistant(
             "2026-10-03T10:00:10Z",
             "primary-call",
             "end_turn",
@@ -972,13 +972,13 @@ fn claude_subagent_parser_emits_distinct_subagent_metrics_and_each_prompt_is_a_t
 
     // Primary identity is unaffected by the subagent scheme.
     let mut primary = claude_parser();
-    primary.consume(&claude_user(
+    primary.consume_settled(&claude_user(
         "2026-10-03T10:00:00Z",
         "task-1",
         json!("synthetic"),
     ));
     let primary = primary
-        .consume(&assistant(
+        .consume_settled(&assistant(
             "2026-10-03T10:00:10Z",
             "sub-call-2",
             "end_turn",
@@ -1145,9 +1145,9 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.13");
+    assert_eq!(sample.app_version, "0.1.14");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
-    assert_eq!(sample.parser_version, "claude-transcript-v3");
+    assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
     let json = serde_json::to_value(&sample).unwrap();
     let mut keys: Vec<&str> = json
@@ -1170,8 +1170,12 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
             "outputTokens",
             "parserVersion",
             "provider",
+            "providerRegion",
             "reasoningEffort",
             "reasoningOutputTokens",
+            "responseCount",
+            "responseDurationMs",
+            "responseOutputTokens",
             "sampleId",
             "sourceKind",
             "ttftMs"
@@ -1303,7 +1307,7 @@ fn grok_rejects_incomplete_cancelled_subagent_repeated_and_colliding_turns() {
         &grok_turn_events("incomplete", 1, "completed"),
         &json!({
             "sessionId":"incomplete","updatedAt":"2026-10-03T10:00:05Z","turns":[{
-                "turnNumber":1,"endedAt":"2026-10-03T10:00:05Z","outputTokens":20,
+                "turnNumber":2,"endedAt":"2026-10-03T10:00:05Z","outputTokens":20,
                 "reasoningTokens":5,"usageIsIncomplete":true,"modelUsage":{"grok-4":{}}
             }]
         }),
@@ -1346,8 +1350,8 @@ fn grok_rejects_incomplete_cancelled_subagent_repeated_and_colliding_turns() {
         &grok_turn_events("collision", 5, "completed"),
         &json!({
             "sessionId":"collision","updatedAt":"2026-10-03T10:00:05Z","turns":[
-                {"turnNumber":5,"endedAt":"2026-10-03T10:00:05Z","outputTokens":20,"usageIsIncomplete":false},
-                {"turnNumber":5,"endedAt":"2026-10-03T10:00:05Z","outputTokens":21,"usageIsIncomplete":false}
+                {"turnNumber":6,"endedAt":"2026-10-03T10:00:05Z","outputTokens":20,"usageIsIncomplete":false},
+                {"turnNumber":6,"endedAt":"2026-10-03T10:00:05Z","outputTokens":21,"usageIsIncomplete":false}
             ]
         }),
     );
@@ -1903,7 +1907,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.13");
+    assert_eq!(first[0].app_version, "0.1.14");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -1941,12 +1945,12 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
 #[test]
 fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes() {
     let completed = time("2026-10-03T10:03:47Z");
-    let claude = TurnMetric::new_observed(
+    let mut claude = TurnMetric::new_observed(
         "local-claude-digest".into(),
         completed,
         Some("claude-opus-4-1".into()),
-        120,
-        6.0,
+        1200,
+        30.0,
         Some("1.2.3".into()),
         None,
         Some("primary".into()),
@@ -1956,12 +1960,15 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         CLAUDE_PARSER_VERSION,
         CLAUDE_METRIC_VERSION,
     );
-    let bedrock = TurnMetric::new_observed(
+    claude.response_output_tokens = Some(900);
+    claude.response_duration_seconds = Some(8.0);
+    claude.response_count = Some(2);
+    let mut bedrock = TurnMetric::new_observed(
         "local-bedrock-digest".into(),
         completed,
         Some("claude-sonnet-4-5-20250929".into()),
-        150,
-        5.0,
+        1500,
+        20.0,
         Some("1.2.3".into()),
         None,
         Some("primary".into()),
@@ -1971,6 +1978,10 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         CLAUDE_PARSER_VERSION,
         CLAUDE_METRIC_VERSION,
     );
+    bedrock.response_output_tokens = Some(1200);
+    bedrock.response_duration_seconds = Some(9.0);
+    bedrock.response_count = Some(3);
+    bedrock.provider_region = Some("eu".into());
     let subagent = TurnMetric::new_observed(
         "local-subagent-digest".into(),
         completed,
@@ -2035,7 +2046,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.13-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.14-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2043,7 +2054,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.13-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.14-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2065,10 +2076,21 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.13");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.14");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
+    // Response fields and the Bedrock region are always present; null when absent.
+    assert_eq!(actual["samples"][0]["responseOutputTokens"], 900);
+    assert_eq!(actual["samples"][0]["responseDurationMs"], 8000.0);
+    assert_eq!(actual["samples"][0]["responseCount"], 2);
+    assert_eq!(actual["samples"][0]["providerRegion"], Value::Null);
+    assert_eq!(actual["samples"][1]["responseOutputTokens"], Value::Null);
+    assert_eq!(actual["samples"][1]["responseDurationMs"], Value::Null);
+    assert_eq!(actual["samples"][1]["responseCount"], Value::Null);
+    assert_eq!(actual["samples"][2]["responseCount"], Value::Null);
+    assert_eq!(actual["samples"][3]["responseDurationMs"], 9000.0);
+    assert_eq!(actual["samples"][3]["providerRegion"], "eu");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2139,7 +2161,7 @@ fn provider_of_turn(first: Vec<u8>, second: Vec<u8>) -> Option<String> {
         json!("synthetic"),
     ));
     parser.consume(&first);
-    parser.consume(&second)?.provider
+    parser.consume_settled(&second)?.provider
 }
 
 #[test]
@@ -2158,7 +2180,11 @@ fn claude_provider_comes_only_from_explicit_message_and_request_identifiers() {
     assert_eq!(
         provider_of_turn(
             bedrock("2026-10-03T10:00:05Z", BEDROCK_MESSAGE, "tool_use"),
-            bedrock("2026-10-03T10:00:10Z", "msg_bdrk_01ZYXWVUTSRQPNMLKJHGFEdc", "end_turn"),
+            bedrock(
+                "2026-10-03T10:00:10Z",
+                "msg_bdrk_01ZYXWVUTSRQPNMLKJHGFEdc",
+                "end_turn"
+            ),
         )
         .as_deref(),
         Some("amazon-bedrock")
@@ -2166,7 +2192,11 @@ fn claude_provider_comes_only_from_explicit_message_and_request_identifiers() {
     assert_eq!(
         provider_of_turn(
             bedrock("2026-10-03T10:00:05Z", VERTEX_MESSAGE, "tool_use"),
-            bedrock("2026-10-03T10:00:10Z", "msg_vrtx_01ZYXWVUTSRQPNMLKJHGFEdc", "end_turn"),
+            bedrock(
+                "2026-10-03T10:00:10Z",
+                "msg_vrtx_01ZYXWVUTSRQPNMLKJHGFEdc",
+                "end_turn"
+            ),
         )
         .as_deref(),
         Some("google-vertex")
@@ -2212,13 +2242,31 @@ fn claude_provider_comes_only_from_explicit_message_and_request_identifiers() {
 fn claude_provider_rejects_malformed_identifiers() {
     use crate::claude_parser::provider_evidence;
     let request = Some(ANTHROPIC_REQUEST);
-    assert_eq!(provider_evidence(ANTHROPIC_MESSAGE, request), Some("anthropic"));
+    assert_eq!(
+        provider_evidence(ANTHROPIC_MESSAGE, request),
+        Some("anthropic")
+    );
     // Wrong lengths and characters.
-    assert_eq!(provider_evidence("msg_01ABCDEFGHJKLMNPQRSTUV", request), None);
-    assert_eq!(provider_evidence("msg_01ABCDEFGHJKLMNPQRSTUVwxy", request), None);
-    assert_eq!(provider_evidence("msg_01ABCDEFGHJKLMNPQRSTU-wx", request), None);
-    assert_eq!(provider_evidence("msg_02ABCDEFGHJKLMNPQRSTUVwx", request), None);
-    assert_eq!(provider_evidence(ANTHROPIC_MESSAGE, Some("req_short")), None);
+    assert_eq!(
+        provider_evidence("msg_01ABCDEFGHJKLMNPQRSTUV", request),
+        None
+    );
+    assert_eq!(
+        provider_evidence("msg_01ABCDEFGHJKLMNPQRSTUVwxy", request),
+        None
+    );
+    assert_eq!(
+        provider_evidence("msg_01ABCDEFGHJKLMNPQRSTU-wx", request),
+        None
+    );
+    assert_eq!(
+        provider_evidence("msg_02ABCDEFGHJKLMNPQRSTUVwx", request),
+        None
+    );
+    assert_eq!(
+        provider_evidence(ANTHROPIC_MESSAGE, Some("req_short")),
+        None
+    );
     assert_eq!(
         provider_evidence(ANTHROPIC_MESSAGE, Some("req_011CPabcdefghijklmnopqrstuv_")),
         None
@@ -2229,7 +2277,10 @@ fn claude_provider_rejects_malformed_identifiers() {
     );
     assert_eq!(provider_evidence(ANTHROPIC_MESSAGE, None), None);
     // Bedrock and Vertex need 8..=64 alphanumerics and no request id.
-    assert_eq!(provider_evidence("msg_bdrk_12345678", None), Some("amazon-bedrock"));
+    assert_eq!(
+        provider_evidence("msg_bdrk_12345678", None),
+        Some("amazon-bedrock")
+    );
     assert_eq!(provider_evidence("msg_bdrk_1234567", None), None);
     assert_eq!(
         provider_evidence(&format!("msg_bdrk_{}", "a".repeat(64)), None),
@@ -2240,7 +2291,10 @@ fn claude_provider_rejects_malformed_identifiers() {
         None
     );
     assert_eq!(provider_evidence("msg_bdrk_1234567_", None), None);
-    assert_eq!(provider_evidence("msg_vrtx_12345678", None), Some("google-vertex"));
+    assert_eq!(
+        provider_evidence("msg_vrtx_12345678", None),
+        Some("google-vertex")
+    );
     assert_eq!(provider_evidence("msg_vrtx_1234567", None), None);
     assert_eq!(provider_evidence("msg_xxxx_12345678", None), None);
 }
@@ -2249,9 +2303,7 @@ fn claude_provider_rejects_malformed_identifiers() {
 fn claude_subagent_provider_uses_the_same_evidence() {
     let session = "sub-session";
     let agent = "sub-agent";
-    let user = |id: &str, at: &str| {
-        as_subagent(claude_user(at, id, json!("task")), session, agent)
-    };
+    let user = |id: &str, at: &str| as_subagent(claude_user(at, id, json!("task")), session, agent);
     let reply = |at: &str, id: &str, stop: &str, request: bool| {
         let line = as_subagent(assistant(at, id, stop, 20), session, agent);
         if request {
@@ -2261,25 +2313,45 @@ fn claude_subagent_provider_uses_the_same_evidence() {
         }
     };
     let mut direct = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    direct.consume(&user("task-1", "2026-10-03T10:00:00Z"));
-    direct.consume(&reply("2026-10-03T10:00:04Z", ANTHROPIC_MESSAGE, "tool_use", true));
+    direct.consume_settled(&user("task-1", "2026-10-03T10:00:00Z"));
+    direct.consume_settled(&reply(
+        "2026-10-03T10:00:04Z",
+        ANTHROPIC_MESSAGE,
+        "tool_use",
+        true,
+    ));
     let found = direct
-        .consume(&reply("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE_2, "end_turn", true))
+        .consume_settled(&reply(
+            "2026-10-03T10:00:10Z",
+            ANTHROPIC_MESSAGE_2,
+            "end_turn",
+            true,
+        ))
         .unwrap();
     assert_eq!(found.provider.as_deref(), Some("anthropic"));
     assert_eq!(found.source_kind.as_deref(), Some("subagent"));
 
     let mut bedrock = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    bedrock.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    bedrock.consume_settled(&user("task-1", "2026-10-03T10:00:00Z"));
     let found = bedrock
-        .consume(&reply("2026-10-03T10:00:10Z", BEDROCK_MESSAGE, "end_turn", false))
+        .consume_settled(&reply(
+            "2026-10-03T10:00:10Z",
+            BEDROCK_MESSAGE,
+            "end_turn",
+            false,
+        ))
         .unwrap();
     assert_eq!(found.provider.as_deref(), Some("amazon-bedrock"));
 
     let mut missing = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    missing.consume(&user("task-1", "2026-10-03T10:00:00Z"));
+    missing.consume_settled(&user("task-1", "2026-10-03T10:00:00Z"));
     let found = missing
-        .consume(&reply("2026-10-03T10:00:10Z", ANTHROPIC_MESSAGE, "end_turn", false))
+        .consume_settled(&reply(
+            "2026-10-03T10:00:10Z",
+            ANTHROPIC_MESSAGE,
+            "end_turn",
+            false,
+        ))
         .unwrap();
     assert_eq!(found.provider.as_deref(), Some("unknown"));
 }
@@ -2345,15 +2417,15 @@ fn claude_model_consistency_compares_normalized_names_across_routes() {
         claude_message("assistant", "assistant", at, id, model, stop, 5, json!([]))
     };
     let mut same = claude_parser();
-    same.consume(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
-    same.consume(&model_line(
+    same.consume_settled(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
+    same.consume_settled(&model_line(
         "2026-10-03T10:00:05Z",
         "call-1",
         "tool_use",
         "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     ));
     let found = same
-        .consume(&model_line(
+        .consume_settled(&model_line(
             "2026-10-03T10:00:10Z",
             "call-2",
             "end_turn",
@@ -2363,15 +2435,15 @@ fn claude_model_consistency_compares_normalized_names_across_routes() {
     assert_eq!(found.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
 
     let mut different = claude_parser();
-    different.consume(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
-    different.consume(&model_line(
+    different.consume_settled(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
+    different.consume_settled(&model_line(
         "2026-10-03T10:00:05Z",
         "call-1",
         "tool_use",
         "anthropic.claude-sonnet-4-5-20250929-v1:0",
     ));
     let found = different
-        .consume(&model_line(
+        .consume_settled(&model_line(
             "2026-10-03T10:00:10Z",
             "call-2",
             "end_turn",
@@ -2382,9 +2454,9 @@ fn claude_model_consistency_compares_normalized_names_across_routes() {
 
     // An ARN cannot be normalized, so the turn has no model rather than a raw value.
     let mut arn = claude_parser();
-    arn.consume(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
+    arn.consume_settled(&claude_user("2026-10-03T10:00:00Z", "turn", json!("x")));
     let found = arn
-        .consume(&model_line(
+        .consume_settled(&model_line(
             "2026-10-03T10:00:10Z",
             "call-1",
             "end_turn",
@@ -2486,10 +2558,14 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.13");
+    assert_eq!(crate::APP_VERSION, "0.1.14");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
-    for old_parser in ["claude-transcript-v1", "claude-transcript-v2"] {
+    for old_parser in [
+        "claude-transcript-v1",
+        "claude-transcript-v2",
+        "claude-transcript-v3",
+    ] {
         let legacy = build(
             CLAUDE_CLIENT,
             old_parser,
@@ -2498,7 +2574,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         );
         assert!(crate::SharedSample::from_metric(&legacy, Uuid::new_v4()).is_none());
     }
-    assert_eq!(CLAUDE_PARSER_VERSION, "claude-transcript-v3");
+    assert_eq!(CLAUDE_PARSER_VERSION, "claude-transcript-v4");
 }
 
 fn user_with(at: &str, id: &str, fields: Value) -> Vec<u8> {
@@ -2512,57 +2588,53 @@ fn assistant_end(at: &str, id: &str) -> Vec<u8> {
 #[test]
 fn claude_task_notifications_are_activity_never_prompts() {
     let notification = |at: &str, id: &str| {
-        user_with(
-            at,
-            id,
-            json!({ "origin": { "kind": "task-notification" } }),
-        )
+        user_with(at, id, json!({ "origin": { "kind": "task-notification" } }))
     };
     // After a terminal record a notification starts nothing, so later assistant records
     // (the model reacting to it) emit no measurement.
     let mut after = claude_parser();
-    after.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    after.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
     assert!(after
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
         .is_some());
     assert!(after
-        .consume(&notification("2026-10-03T10:05:00Z", "note-1"))
+        .consume_settled(&notification("2026-10-03T10:05:00Z", "note-1"))
         .is_none());
     assert!(after
-        .consume(&assistant("2026-10-03T10:05:05Z", "call-2", "tool_use", 9))
+        .consume_settled(&assistant("2026-10-03T10:05:05Z", "call-2", "tool_use", 9))
         .is_none());
     assert!(after
-        .consume(&assistant_end("2026-10-03T10:05:10Z", "call-3"))
+        .consume_settled(&assistant_end("2026-10-03T10:05:10Z", "call-3"))
         .is_none());
 
     // Mid-turn it neither restarts the turn nor continues it as an interjection: only activity.
     let mut mid = claude_parser();
-    mid.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
-    mid.consume(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
-    mid.consume(&notification("2026-10-03T10:00:20Z", "note-1"));
+    mid.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    mid.consume_settled(&assistant("2026-10-03T10:00:10Z", "call-1", "tool_use", 5));
+    mid.consume_settled(&notification("2026-10-03T10:00:20Z", "note-1"));
     let found = mid
-        .consume(&assistant_end("2026-10-03T10:00:40Z", "call-2"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:40Z", "call-2"))
         .unwrap();
     assert_eq!(found.duration_seconds, 40.0);
     assert_eq!(found.output_tokens, 45);
 
     // A background event never discards the active turn the way a real interruption does.
     let mut keeps = claude_parser();
-    keeps.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
-    keeps.consume(&notification("2026-10-03T10:00:05Z", "note-1"));
+    keeps.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    keeps.consume_settled(&notification("2026-10-03T10:00:05Z", "note-1"));
     assert!(keeps
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
         .is_some());
 
     // Human origin and origin-less records follow the v2 rules.
     let mut human = claude_parser();
-    human.consume(&user_with(
+    human.consume_settled(&user_with(
         "2026-10-03T10:00:00Z",
         "human",
         json!({ "origin": { "kind": "human" } }),
     ));
     assert!(human
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "call-1"))
         .is_some());
 }
 
@@ -2572,112 +2644,112 @@ fn claude_subagent_coordinator_follow_ups_are_prompts_even_when_meta() {
     let agent = "a1b2c3d4e5f60718";
     let record = |line: Vec<u8>| as_subagent(line, session, agent);
     let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    parser.consume(&record(claude_user(
+    parser.consume_settled(&record(claude_user(
         "2026-10-03T10:00:00Z",
         "task-1",
         json!("task"),
     )));
     let first = parser
-        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
         .unwrap();
-    parser.consume(&record(user_with(
+    parser.consume_settled(&record(user_with(
         "2026-10-03T10:10:00Z",
         "follow-up",
         json!({ "isMeta": true, "origin": { "kind": "coordinator" } }),
     )));
     let second = parser
-        .consume(&record(assistant_end("2026-10-03T10:10:20Z", "sub-2")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:10:20Z", "sub-2")))
         .unwrap();
     assert_ne!(first.id, second.id);
     assert_eq!(second.duration_seconds, 20.0);
 
     // Other meta records, with or without an origin, stay ignored.
     let mut ignored = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    ignored.consume(&record(user_with(
+    ignored.consume_settled(&record(user_with(
         "2026-10-03T10:00:00Z",
         "meta",
         json!({ "isMeta": true, "origin": { "kind": "task-notification" } }),
     )));
-    ignored.consume(&record(user_with(
+    ignored.consume_settled(&record(user_with(
         "2026-10-03T10:00:01Z",
         "meta-2",
         json!({ "isMeta": true }),
     )));
     assert!(ignored
-        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
         .is_none());
 
     // A non-meta record with a background origin is activity only in a subagent file: it
     // neither starts a turn after a terminal record nor continues or discards an active one.
     let mut background = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    background.consume(&record(claude_user(
+    background.consume_settled(&record(claude_user(
         "2026-10-03T10:00:00Z",
         "task-1",
         json!("task"),
     )));
     assert!(background
-        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
         .is_some());
-    background.consume(&record(user_with(
+    background.consume_settled(&record(user_with(
         "2026-10-03T10:05:00Z",
         "note-1",
         json!({ "origin": { "kind": "task-notification" } }),
     )));
     assert!(background
-        .consume(&record(assistant_end("2026-10-03T10:05:10Z", "sub-2")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:05:10Z", "sub-2")))
         .is_none());
     let mut mid = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    mid.consume(&record(claude_user(
+    mid.consume_settled(&record(claude_user(
         "2026-10-03T10:00:00Z",
         "task-1",
         json!("task"),
     )));
-    mid.consume(&record(assistant(
+    mid.consume_settled(&record(assistant(
         "2026-10-03T10:00:10Z",
         "sub-1",
         "tool_use",
         5,
     )));
-    mid.consume(&record(user_with(
+    mid.consume_settled(&record(user_with(
         "2026-10-03T10:00:20Z",
         "note-1",
         json!({ "origin": { "kind": "task-notification" } }),
     )));
     let found = mid
-        .consume(&record(assistant_end("2026-10-03T10:00:30Z", "sub-2")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:00:30Z", "sub-2")))
         .unwrap();
     assert_eq!(found.duration_seconds, 30.0);
     // Human origin is an ordinary prompt in a subagent file.
     let mut human = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    human.consume(&record(user_with(
+    human.consume_settled(&record(user_with(
         "2026-10-03T10:00:00Z",
         "task-1",
         json!({ "origin": { "kind": "human" } }),
     )));
     assert!(human
-        .consume(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:00:10Z", "sub-1")))
         .is_some());
 
     // A follow-up within 30 minutes of active work continues the same turn (v2 rules).
     let mut continued = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
-    continued.consume(&record(claude_user(
+    continued.consume_settled(&record(claude_user(
         "2026-10-03T10:00:00Z",
         "task-1",
         json!("task"),
     )));
-    continued.consume(&record(assistant(
+    continued.consume_settled(&record(assistant(
         "2026-10-03T10:00:10Z",
         "sub-1",
         "tool_use",
         5,
     )));
-    continued.consume(&record(user_with(
+    continued.consume_settled(&record(user_with(
         "2026-10-03T10:00:20Z",
         "follow-up",
         json!({ "isMeta": true, "origin": { "kind": "coordinator" } }),
     )));
     let found = continued
-        .consume(&record(assistant_end("2026-10-03T10:00:30Z", "sub-2")))
+        .consume_settled(&record(assistant_end("2026-10-03T10:00:30Z", "sub-2")))
         .unwrap();
     assert_eq!(found.duration_seconds, 30.0);
 }
@@ -2687,45 +2759,45 @@ fn claude_parser_started_mid_file_waits_for_a_turn_boundary() {
     // Terminal assistant boundary: the partial turn is skipped, the next full turn is measured.
     let mut tail = claude_parser();
     tail.begin_mid_file();
-    tail.consume(&claude_user("2026-10-03T10:00:00Z", "partial", json!("go")));
+    tail.consume_settled(&claude_user("2026-10-03T10:00:00Z", "partial", json!("go")));
     assert!(tail
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "partial-end"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "partial-end"))
         .is_none());
-    tail.consume(&claude_user("2026-10-03T10:01:00Z", "full", json!("go")));
+    tail.consume_settled(&claude_user("2026-10-03T10:01:00Z", "full", json!("go")));
     let found = tail
-        .consume(&assistant_end("2026-10-03T10:01:10Z", "full-end"))
+        .consume_settled(&assistant_end("2026-10-03T10:01:10Z", "full-end"))
         .unwrap();
     assert_eq!(found.duration_seconds, 10.0);
 
     // A prompt without a null parentUuid cannot synchronise, even after a notification.
     let mut unsynced = claude_parser();
     unsynced.begin_mid_file();
-    unsynced.consume(&user_with(
+    unsynced.consume_settled(&user_with(
         "2026-10-03T10:00:00Z",
         "mid",
         json!({ "parentUuid": "previous-record" }),
     ));
     assert!(unsynced
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "mid-end"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "mid-end"))
         .is_none());
 
     // A conversation's first prompt (parentUuid null) is a boundary and starts a turn.
     let mut first = claude_parser();
     first.begin_mid_file();
-    first.consume(&user_with(
+    first.consume_settled(&user_with(
         "2026-10-03T10:00:00Z",
         "first",
         json!({ "parentUuid": null }),
     ));
     assert!(first
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "first-end"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "first-end"))
         .is_some());
 
     // A parser reading from the start never waits.
     let mut archive = claude_parser();
-    archive.consume(&claude_user("2026-10-03T10:00:00Z", "full", json!("go")));
+    archive.consume_settled(&claude_user("2026-10-03T10:00:00Z", "full", json!("go")));
     assert!(archive
-        .consume(&assistant_end("2026-10-03T10:00:10Z", "full-end"))
+        .consume_settled(&assistant_end("2026-10-03T10:00:10Z", "full-end"))
         .is_some());
 }
 
@@ -2738,7 +2810,12 @@ fn recent_tail_reader_synchronizes_claude_transcripts_but_archive_reads_everythi
         "header",
         json!({ "parentUuid": null }),
     )]);
-    contents.extend_from_slice(&jsonl(&[assistant("2026-10-03T09:00:05Z", "head-1", "tool_use", 3)]));
+    contents.extend_from_slice(&jsonl(&[assistant(
+        "2026-10-03T09:00:05Z",
+        "head-1",
+        "tool_use",
+        3,
+    )]));
     for _ in 0..4_000 {
         contents.extend_from_slice(b"{\"type\":\"ignored_event\",\"padding\":\"0123456789012345678901234567890123456789012345678901234567890123456789\"}\n");
     }
@@ -2753,18 +2830,30 @@ fn recent_tail_reader_synchronizes_claude_transcripts_but_archive_reads_everythi
     let poll_all = |mut reader: crate::reader::IncrementalReader| {
         let mut found = Vec::new();
         for _ in 0..8 {
-            found.extend(reader.poll(8 * 1_048_576).unwrap());
+            found.extend(
+                reader
+                    .poll(8 * 1_048_576, time("2026-10-03T11:00:00Z"))
+                    .unwrap(),
+            );
         }
         found
     };
     let tail = poll_all(crate::reader::IncrementalReader::recent_tail_claude(
         path.clone(),
     ));
-    assert_eq!(tail.len(), 1, "partial turn skipped, next full turn measured");
+    assert_eq!(
+        tail.len(),
+        1,
+        "partial turn skipped, next full turn measured"
+    );
     assert_eq!(tail[0].duration_seconds, 10.0);
 
     let archive = poll_all(crate::reader::IncrementalReader::beginning_claude(path));
-    assert_eq!(archive.len(), 2, "reading from the start keeps every complete turn");
+    assert_eq!(
+        archive.len(),
+        2,
+        "reading from the start keeps every complete turn"
+    );
 }
 
 #[test]
@@ -2808,4 +2897,1591 @@ fn codex_parser_requires_the_observed_turn_start() {
     let found = feed(&mut archive, true).unwrap();
     assert_eq!(found.model.as_deref(), Some("gpt-test"));
     assert_eq!(found.output_tokens, 50);
+}
+
+// --- Response speed (response-v1) -----------------------------------------------------------
+
+fn tool_result(at: &str, id: &str) -> Vec<u8> {
+    claude_user(
+        at,
+        id,
+        json!([{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]),
+    )
+}
+
+fn model_message(at: &str, id: &str, model: &str, stop: &str, tokens: i64) -> Vec<u8> {
+    claude_message(
+        "assistant",
+        "assistant",
+        at,
+        id,
+        model,
+        stop,
+        tokens,
+        json!([]),
+    )
+}
+
+#[test]
+fn claude_tool_loop_responses_start_at_the_latest_user_record() {
+    let mut parser = claude_parser();
+    parser.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume_settled(&assistant("2026-10-03T10:00:05Z", "msg-a", "tool_use", 300));
+    parser.consume_settled(&tool_result("2026-10-03T10:00:20Z", "result-a"));
+    parser.consume_settled(&assistant("2026-10-03T10:00:28Z", "msg-b", "tool_use", 400));
+    parser.consume_settled(&tool_result("2026-10-03T10:01:00Z", "result-b"));
+    let turn = parser
+        .consume_settled(&assistant("2026-10-03T10:01:10Z", "msg-c", "end_turn", 600))
+        .unwrap();
+    // 5 s, 8 s and 10 s requests: each response runs from its trigger to its last record.
+    assert_eq!(turn.output_tokens, 1_300);
+    assert_eq!(turn.response_output_tokens, Some(1_300));
+    assert_eq!(turn.response_duration_seconds, Some(23.0));
+    assert_eq!(turn.response_count, Some(3));
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 3);
+    assert_eq!(
+        live.iter().map(|r| r.duration_seconds).collect::<Vec<_>>(),
+        [5.0, 8.0, 10.0]
+    );
+    assert_eq!(live[0].speed(), 60.0);
+    assert_eq!(live[2].completed_at, time("2026-10-03T10:01:10Z"));
+    assert_eq!(live[0].model.as_deref(), Some("claude-model"));
+    assert_eq!(live[0].client, CLAUDE_CLIENT);
+    assert_eq!(live[0].source_kind.as_deref(), Some("primary"));
+    assert_eq!(live[0].metric_version, CLAUDE_METRIC_VERSION);
+    assert_eq!(live[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(live[0].provider.as_deref(), Some("unknown"));
+    let ids: HashSet<_> = live.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(ids.len(), 3);
+    assert!(parser.take_responses().is_empty());
+}
+
+#[test]
+fn claude_response_ends_at_the_last_record_of_a_multi_block_message() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    // Thinking, text and tool-use blocks of one API response are separate records.
+    parser.consume(&assistant("2026-10-03T10:00:03Z", "msg-a", "tool_use", 2));
+    parser.consume(&assistant("2026-10-03T10:00:08Z", "msg-a", "tool_use", 120));
+    parser.consume(&assistant("2026-10-03T10:00:12Z", "msg-a", "tool_use", 400));
+    assert!(
+        parser.take_responses().is_empty(),
+        "the response is still open"
+    );
+    // The next request's first record shows the response is over.
+    parser.consume(&tool_result("2026-10-03T10:00:30Z", "result"));
+    parser.consume(&assistant("2026-10-03T10:00:35Z", "msg-b", "tool_use", 50));
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].duration_seconds, 12.0);
+    assert_eq!(live[0].output_tokens, 400);
+}
+
+#[test]
+fn claude_meta_and_notification_records_are_request_triggers() {
+    let mut parser = claude_parser();
+    parser.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume_settled(&assistant("2026-10-03T10:00:05Z", "msg-a", "tool_use", 300));
+    parser.consume_settled(&user_with(
+        "2026-10-03T10:00:30Z",
+        "note",
+        json!({"origin": {"kind": "task-notification"}}),
+    ));
+    parser.consume_settled(&user_with(
+        "2026-10-03T10:00:31Z",
+        "meta",
+        json!({"isMeta": true}),
+    ));
+    let turn = parser
+        .consume_settled(&assistant("2026-10-03T10:00:36Z", "msg-b", "end_turn", 500))
+        .unwrap();
+    let live = parser.take_responses();
+    assert_eq!(live[1].duration_seconds, 5.0);
+    assert_eq!(turn.response_duration_seconds, Some(10.0));
+}
+
+#[test]
+fn claude_responses_below_the_floor_over_the_cap_or_synthetic_never_qualify() {
+    let mut parser = claude_parser();
+    parser.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume_settled(&assistant("2026-10-03T10:00:05Z", "short", "tool_use", 199));
+    parser.consume_settled(&tool_result("2026-10-03T10:00:10Z", "r1"));
+    // Exactly 600 s qualifies; one more second does not.
+    parser.consume_settled(&assistant("2026-10-03T10:10:10Z", "edge", "tool_use", 200));
+    parser.consume_settled(&tool_result("2026-10-03T10:10:20Z", "r2"));
+    parser.consume_settled(&assistant("2026-10-03T10:20:21Z", "slow", "tool_use", 900));
+    parser.consume_settled(&tool_result("2026-10-03T10:20:30Z", "r3"));
+    parser.consume_settled(&model_message(
+        "2026-10-03T10:20:34Z",
+        "synthetic",
+        "<synthetic>",
+        "tool_use",
+        900,
+    ));
+    parser.consume_settled(&tool_result("2026-10-03T10:20:40Z", "r4"));
+    let live: Vec<_> = parser.take_responses();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].output_tokens, 200);
+    assert_eq!(live[0].duration_seconds, 600.0);
+
+    // A turn without any qualifying response reports no response fields.
+    let mut quiet = claude_parser();
+    quiet.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    let turn = quiet
+        .consume_settled(&assistant("2026-10-03T10:00:05Z", "tiny", "end_turn", 100))
+        .unwrap();
+    assert_eq!(turn.response_output_tokens, None);
+    assert_eq!(turn.response_duration_seconds, None);
+    assert_eq!(turn.response_count, None);
+}
+
+#[test]
+fn claude_discarded_turns_report_no_response_fields() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&assistant("2026-10-03T10:00:05Z", "msg-a", "tool_use", 300));
+    parser.consume(&claude_user(
+        "2026-10-03T10:00:09Z",
+        "stop",
+        json!("[Request interrupted by user]"),
+    ));
+    assert!(parser
+        .consume(&assistant("2026-10-03T10:00:15Z", "msg-b", "end_turn", 500))
+        .is_none());
+
+    // A synthetic message invalidates the whole turn.
+    let mut synthetic = claude_parser();
+    synthetic.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    synthetic.consume(&assistant("2026-10-03T10:00:05Z", "msg-a", "tool_use", 300));
+    synthetic.consume(&tool_result("2026-10-03T10:00:08Z", "r"));
+    synthetic.consume(&model_message(
+        "2026-10-03T10:00:12Z",
+        "fake",
+        "<synthetic>",
+        "tool_use",
+        50,
+    ));
+    synthetic.consume(&tool_result("2026-10-03T10:00:14Z", "r2"));
+    assert!(synthetic
+        .consume(&assistant("2026-10-03T10:00:20Z", "msg-c", "end_turn", 500))
+        .is_none());
+}
+
+#[test]
+fn claude_responses_need_an_observed_trigger() {
+    let mut parser = claude_parser();
+    // A reader that joined mid-file sees an assistant record before any user record.
+    parser.consume(&assistant(
+        "2026-10-03T10:00:05Z",
+        "orphan",
+        "tool_use",
+        300,
+    ));
+    parser.consume(&tool_result("2026-10-03T10:00:08Z", "r"));
+    assert!(parser.take_responses().is_empty());
+    parser.consume(&assistant("2026-10-03T10:00:14Z", "next", "tool_use", 300));
+    parser.consume(&tool_result("2026-10-03T10:00:20Z", "r2"));
+    parser.flush_pending(time("2026-10-03T10:00:21Z"), true);
+    assert_eq!(parser.take_responses().len(), 1);
+}
+
+#[test]
+fn claude_subagent_responses_are_labelled_and_identified_apart() {
+    let session = "11111111-2222-4333-8444-555555555555";
+    let agent = "a1b2c3d4e5f60718";
+    let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    parser.consume_settled(&as_subagent(
+        claude_user("2026-10-03T10:00:00Z", "task", json!("task")),
+        session,
+        agent,
+    ));
+    let turn = parser
+        .consume_settled(&as_subagent(
+            assistant("2026-10-03T10:00:04Z", "sub-1", "end_turn", 400),
+            session,
+            agent,
+        ))
+        .unwrap();
+    assert_eq!(turn.metric_version, CLAUDE_SUBAGENT_METRIC_VERSION);
+    assert_eq!(turn.response_count, Some(1));
+    let live = parser.take_responses();
+    assert_eq!(live[0].source_kind.as_deref(), Some("subagent"));
+    assert_eq!(live[0].speed(), 100.0);
+}
+
+#[test]
+fn claude_bedrock_region_comes_from_the_inference_profile_prefix() {
+    let run = |model: &str, message_id: &str| {
+        let mut parser = claude_parser();
+        parser.consume_settled(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+        parser
+            .consume_settled(&model_message(
+                "2026-10-03T10:00:05Z",
+                message_id,
+                model,
+                "end_turn",
+                300,
+            ))
+            .unwrap()
+    };
+    let bedrock_id = "msg_bdrk_01ABCDEFGHIJKL";
+    let eu = run("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", bedrock_id);
+    assert_eq!(eu.provider.as_deref(), Some("amazon-bedrock"));
+    assert_eq!(eu.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+    assert_eq!(eu.provider_region.as_deref(), Some("eu"));
+    assert_eq!(
+        run(
+            "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            bedrock_id
+        )
+        .provider_region
+        .as_deref(),
+        Some("us-gov")
+    );
+    assert_eq!(
+        run("global.anthropic.claude-opus-4-6-v1", bedrock_id)
+            .provider_region
+            .as_deref(),
+        Some("global")
+    );
+    // No prefix, or a prefix outside the allowlist, is an unknown region.
+    for model in [
+        "anthropic.claude-3-haiku-20240307-v1:0",
+        "xx.anthropic.claude-3-haiku-20240307-v1:0",
+    ] {
+        assert_eq!(
+            run(model, bedrock_id).provider_region.as_deref(),
+            Some("unknown")
+        );
+    }
+    // Other routes carry no region, even when the model id has a prefix.
+    assert_eq!(
+        run("claude-sonnet-4-5", "msg_vrtx_01ABCDEFGHIJKL").provider_region,
+        None
+    );
+    assert_eq!(
+        run("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "plain-id").provider_region,
+        None
+    );
+}
+
+// --- Codex responses ---
+
+fn codex_line(kind: &str, payload: Value, at: &str) -> Vec<u8> {
+    event(kind, payload, at)
+}
+
+fn codex_item(payload: Value, at: &str) -> Vec<u8> {
+    codex_line("response_item", payload, at)
+}
+
+fn codex_usage(at: &str, response: &str, response_tokens: i64, turn_tokens: i64) -> Vec<u8> {
+    codex_line(
+        "token_usage_record",
+        json!({
+            "turn_id": "turn-1",
+            "response_id": response,
+            "usage": {"output_tokens": response_tokens, "reasoning_output_tokens": 0},
+            "turn_token_usage": {"output_tokens": turn_tokens, "reasoning_output_tokens": 0}
+        }),
+        at,
+    )
+}
+
+fn codex_rollout() -> Vec<Vec<u8>> {
+    vec![
+        codex_line(
+            "session_meta",
+            json!({"id": "session-1", "cli_version": "0.159.2", "source": "cli", "model_provider": "openai"}),
+            "2026-10-03T10:00:00.000Z",
+        ),
+        codex_line(
+            "event_msg",
+            json!({"type": "task_started", "turn_id": "turn-1"}),
+            "2026-10-03T10:00:00.000Z",
+        ),
+        codex_line(
+            "turn_context",
+            json!({"turn_id": "turn-1", "model": "gpt-test", "effort": "high"}),
+            "2026-10-03T10:00:00.100Z",
+        ),
+        // Developer context after the user message neither triggers nor responds.
+        codex_item(
+            json!({"type": "message", "role": "user"}),
+            "2026-10-03T10:00:00.200Z",
+        ),
+        codex_item(
+            json!({"type": "message", "role": "developer"}),
+            "2026-10-03T10:00:00.300Z",
+        ),
+        // Response 1: 300 tokens from the user message (0.2 s) to its usage record (4.2 s).
+        codex_item(json!({"type": "reasoning"}), "2026-10-03T10:00:02.000Z"),
+        codex_item(json!({"type": "function_call"}), "2026-10-03T10:00:03.000Z"),
+        codex_usage("2026-10-03T10:00:04.200Z", "resp-1", 300, 300),
+        // Response 2: 150 tokens (too short), triggered by the tool output.
+        codex_item(
+            json!({"type": "function_call_output"}),
+            "2026-10-03T10:00:10.000Z",
+        ),
+        codex_item(json!({"type": "reasoning"}), "2026-10-03T10:00:11.000Z"),
+        codex_usage("2026-10-03T10:00:12.000Z", "resp-2", 150, 450),
+        // Response 3: 250 tokens from the next tool output (20 s) to 25 s.
+        codex_item(
+            json!({"type": "custom_tool_call_output"}),
+            "2026-10-03T10:00:20.000Z",
+        ),
+        codex_item(
+            json!({"type": "message", "role": "assistant"}),
+            "2026-10-03T10:00:24.000Z",
+        ),
+        codex_usage("2026-10-03T10:00:25.000Z", "resp-3", 250, 700),
+        codex_line(
+            "event_msg",
+            json!({"type": "task_complete", "turn_id": "turn-1", "duration_ms": 25000, "time_to_first_token_ms": 900}),
+            "2026-10-03T10:00:25.100Z",
+        ),
+    ]
+}
+
+#[test]
+fn codex_responses_use_the_per_response_usage_between_trigger_and_usage_record() {
+    let mut parser = crate::parser::CodexEventParser::new("file".into());
+    let mut turns = Vec::new();
+    for line in codex_rollout() {
+        turns.extend(parser.consume(&line));
+    }
+    assert_eq!(turns.len(), 1);
+    let turn = &turns[0];
+    // The turn keeps its cumulative total; the response fields count only qualifying ones.
+    assert_eq!(turn.output_tokens, 700);
+    assert_eq!(turn.response_output_tokens, Some(550));
+    assert!((turn.response_duration_seconds.unwrap() - 9.0).abs() < 1e-9);
+    assert_eq!(turn.response_count, Some(2));
+    assert_eq!(turn.parser_version, "codex-rollout-v2");
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0].output_tokens, 300);
+    assert!((live[0].duration_seconds - 4.0).abs() < 1e-9);
+    assert_eq!(live[0].completed_at, time("2026-10-03T10:00:04.200Z"));
+    assert_eq!(live[0].model.as_deref(), Some("gpt-test"));
+    assert_eq!(live[0].provider.as_deref(), Some("openai"));
+    assert_eq!(live[0].client, "codex");
+    assert_eq!(live[0].source_kind.as_deref(), Some("primary"));
+    assert_eq!(live[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(live[1].output_tokens, 250);
+    assert!((live[1].duration_seconds - 5.0).abs() < 1e-9);
+}
+
+#[test]
+fn codex_responses_skip_duplicates_agent_sessions_and_unobserved_starts() {
+    let mut parser = crate::parser::CodexEventParser::new("file".into());
+    for line in codex_rollout().into_iter().take(8) {
+        parser.consume(&line);
+    }
+    // A repeated usage record for the same response id must not count twice.
+    parser.consume(&codex_usage("2026-10-03T10:00:04.300Z", "resp-1", 300, 300));
+    assert_eq!(parser.take_responses().len(), 1);
+
+    // Agent sessions never contribute.
+    let mut agent = crate::parser::CodexEventParser::new("file".into());
+    agent.consume(&codex_line(
+        "session_meta",
+        json!({"id": "agent", "parent_thread_id": "parent", "source": "cli"}),
+        "2026-10-03T10:00:00Z",
+    ));
+    for line in codex_rollout().into_iter().skip(1) {
+        agent.consume(&line);
+    }
+    assert!(agent.take_responses().is_empty());
+
+    // Usage whose trigger was never observed (a reader that joined mid-turn) is not timed.
+    let mut midway = crate::parser::CodexEventParser::new("file".into());
+    midway.consume(&codex_item(
+        json!({"type": "reasoning"}),
+        "2026-10-03T10:00:02.000Z",
+    ));
+    midway.consume(&codex_usage("2026-10-03T10:00:04.200Z", "resp-1", 300, 300));
+    assert!(midway.take_responses().is_empty());
+}
+
+#[test]
+fn codex_turns_without_qualifying_responses_report_none() {
+    let mut parser = crate::parser::CodexEventParser::new("file".into());
+    let mut turn = None;
+    for line in [
+        codex_line(
+            "event_msg",
+            json!({"type": "task_started", "turn_id": "turn-1"}),
+            "2026-10-03T10:00:00Z",
+        ),
+        codex_item(json!({"type": "reasoning"}), "2026-10-03T10:00:01Z"),
+        codex_usage("2026-10-03T10:00:02Z", "resp-1", 50, 50),
+        codex_line(
+            "event_msg",
+            json!({"type": "task_complete", "turn_id": "turn-1", "duration_ms": 2000}),
+            "2026-10-03T10:00:02.100Z",
+        ),
+    ] {
+        turn = turn.or(parser.consume(&line));
+    }
+    let turn = turn.unwrap();
+    assert_eq!(turn.response_output_tokens, None);
+    assert_eq!(turn.response_duration_seconds, None);
+    assert_eq!(turn.response_count, None);
+}
+
+// --- Live stream plumbing ---
+
+fn live_response(
+    id: &str,
+    at: &str,
+    model: &str,
+    tokens: i64,
+    seconds: f64,
+) -> crate::ResponseMetric {
+    crate::ResponseMetric {
+        id: id.into(),
+        completed_at: time(at),
+        model: Some(model.into()),
+        provider: Some("anthropic".into()),
+        client: CLAUDE_CLIENT.into(),
+        source_kind: Some("primary".into()),
+        metric_version: "response-v1".into(),
+        reasoning_effort: None,
+        output_tokens: tokens,
+        duration_seconds: seconds,
+    }
+}
+
+#[test]
+fn live_stream_keeps_new_qualifying_unique_responses_in_a_bounded_buffer() {
+    let started = time("2026-10-03T10:00:00Z");
+    let now = time("2026-10-03T12:00:00Z");
+    let mut live = crate::LiveResponses::new(started);
+    assert!(live.push(
+        vec![
+            live_response("before-launch", "2026-10-03T09:59:59Z", "m", 300, 3.0),
+            live_response("short", "2026-10-03T10:30:00Z", "m", 100, 1.0),
+            live_response("slow", "2026-10-03T10:30:00Z", "m", 300, 601.0),
+            live_response("future", "2026-10-03T13:00:00Z", "m", 300, 3.0),
+            live_response("ok", "2026-10-03T10:31:00Z", "m", 300, 3.0),
+            live_response("ok", "2026-10-03T10:31:00Z", "m", 300, 3.0),
+        ],
+        now,
+    ));
+    assert_eq!(live.len(), 1);
+    assert!(!live.push(
+        vec![live_response("ok", "2026-10-03T10:31:00Z", "m", 300, 3.0)],
+        now
+    ));
+
+    let many: Vec<_> = (0..250)
+        .map(|index| {
+            live_response(
+                &format!("r{index}"),
+                "2026-10-03T11:00:00Z",
+                "m",
+                300,
+                3.0 + index as f64 / 1000.0,
+            )
+        })
+        .collect();
+    live.push(many, now);
+    assert_eq!(live.len(), crate::LIVE_CAPACITY);
+    // Evicted ids can come back; retained ones cannot be added twice.
+    assert!(!live.push(
+        vec![live_response(
+            "r249",
+            "2026-10-03T11:00:00Z",
+            "m",
+            300,
+            3.249
+        )],
+        now
+    ));
+}
+
+#[test]
+fn live_value_is_the_median_of_the_last_five_responses_within_ten_minutes() {
+    let started = time("2026-10-03T10:00:00Z");
+    let now = time("2026-10-03T10:20:00Z");
+    let mut live = crate::LiveResponses::new(started);
+    // Speeds 10..60 tok/s, one per minute; only the newest five count.
+    let responses: Vec<_> = (1..=6)
+        .map(|index| {
+            live_response(
+                &format!("r{index}"),
+                &format!("2026-10-03T10:{:02}:00Z", 10 + index),
+                "model-a",
+                300,
+                300.0 / (index as f64 * 10.0),
+            )
+        })
+        .collect();
+    live.push(responses, now);
+    let scope = crate::LiveScope {
+        model: Some("model-a".into()),
+        provider: Some("anthropic".into()),
+        client: None,
+    };
+    let value = live.value(now, &scope).unwrap();
+    assert_eq!(value.count, 5);
+    assert_eq!(value.speed, 40.0);
+    assert_eq!(value.last_at, time("2026-10-03T10:16:00Z"));
+    // Only responses of the last ten minutes: 10:16 is the last, so 10:26 sees none.
+    assert!(live.value(time("2026-10-03T10:26:01Z"), &scope).is_none());
+    // Four responses in the window give their median (average of the middle pair).
+    let four = live.value(time("2026-10-03T10:24:00Z"), &scope).unwrap();
+    assert_eq!(four.count, 3);
+    // Other models and tools do not count.
+    let other = crate::LiveScope {
+        model: Some("model-b".into()),
+        ..scope.clone()
+    };
+    assert!(live.value(now, &other).is_none());
+    let tool = crate::LiveScope {
+        client: Some("codex".into()),
+        ..scope
+    };
+    assert!(live.value(now, &tool).is_none());
+}
+
+#[test]
+fn live_value_averages_the_middle_pair_of_an_even_count() {
+    let mut live = crate::LiveResponses::new(time("2026-10-03T10:00:00Z"));
+    let now = time("2026-10-03T10:10:00Z");
+    live.push(
+        vec![
+            live_response("a", "2026-10-03T10:08:00Z", "m", 300, 10.0),
+            live_response("b", "2026-10-03T10:09:00Z", "m", 600, 10.0),
+        ],
+        now,
+    );
+    let scope = crate::LiveScope {
+        model: Some("m".into()),
+        provider: Some("anthropic".into()),
+        client: None,
+    };
+    assert_eq!(live.value(now, &scope).unwrap().speed, 45.0);
+}
+
+#[test]
+fn monitor_live_responses_come_only_from_the_recent_tail_never_history_replay() {
+    let temp = TestDir::new();
+    let projects = temp.path().join("projects").join("project");
+    fs::create_dir_all(&projects).unwrap();
+    let path = projects.join("session.jsonl");
+    let mut lines = Vec::new();
+    let padding = "x".repeat(2_000);
+    let turn = |lines: &mut Vec<Vec<u8>>, prefix: &str, start: &str, end: &str| {
+        lines.push(claude_user(start, &format!("{prefix}-human"), json!("go")));
+        lines.push(assistant(end, &format!("{prefix}-answer"), "end_turn", 500));
+    };
+    // The first turn's records sit before the 256 KiB tail window.
+    turn(
+        &mut lines,
+        "old",
+        "2026-10-03T10:00:00Z",
+        "2026-10-03T10:00:05Z",
+    );
+    for index in 0..200 {
+        lines.push(
+            serde_json::to_vec(&json!({
+                "type": "summary",
+                "timestamp": "2026-10-03T10:01:00Z",
+                "isSidechain": false,
+                "userType": "external",
+                "note": format!("{index}{padding}")
+            }))
+            .unwrap(),
+        );
+    }
+    // The newest turn follows a sync boundary the tail reader can recognise.
+    lines.push(claude_user(
+        "2026-10-03T10:10:00Z",
+        "new-human",
+        json!("go"),
+    ));
+    lines.push(assistant(
+        "2026-10-03T10:10:06Z",
+        "new-answer",
+        "tool_use",
+        600,
+    ));
+    lines.push(tool_result("2026-10-03T10:10:08Z", "new-result"));
+    lines.push(assistant(
+        "2026-10-03T10:10:12Z",
+        "new-final",
+        "end_turn",
+        400,
+    ));
+    fs::write(&path, jsonl(&lines)).unwrap();
+    assert!(fs::metadata(&path).unwrap().len() > Monitor::RECENT_TAIL_BYTES);
+
+    let now = time("2026-10-03T10:11:00Z");
+    let mut monitor = Monitor::new_claude(temp.path().join("projects"));
+    let mut live = Vec::new();
+    for _ in 0..8 {
+        monitor.poll(now).unwrap();
+        live.extend(monitor.take_live_responses());
+    }
+    // The tail reader starts mid-file without the prompt; it reports the answers it can time.
+    let tokens: Vec<i64> = live.iter().map(|response| response.output_tokens).collect();
+    assert!(!tokens.is_empty());
+    assert!(live
+        .iter()
+        .all(|response| response.completed_at >= time("2026-10-03T10:10:00Z")));
+    assert!(live.iter().all(|response| response.id.len() == 64));
+}
+
+// --- Auto selector ---
+
+fn at(minutes: i64) -> DateTime<Utc> {
+    time("2026-10-03T10:00:00Z") + Duration::minutes(minutes)
+}
+
+fn live_for(model: &str, client: &str, minutes: i64, tokens: i64) -> crate::ResponseMetric {
+    let mut response = live_response(
+        &format!("{model}-{client}-{minutes}-{tokens}"),
+        "2026-10-03T10:00:00Z",
+        model,
+        tokens,
+        tokens as f64 / 50.0,
+    );
+    response.completed_at = at(minutes);
+    response.client = client.into();
+    response.provider = Some(
+        if client == "codex" {
+            "openai"
+        } else {
+            "anthropic"
+        }
+        .into(),
+    );
+    response
+}
+
+fn key(model: &str, provider: &str) -> crate::ModelKey {
+    crate::ModelKey {
+        model: Some(model.into()),
+        provider: Some(provider.into()),
+    }
+}
+
+#[test]
+fn auto_selector_adopts_the_busiest_model_then_resists_flapping() {
+    let mut selector = crate::AutoSelector::new();
+    let mut live = vec![live_for("claude-a", "claude-code", 1, 600)];
+    assert_eq!(
+        selector.update(at(1), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    // A challenger that is busier for less than two minutes does not take over.
+    live.push(live_for("gpt-b", "codex", 2, 2_000));
+    assert_eq!(
+        selector.update(at(2), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    assert_eq!(
+        selector.update(at(3), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    // Leading continuously for two minutes: takeover.
+    assert_eq!(
+        selector.update(at(4), &live, None),
+        Some(&key("gpt-b", "openai"))
+    );
+}
+
+#[test]
+fn auto_selector_restarts_the_lead_timer_when_the_leader_changes() {
+    let mut selector = crate::AutoSelector::new();
+    let mut live = vec![live_for("claude-a", "claude-code", 1, 3_000)];
+    selector.update(at(1), &live, None);
+    live.push(live_for("gpt-b", "codex", 2, 4_000));
+    selector.update(at(2), &live, None);
+    // Model A becomes the leader again before B completed two minutes.
+    live.push(live_for("claude-a", "claude-code", 3, 5_000));
+    assert_eq!(
+        selector.update(at(3), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    // B leading anew starts a fresh two minute timer.
+    live.push(live_for("gpt-b", "codex", 5, 9_000));
+    assert_eq!(
+        selector.update(at(5), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    assert_eq!(
+        selector.update(at(6), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    assert_eq!(
+        selector.update(at(7), &live, None),
+        Some(&key("gpt-b", "openai"))
+    );
+}
+
+#[test]
+fn auto_selector_switches_at_once_when_the_active_model_went_quiet() {
+    let mut selector = crate::AutoSelector::new();
+    let mut live = vec![live_for("claude-a", "claude-code", 0, 600)];
+    selector.update(at(1), &live, None);
+    live.push(live_for("gpt-b", "codex", 9, 300));
+    // A's only response left the ten minute window: B takes over without waiting.
+    assert_eq!(
+        selector.update(at(10), &live, None),
+        Some(&key("gpt-b", "openai"))
+    );
+}
+
+#[test]
+fn auto_selector_falls_back_when_nothing_is_live() {
+    let mut selector = crate::AutoSelector::new();
+    let live = vec![live_for("claude-a", "claude-code", 0, 600)];
+    assert!(selector.update(at(1), &live, None).is_some());
+    assert!(selector.update(at(11), &live, None).is_none());
+    assert!(selector.active().is_none());
+
+    let mut older = metric("older", at(-120));
+    older.model = Some("with-responses".into());
+    older.response_count = Some(2);
+    let mut newest = metric("newest", at(-10));
+    newest.model = Some("newest-without".into());
+    let turns = vec![newest.clone(), older.clone()];
+    assert_eq!(
+        crate::fallback_model(&turns, None)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("with-responses")
+    );
+    older.response_count = None;
+    assert_eq!(
+        crate::fallback_model(&[newest, older], None)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("newest-without")
+    );
+    assert!(crate::fallback_model(&[], None).is_none());
+}
+
+#[test]
+fn auto_selector_within_a_coding_tool_ignores_other_tools() {
+    let mut selector = crate::AutoSelector::new();
+    let live = vec![
+        live_for("claude-a", "claude-code", 1, 600),
+        live_for("gpt-b", "codex", 1, 9_000),
+    ];
+    assert_eq!(
+        selector.update(at(2), &live, Some("claude-code")),
+        Some(&key("claude-a", "anthropic"))
+    );
+    assert_eq!(
+        selector.update(at(2), &live, Some("codex")),
+        Some(&key("gpt-b", "openai"))
+    );
+    assert_eq!(
+        selector.update(at(2), &live, None),
+        Some(&key("gpt-b", "openai"))
+    );
+    assert!(selector.update(at(2), &live, Some("grok-build")).is_none());
+}
+
+#[test]
+fn a_tiny_codex_check_in_never_wins_over_an_active_claude_session() {
+    let mut selector = crate::AutoSelector::new();
+    let mut live = Vec::new();
+    for minute in 0..30 {
+        // Claude answers every minute; Codex pings every five minutes with 118 tokens.
+        live.push(live_for("claude-a", "claude-code", minute, 400));
+        if minute % 5 == 0 {
+            live.push(live_for("gpt-b", "codex", minute, 118));
+        }
+        assert_eq!(
+            selector.update(at(minute), &live, None),
+            Some(&key("claude-a", "anthropic")),
+            "minute {minute}"
+        );
+    }
+    // Even a stream made only of check-ins is not a candidate.
+    let mut quiet = crate::AutoSelector::new();
+    assert!(quiet
+        .update(at(1), &[live_for("gpt-b", "codex", 1, 118)], None)
+        .is_none());
+}
+
+#[test]
+fn selection_modes_parse_and_legacy_latest_means_auto() {
+    use crate::SelectionMode;
+    assert_eq!(
+        SelectionMode::parse("latest"),
+        Some(SelectionMode::Auto { tool: None })
+    );
+    assert_eq!(SelectionMode::normalize("latest").as_deref(), Some("auto"));
+    assert_eq!(
+        SelectionMode::parse("auto:claude-code"),
+        Some(SelectionMode::Auto {
+            tool: Some("claude-code".into())
+        })
+    );
+    assert_eq!(SelectionMode::parse("auto:unknown-tool"), None);
+    assert_eq!(SelectionMode::parse("all"), Some(SelectionMode::All));
+    assert_eq!(
+        SelectionMode::parse(r#"model:["gpt-5","openai"]"#),
+        Some(SelectionMode::Model(key("gpt-5", "openai")))
+    );
+    assert_eq!(SelectionMode::parse(r#"model:["gpt-5"]"#), None);
+    let cohort =
+        json!(["codex", null, "p", "m", "gpt", "openai", null, "high", "primary"]).to_string();
+    assert_eq!(
+        SelectionMode::parse(&cohort),
+        Some(SelectionMode::Cohort(cohort.clone()))
+    );
+    // The pre-0.1.14 eight-part cohort identity is no longer a valid selection.
+    let legacy = json!(["codex", null, "p", "m", "gpt", "openai", "high", "primary"]).to_string();
+    assert_eq!(SelectionMode::parse(&legacy), None);
+    assert_eq!(SelectionMode::parse("junk"), None);
+}
+
+#[test]
+fn provider_badge_follows_explicit_provider_then_model_family() {
+    use crate::ProviderBadge::*;
+    assert_eq!(
+        crate::ProviderBadge::of(Some("claude-opus-5-5"), None),
+        Anthropic
+    );
+    assert_eq!(
+        crate::ProviderBadge::of(Some("claude-opus-5-5"), Some("amazon-bedrock")),
+        Anthropic
+    );
+    assert_eq!(
+        crate::ProviderBadge::of(Some("claude-sonnet-4-5"), Some("google-vertex")),
+        Anthropic
+    );
+    assert_eq!(crate::ProviderBadge::of(None, Some("anthropic")), Anthropic);
+    assert_eq!(
+        crate::ProviderBadge::of(Some("gpt-5-codex"), Some("unknown")),
+        OpenAi
+    );
+    assert_eq!(crate::ProviderBadge::of(Some("o3-mini"), None), OpenAi);
+    assert_eq!(crate::ProviderBadge::of(Some("o4"), None), OpenAi);
+    assert_eq!(
+        crate::ProviderBadge::of(Some("my-codex-model"), None),
+        OpenAi
+    );
+    assert_eq!(crate::ProviderBadge::of(None, Some("openai")), OpenAi);
+    assert_eq!(crate::ProviderBadge::of(Some("grok-4"), None), Xai);
+    assert_eq!(crate::ProviderBadge::of(Some("anything"), Some("xai")), Xai);
+    assert_eq!(crate::ProviderBadge::of(Some("omega"), None), Unknown);
+    assert_eq!(crate::ProviderBadge::of(None, None), Unknown);
+    assert_eq!(
+        crate::ProviderBadge::of(Some("mystery"), Some("amazon-bedrock")),
+        Unknown
+    );
+    assert_eq!(Anthropic.letter(), Some('A'));
+    assert_eq!(Unknown.letter(), None);
+}
+
+// --- Sharing validation ---
+
+fn response_metric(tokens: i64, seconds: f64, count: i64) -> TurnMetric {
+    let mut turn = TurnMetric::new_observed(
+        "local-digest".into(),
+        time("2026-10-03T10:03:47Z"),
+        Some("claude-opus-4-1".into()),
+        1_000,
+        100.0,
+        Some("1.2.3".into()),
+        None,
+        Some("primary".into()),
+        Some("anthropic".into()),
+        None,
+        CLAUDE_CLIENT,
+        CLAUDE_PARSER_VERSION,
+        CLAUDE_METRIC_VERSION,
+    );
+    turn.response_output_tokens = Some(tokens);
+    turn.response_duration_seconds = Some(seconds);
+    turn.response_count = Some(count);
+    turn
+}
+
+#[test]
+fn shared_samples_carry_valid_response_fields_and_drop_inconsistent_ones() {
+    let share = |turn: &TurnMetric| crate::SharedSample::from_metric(turn, Uuid::new_v4()).unwrap();
+    let good = share(&response_metric(900, 20.0, 3));
+    assert_eq!(good.response_output_tokens, Some(900));
+    assert_eq!(good.response_duration_ms, Some(20_000.0));
+    assert_eq!(good.response_count, Some(3));
+    let json = serde_json::to_value(&good).unwrap();
+    assert_eq!(json["responseOutputTokens"], 900);
+    // Exactly 200 tokens per counted response is the inclusive boundary.
+    assert_eq!(
+        share(&response_metric(1_000, 20.0, 5)).response_count,
+        Some(5)
+    );
+
+    // Every rejection removes all three fields but keeps the sample itself.
+    for turn in [
+        response_metric(1_001, 20.0, 1), // more tokens than the turn
+        response_metric(900, 101.0, 1),  // longer than the turn
+        response_metric(900, 0.4, 1),    // above 2000 tok/s
+        response_metric(900, 20.0, 0),   // no responses
+        response_metric(999, 20.0, 5),   // fewer than 200 tokens per counted response
+    ] {
+        let sample = share(&turn);
+        assert_eq!(
+            (
+                sample.response_output_tokens,
+                sample.response_duration_ms,
+                sample.response_count
+            ),
+            (None, None, None)
+        );
+        let json = serde_json::to_value(&sample).unwrap();
+        assert!(json["responseOutputTokens"].is_null());
+        assert!(json["responseDurationMs"].is_null());
+        assert!(json["responseCount"].is_null());
+    }
+    // Exactly 2000 tok/s and a response as long as the turn are still valid.
+    assert!(share(&response_metric(1_000, 0.5, 1))
+        .response_count
+        .is_some());
+    assert!(share(&response_metric(900, 100.0, 1))
+        .response_count
+        .is_some());
+    // Turns that never had response data serialise explicit nulls.
+    let mut none = response_metric(900, 20.0, 1);
+    none.response_output_tokens = None;
+    none.response_duration_seconds = None;
+    none.response_count = None;
+    let json = serde_json::to_value(share(&none)).unwrap();
+    assert!(json.as_object().unwrap().contains_key("responseCount"));
+    assert!(json["responseCount"].is_null());
+}
+
+#[test]
+fn shared_provider_region_is_present_only_for_bedrock() {
+    let mut bedrock = response_metric(900, 20.0, 1);
+    bedrock.provider = Some("amazon-bedrock".into());
+    bedrock.provider_region = Some("apac".into());
+    let json =
+        serde_json::to_value(crate::SharedSample::from_metric(&bedrock, Uuid::new_v4()).unwrap())
+            .unwrap();
+    assert_eq!(json["providerRegion"], "apac");
+    bedrock.provider_region = Some("mars".into());
+    let json =
+        serde_json::to_value(crate::SharedSample::from_metric(&bedrock, Uuid::new_v4()).unwrap())
+            .unwrap();
+    assert_eq!(json["providerRegion"], "unknown");
+    bedrock.provider_region = None;
+    let json =
+        serde_json::to_value(crate::SharedSample::from_metric(&bedrock, Uuid::new_v4()).unwrap())
+            .unwrap();
+    assert_eq!(json["providerRegion"], "unknown");
+    let mut anthropic = response_metric(900, 20.0, 1);
+    anthropic.provider_region = Some("us".into());
+    let json =
+        serde_json::to_value(crate::SharedSample::from_metric(&anthropic, Uuid::new_v4()).unwrap())
+            .unwrap();
+    assert!(json["providerRegion"].is_null());
+    assert!(json.as_object().unwrap().contains_key("providerRegion"));
+}
+
+#[test]
+fn history_without_response_fields_still_decodes() {
+    let mut legacy = serde_json::to_value(metric("legacy", time("2026-10-03T10:00:00Z"))).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    for key in [
+        "responseOutputTokens",
+        "responseDurationSeconds",
+        "responseCount",
+        "providerRegion",
+    ] {
+        object.remove(key);
+    }
+    let restored: TurnMetric = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.response_count, None);
+    assert_eq!(restored.provider_region, None);
+}
+
+fn block_message(at: &str, id: &str, stop: &str, tokens: i64, block: &str) -> Vec<u8> {
+    claude_message(
+        "assistant",
+        "assistant",
+        at,
+        id,
+        "claude-model",
+        stop,
+        tokens,
+        json!([{ "type": block }]),
+    )
+}
+
+#[test]
+fn claude_final_answer_that_starts_with_thinking_ends_at_its_last_record() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    // Thinking arrives first with a partial usage snapshot; the text, and the final usage, follow.
+    assert!(parser
+        .consume(&block_message(
+            "2026-10-03T10:00:05Z",
+            "msg-a",
+            "end_turn",
+            2,
+            "thinking"
+        ))
+        .is_none());
+    assert!(parser
+        .consume(&block_message(
+            "2026-10-03T10:00:17Z",
+            "msg-a",
+            "end_turn",
+            1_700,
+            "text"
+        ))
+        .is_none());
+    // The text block does not end in thinking, so the end of the read closes the turn.
+    let turn = parser
+        .flush_pending(time("2026-10-03T10:00:18Z"), false)
+        .unwrap();
+    assert_eq!(turn.output_tokens, 1_700);
+    assert_eq!(turn.duration_seconds, 17.0);
+    assert_eq!(turn.completed_at, time("2026-10-03T10:00:17Z"));
+    assert_eq!(turn.response_output_tokens, Some(1_700));
+    assert_eq!(turn.response_duration_seconds, Some(17.0));
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].speed(), 100.0);
+}
+
+#[test]
+fn claude_turn_waiting_for_its_text_closes_at_the_next_record_or_when_flushed() {
+    // The next prompt closes the turn with what was written.
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&block_message(
+        "2026-10-03T10:00:05Z",
+        "msg-a",
+        "end_turn",
+        300,
+        "thinking",
+    ));
+    let closed = parser
+        .consume(&claude_user("2026-10-03T10:05:00Z", "next", json!("again")))
+        .unwrap();
+    assert_eq!(closed.output_tokens, 300);
+    assert_eq!(closed.completed_at, time("2026-10-03T10:00:05Z"));
+
+    // At the end of the readable file the pending turn is emitted without waiting.
+    let mut flushed = claude_parser();
+    flushed.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    flushed.consume(&block_message(
+        "2026-10-03T10:00:05Z",
+        "msg-a",
+        "end_turn",
+        300,
+        "thinking",
+    ));
+    assert!(flushed
+        .flush_pending(time("2026-10-03T10:00:06Z"), true)
+        .is_some());
+    assert!(flushed
+        .flush_pending(time("2026-10-03T10:00:06Z"), true)
+        .is_none());
+}
+
+#[test]
+fn claude_flush_completes_a_tool_call_response_but_never_a_thinking_one() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&block_message(
+        "2026-10-03T10:00:03Z",
+        "msg-a",
+        "tool_use",
+        120,
+        "thinking",
+    ));
+    assert!(parser
+        .flush_pending(time("2026-10-03T10:00:04Z"), false)
+        .is_none());
+    assert!(
+        parser.take_responses().is_empty(),
+        "thinking may be followed by more blocks"
+    );
+    parser.consume(&block_message(
+        "2026-10-03T10:00:08Z",
+        "msg-a",
+        "tool_use",
+        420,
+        "tool_use",
+    ));
+    parser.flush_pending(time("2026-10-03T10:00:09Z"), false);
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].output_tokens, 420);
+    assert_eq!(live[0].duration_seconds, 8.0);
+}
+
+#[test]
+fn claude_terminal_turn_is_pending_and_same_message_records_update_it() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    // Text, then more text of the same message: each record updates usage and the end.
+    assert!(parser
+        .consume(&block_message(
+            "2026-10-03T10:00:05Z",
+            "msg-a",
+            "end_turn",
+            300,
+            "text"
+        ))
+        .is_none());
+    assert!(parser
+        .consume(&block_message(
+            "2026-10-03T10:00:09Z",
+            "msg-a",
+            "end_turn",
+            500,
+            "text"
+        ))
+        .is_none());
+    // A record of another message closes the turn with the latest usage and end.
+    let turn = parser
+        .consume(&block_message(
+            "2026-10-03T10:00:20Z",
+            "msg-b",
+            "tool_use",
+            50,
+            "tool_use",
+        ))
+        .unwrap();
+    assert_eq!(turn.output_tokens, 500);
+    assert_eq!(turn.completed_at, time("2026-10-03T10:00:09Z"));
+    assert_eq!(turn.response_duration_seconds, Some(9.0));
+}
+
+#[test]
+fn claude_pending_thinking_turn_survives_a_poll_boundary_until_text_or_the_timeout() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&block_message(
+        "2026-10-03T10:00:05Z",
+        "msg-a",
+        "end_turn",
+        2,
+        "thinking",
+    ));
+    // The end of a poll does not cut off a message that still ends in thinking.
+    assert!(parser
+        .flush_pending(time("2026-10-03T10:00:10Z"), false)
+        .is_none());
+    assert!(parser
+        .flush_pending(time("2026-10-03T10:00:34Z"), false)
+        .is_none());
+    // The text arrives in a later poll and updates the same turn.
+    parser.consume(&block_message(
+        "2026-10-03T10:00:30Z",
+        "msg-a",
+        "end_turn",
+        900,
+        "text",
+    ));
+    let turn = parser
+        .flush_pending(time("2026-10-03T10:00:31Z"), false)
+        .unwrap();
+    assert_eq!(turn.output_tokens, 900);
+    assert_eq!(turn.completed_at, time("2026-10-03T10:00:30Z"));
+
+    // Without text it closes once it has waited 30 s...
+    let mut waiting = claude_parser();
+    waiting.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    waiting.consume(&block_message(
+        "2026-10-03T10:00:05Z",
+        "msg-a",
+        "end_turn",
+        400,
+        "thinking",
+    ));
+    assert!(waiting
+        .flush_pending(time("2026-10-03T10:00:34Z"), false)
+        .is_none());
+    let timed_out = waiting
+        .flush_pending(time("2026-10-03T10:00:35Z"), false)
+        .unwrap();
+    assert_eq!(timed_out.output_tokens, 400);
+    // ...and a complete (archive) read closes it at once.
+    let mut archive = claude_parser();
+    archive.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    archive.consume(&block_message(
+        "2026-10-03T10:00:05Z",
+        "msg-a",
+        "end_turn",
+        400,
+        "thinking",
+    ));
+    assert!(archive
+        .flush_pending(time("2026-10-03T10:00:06Z"), true)
+        .is_some());
+}
+
+#[test]
+fn claude_replay_reader_closes_a_pending_terminal_turn_at_the_end_of_the_file() {
+    let temp = TestDir::new();
+    let path = temp.path().join("session.jsonl");
+    fs::write(
+        &path,
+        jsonl(&[
+            claude_user("2026-10-03T10:00:00Z", "human", json!("go")),
+            block_message("2026-10-03T10:00:05Z", "msg-a", "end_turn", 300, "thinking"),
+        ]),
+    )
+    .unwrap();
+    let now = time("2026-10-03T10:00:06Z");
+    // A live tail reader holds the thinking-last turn; a replay reader emits it.
+    let mut live = crate::reader::IncrementalReader::recent_tail_claude(path.clone());
+    let mut replay = crate::reader::IncrementalReader::beginning_claude(path);
+    let (mut live_turns, mut replay_turns) = (Vec::new(), Vec::new());
+    for _ in 0..4 {
+        live_turns.extend(live.poll(1_048_576, now).unwrap());
+        replay_turns.extend(replay.poll(1_048_576, now).unwrap());
+    }
+    assert!(live_turns.is_empty());
+    assert_eq!(replay_turns.len(), 1);
+    // The live reader gives up waiting after 30 s.
+    assert_eq!(
+        live.poll(1_048_576, now + Duration::seconds(30))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn grok_joins_zero_based_event_turns_to_one_based_usage_ledger_turns() {
+    // Verbatim shape of a real Grok Build 1.0.x session: events number turns
+    // from 0, the usage ledger from 1.
+    let events = |session_id: &str| {
+        let mut events = Vec::new();
+        for (number, start, end) in [
+            (0, "2026-09-28T09:50:38.177Z", "2026-09-28T09:52:30.218Z"),
+            (1, "2026-09-28T09:52:42.306Z", "2026-09-28T09:53:25.953Z"),
+        ] {
+            events.push(grok_event(
+                "turn_started",
+                json!({
+                    "ts":start,
+                    "session_id":session_id,
+                    "turn_number":number,
+                    "session_relationship":"primary"
+                }),
+            ));
+            // Real turn_ended events carry no schema_version.
+            events.push(
+                serde_json::to_vec(&json!({
+                    "type":"turn_ended",
+                    "ts":end,
+                    "outcome":"completed"
+                }))
+                .unwrap(),
+            );
+        }
+        events
+    };
+    let ledger = |session_id: &str, numbers: [u64; 2]| {
+        json!({
+            "sessionId":session_id,
+            "updatedAt":"2026-09-28T09:53:25.968126+00:00",
+            "session":{},
+            "turns":[
+                {
+                    "turnNumber":numbers[0],
+                    "endedAt":"2026-09-28T09:52:30.232828+00:00",
+                    "outputTokens":4897,
+                    "turnCount":1,
+                    "modelUsage":{"grok-4.7-build":{"outputTokens":4897}}
+                },
+                {
+                    "turnNumber":numbers[1],
+                    "endedAt":"2026-09-28T09:53:25.968126+00:00",
+                    "outputTokens":2505,
+                    "turnCount":1,
+                    "modelUsage":{"grok-4.7-build":{"outputTokens":2505}}
+                }
+            ]
+        })
+    };
+    let poll_all = |root: &Path| {
+        let mut monitor = GrokMonitor::new(root.to_path_buf());
+        let mut found = Vec::new();
+        for _ in 0..4 {
+            found.extend(monitor.poll(time("2026-09-28T09:54:00Z")).unwrap());
+        }
+        found
+    };
+
+    let temp = TestDir::new();
+    write_grok_session(
+        temp.path(),
+        "real",
+        &events("real"),
+        &ledger("real", [1, 2]),
+    );
+    let mut found = poll_all(temp.path());
+    found.sort_by_key(|row| row.completed_at);
+    assert_eq!(found.len(), 2);
+    assert_eq!(
+        found
+            .iter()
+            .map(|row| row.output_tokens)
+            .collect::<Vec<_>>(),
+        [4897, 2505]
+    );
+    assert!((found[0].duration_seconds - 112.041).abs() < 0.001);
+    assert!((found[1].duration_seconds - 43.647).abs() < 0.001);
+    assert!((found[0].turn_throughput_tps - 4897.0 / 112.041).abs() < 0.001);
+    assert!((found[1].turn_throughput_tps - 2505.0 / 43.647).abs() < 0.001);
+    assert!(found
+        .iter()
+        .all(|row| row.model.as_deref() == Some("grok-4.7-build")));
+
+    // A ledger numbered like the events (the old assumption) matches no turn.
+    let wrong = TestDir::new();
+    write_grok_session(
+        wrong.path(),
+        "wrong",
+        &events("wrong"),
+        &ledger("wrong", [0, 1]),
+    );
+    assert!(poll_all(wrong.path()).is_empty());
+}
+
+/// Runs one Grok turn through the monitor. `backfilled` writes the finished session before
+/// the first poll; otherwise the turn is appended after the monitor caught up with an empty log.
+fn grok_effort_records(
+    summary_at_start: Option<&str>,
+    summary_at_emit: Option<&str>,
+    backfilled: bool,
+) -> Vec<crate::TurnMetric> {
+    let temp = TestDir::new();
+    let session = temp.path().join("effort");
+    let write_summary = |effort: Option<&str>| {
+        let path = session.join("summary.json");
+        match effort {
+            Some(value) => fs::write(
+                path,
+                serde_json::to_vec(&json!({
+                    "reasoning_effort":value,
+                    "current_model_id":"grok-4",
+                    "context_window":256000
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+            None => {
+                let _ = fs::remove_file(path);
+            }
+        }
+    };
+    let events = grok_turn_events("effort", 0, "completed");
+    let usage = grok_usage("effort", 0, 50);
+    let now = time("2026-10-03T10:00:06Z");
+    let mut monitor = GrokMonitor::new(temp.path().to_path_buf());
+    let mut found = Vec::new();
+    if backfilled {
+        write_grok_session(temp.path(), "effort", &events, &usage);
+        write_summary(summary_at_start);
+        for _ in 0..2 {
+            found.extend(monitor.poll(now).unwrap());
+        }
+    } else {
+        write_grok_session(
+            temp.path(),
+            "effort",
+            &[],
+            &json!({"sessionId":"effort","updatedAt":"2026-10-03T10:00:05Z","turns":[]}),
+        );
+        write_summary(summary_at_start);
+        for _ in 0..2 {
+            assert!(monitor.poll(now).unwrap().is_empty());
+        }
+        fs::write(session.join("events.jsonl"), jsonl(&events[..1])).unwrap();
+        for _ in 0..2 {
+            assert!(monitor.poll(now).unwrap().is_empty());
+        }
+        fs::write(session.join("events.jsonl"), jsonl(&events)).unwrap();
+        fs::write(
+            session.join("usage.json"),
+            serde_json::to_vec(&usage).unwrap(),
+        )
+        .unwrap();
+    }
+    write_summary(summary_at_emit);
+    for _ in 0..3 {
+        found.extend(monitor.poll(now).unwrap());
+    }
+    found
+}
+
+#[test]
+fn grok_attributes_session_effort_only_when_observed_at_live_start_and_unchanged_at_emit() {
+    let live = grok_effort_records(Some("high"), Some("high"), false);
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].reasoning_effort.as_deref(), Some("high"));
+
+    let changed = grok_effort_records(Some("high"), Some("low"), false);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].reasoning_effort, None);
+
+    let backfilled = grok_effort_records(Some("high"), Some("high"), true);
+    assert_eq!(backfilled.len(), 1);
+    assert_eq!(backfilled[0].reasoning_effort, None);
+
+    let missing = grok_effort_records(None, None, false);
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].reasoning_effort, None);
+}
+
+fn with_parent(line: Vec<u8>, parent: &str) -> Vec<u8> {
+    with_fields(line, json!({ "parentUuid": parent }))
+}
+
+#[test]
+fn claude_response_starts_at_the_parent_record_of_its_first_assistant_record() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    // An attachment written just before the request is the real start.
+    parser.consume(&with_fields(
+        serde_json::to_vec(&json!({
+            "type": "attachment",
+            "timestamp": "2026-10-03T10:00:08Z",
+            "isSidechain": false,
+            "userType": "external"
+        }))
+        .unwrap(),
+        json!({ "uuid": "attachment-1" }),
+    ));
+    parser.consume(&with_parent(
+        assistant("2026-10-03T10:00:14Z", "msg-a", "tool_use", 600),
+        "attachment-1",
+    ));
+    // Later records of the same message keep the start.
+    parser.consume(&with_parent(
+        assistant("2026-10-03T10:00:18Z", "msg-a", "tool_use", 600),
+        "assistant-msg-a",
+    ));
+    parser.consume(&tool_result("2026-10-03T10:00:20Z", "result"));
+    parser.consume(&assistant("2026-10-03T10:00:30Z", "msg-b", "tool_use", 10));
+    let live = parser.take_responses();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].duration_seconds, 10.0);
+    assert_eq!(live[0].completed_at, time("2026-10-03T10:00:18Z"));
+}
+
+#[test]
+fn claude_notification_written_mid_response_does_not_move_its_start() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&assistant("2026-10-03T10:00:04Z", "msg-a", "tool_use", 800));
+    parser.consume(&user_with(
+        "2026-10-03T10:00:06Z",
+        "note",
+        json!({"origin": {"kind": "task-notification"}}),
+    ));
+    parser.consume(&user_with(
+        "2026-10-03T10:00:07Z",
+        "meta",
+        json!({"isMeta": true}),
+    ));
+    // The message continues after the notification and ends at its last record.
+    parser.consume(&assistant(
+        "2026-10-03T10:00:10Z",
+        "msg-a",
+        "tool_use",
+        1_000,
+    ));
+    let turn = parser
+        .consume_settled(&assistant("2026-10-03T10:00:30Z", "msg-b", "end_turn", 400))
+        .unwrap();
+    let live = parser.take_responses();
+    // Start stays the human prompt (the latest user record before the first record: 10:00:00).
+    assert_eq!(live[0].duration_seconds, 10.0);
+    assert_eq!(live[0].output_tokens, 1_000);
+    assert_eq!(turn.response_count, Some(2));
+}
+
+#[test]
+fn claude_missing_or_later_parent_falls_back_to_the_latest_user_record() {
+    let run = |parent: &str| {
+        let mut parser = claude_parser();
+        parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+        parser.consume(&tool_result("2026-10-03T10:00:03Z", "result"));
+        parser.consume(&with_parent(
+            assistant("2026-10-03T10:00:08Z", "msg-a", "tool_use", 500),
+            parent,
+        ));
+        parser.flush_pending(time("2026-10-03T10:00:09Z"), true);
+        parser.take_responses()
+    };
+    // Unknown parent: latest user record (10:00:03).
+    assert_eq!(run("never-seen")[0].duration_seconds, 5.0);
+    // A parent known but written after the response began cannot be its trigger.
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "human", json!("go")));
+    parser.consume(&with_fields(
+        serde_json::to_vec(&json!({
+            "type": "attachment",
+            "timestamp": "2026-10-03T10:00:20Z",
+            "isSidechain": false,
+            "userType": "external"
+        }))
+        .unwrap(),
+        json!({ "uuid": "late" }),
+    ));
+    parser.consume(&with_parent(
+        assistant("2026-10-03T10:00:08Z", "msg-a", "tool_use", 500),
+        "late",
+    ));
+    parser.flush_pending(time("2026-10-03T10:00:21Z"), true);
+    assert_eq!(parser.take_responses()[0].duration_seconds, 8.0);
+}
+
+#[test]
+fn claude_remembered_record_times_are_bounded_per_file() {
+    let mut parser = claude_parser();
+    parser.consume(&claude_user("2026-10-03T10:00:00Z", "first", json!("go")));
+    parser.consume(&tool_result("2026-10-03T10:00:04Z", "second"));
+    for index in 0..4_100 {
+        parser.consume(&with_fields(
+            serde_json::to_vec(&json!({
+                "type": "attachment",
+                "timestamp": "2026-10-03T10:00:01Z",
+                "isSidechain": false,
+                "userType": "external"
+            }))
+            .unwrap(),
+            json!({ "uuid": format!("filler-{index}") }),
+        ));
+    }
+    // The oldest record was forgotten, so its child falls back to the latest user record.
+    parser.consume(&with_parent(
+        assistant("2026-10-03T10:00:09Z", "msg-a", "tool_use", 500),
+        "first",
+    ));
+    parser.flush_pending(time("2026-10-03T10:00:10Z"), true);
+    assert_eq!(parser.take_responses()[0].duration_seconds, 5.0);
+
+    // Within the bound the same parent is still resolved.
+    let mut recent = claude_parser();
+    recent.consume(&claude_user("2026-10-03T10:00:00Z", "first", json!("go")));
+    recent.consume(&tool_result("2026-10-03T10:00:04Z", "second"));
+    recent.consume(&with_parent(
+        assistant("2026-10-03T10:00:09Z", "msg-a", "tool_use", 500),
+        "first",
+    ));
+    recent.flush_pending(time("2026-10-03T10:00:10Z"), true);
+    assert_eq!(recent.take_responses()[0].duration_seconds, 9.0);
 }

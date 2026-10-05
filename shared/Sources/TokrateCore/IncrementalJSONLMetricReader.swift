@@ -5,13 +5,30 @@ protocol JSONLMetricParser: Sendable {
     mutating func consume(line: Data) -> TurnMetric?
     mutating func reset(sourceIdentity: String)
     mutating func reconcile(snapshot: Data) -> [TurnMetric]
+    /// Called at the start of every poll, after any file replacement reset. `wasCaughtUp` is true when an
+    /// earlier poll had already consumed the file to its end, so the lines read now are newly written.
+    mutating func readWillBegin(wasCaughtUp: Bool)
+    /// The session-level reasoning effort currently recorded beside the event log, if any.
+    mutating func observeSessionEffort(_ effort: String?)
     /// Called when the reader starts at a recent tail offset inside the file rather than at byte 0.
     mutating func markStartedMidFile()
+    /// True while a complete record sequence waits for proof that no further record belongs to it.
+    var hasPendingWork: Bool { get }
+    /// Called at the end of every poll in which the reader is caught up with its file. `isFinal` is
+    /// true for archive reads, which close whatever they are holding at end of file.
+    mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric?
+    /// Qualifying responses completed since the last call (see `ResponseSpeed`).
+    mutating func drainCompletedResponses() -> [LiveResponse]
 }
 
 extension JSONLMetricParser {
     mutating func reconcile(snapshot: Data) -> [TurnMetric] { [] }
+    mutating func readWillBegin(wasCaughtUp: Bool) {}
+    mutating func observeSessionEffort(_ effort: String?) {}
     mutating func markStartedMidFile() {}
+    var hasPendingWork: Bool { false }
+    mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { nil }
+    mutating func drainCompletedResponses() -> [LiveResponse] { [] }
 }
 
 /// Incremental, bounded JSONL input for the additional local transcript formats.
@@ -25,6 +42,8 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
     static var maximumLineBytes: Int { JSONLFileReader.maximumLineBytes }
     private let url: URL
     private let startPosition: StartPosition
+    /// Archive reads end at a known end of file, so nothing more can extend a pending record.
+    private let isFinalRead: Bool
     private var parser: Parser
     private var offset: UInt64 = 0
     private var pending = Data()
@@ -33,16 +52,18 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
     private var tailInitializationPending: Bool
     private(set) var bytesReadLastPoll = 0
     private(set) var isCaughtUp = false
+    var hasPendingWork: Bool { parser.hasPendingWork }
 
-    init(url: URL, startPosition: StartPosition = .beginning) {
+    init(url: URL, startPosition: StartPosition = .beginning, isFinalRead: Bool = false) {
         self.url = url
         self.startPosition = startPosition
+        self.isFinalRead = isFinalRead
         parser = Parser(sourceIdentity: url.standardizedFileURL.path)
         tailInitializationPending = if case .recentTail = startPosition { true } else { false }
         fileNumber = Self.currentFileNumber(url)
     }
 
-    mutating func poll(maxBytes: Int) throws -> [TurnMetric] {
+    mutating func poll(maxBytes: Int, now: Date = .now) throws -> [TurnMetric] {
         bytesReadLastPoll = 0
         guard maxBytes > 0 else { return [] }
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -64,9 +85,10 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
             tailInitializationPending = false
         }
 
+        parser.readWillBegin(wasCaughtUp: isCaughtUp)
         guard size > offset else {
             isCaughtUp = true
-            return []
+            return parser.pollEnded(now: now, isFinal: isFinalRead).map { [$0] } ?? []
         }
         let count = Int(min(UInt64(maxBytes), size - offset))
         let handle = try FileHandle(forReadingFrom: url)
@@ -95,12 +117,19 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
             pending.removeAll(keepingCapacity: true)
             droppingLine = true
         }
+        if isCaughtUp, let closed = parser.pollEnded(now: now, isFinal: isFinalRead) { records.append(closed) }
         return records
     }
 
     mutating func reconcile(snapshot: Data) -> [TurnMetric] {
         parser.reconcile(snapshot: snapshot)
     }
+
+    mutating func observeSessionEffort(_ effort: String?) {
+        parser.observeSessionEffort(effort)
+    }
+
+    mutating func drainResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
 
     private mutating func resetForReplacement(size: UInt64) {
         offset = 0
@@ -142,6 +171,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     }
 
     private let root: URL
+    private let liveSince: Date
     private let includesFile: @Sendable (URL) -> Bool
     private var files: [String: WatchedFile] = [:]
     private var lastDiscovery = Date.distantPast
@@ -149,24 +179,33 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private(set) var rootIsAvailable = false
     private(set) var watchedFileCount = 0
 
-    init(root: URL, includesFile: @escaping @Sendable (URL) -> Bool = { $0.pathExtension.lowercased() == "jsonl" }) {
+    init(
+        root: URL,
+        liveSince: Date = .now,
+        includesFile: @escaping @Sendable (URL) -> Bool = { $0.pathExtension.lowercased() == "jsonl" }
+    ) {
         self.root = root
+        self.liveSince = liveSince
         self.includesFile = includesFile
     }
 
-    func poll(now: Date = .now) throws -> [TurnMetric] {
+    func poll(now: Date = .now) throws -> MonitorUpdate {
         if now.timeIntervalSince(lastDiscovery) >= 10 || files.isEmpty {
             try discoverFiles(now: now)
             lastDiscovery = now
         }
-        guard rootIsAvailable else { return [] }
+        guard rootIsAvailable else { return MonitorUpdate() }
 
         var result: [TurnMetric] = []
+        var responses: [String: LiveResponse] = [:]
+        func collect(_ completed: [LiveResponse]) {
+            for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
+        }
         var byteBudget = Self.maximumPollBytes
         var liveBudget = byteBudget * 3 / 4
         let liveKeys = files.keys.filter { key in
             guard let file = files[key] else { return false }
-            return !file.live.isCaughtUp || file.modifiedAt > file.liveServicedModification
+            return !file.live.isCaughtUp || file.modifiedAt > file.liveServicedModification || file.live.hasPendingWork
         }.sorted { left, right in
             let a = files[left]!.modifiedAt, b = files[right]!.modifiedAt
             return a == b ? left < right : a > b
@@ -174,7 +213,8 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         for key in liveKeys.prefix(24) {
             guard liveBudget > 0, var file = files[key] else { break }
             do {
-                let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget))
+                let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget), now: now)
+                collect(file.live.drainResponses())
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
                 let consumed = file.live.bytesReadLastPoll
                 liveBudget -= consumed
@@ -197,7 +237,8 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 let key = archiveKeys[(nextArchiveIndex + step) % archiveKeys.count]
                 guard var file = files[key], var archive = file.archive else { continue }
                 do {
-                    let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget))
+                    let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget), now: now)
+                    collect(archive.drainResponses())
                     result += historical
                     if !file.live.isCaughtUp {
                         for record in historical where file.archiveIDsWhileLiveCatchesUp.count < 8_192 {
@@ -215,7 +256,10 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
 
         var unique: [String: TurnMetric] = [:]
         for record in result { unique[record.id] = record }
-        return unique.values.sorted { $0.completedAt > $1.completedAt }
+        return MonitorUpdate(
+            metrics: unique.values.sorted { $0.completedAt > $1.completedAt },
+            responses: responses.values.sorted { $0.completedAt > $1.completedAt }
+        )
     }
 
     private func discoverFiles(now: Date) throws {
@@ -251,7 +295,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             } else {
                 files[key] = WatchedFile(
                     live: IncrementalJSONLMetricReader(url: candidate.url, startPosition: .recentTail(maximumBytes: Self.recentTailBytes)),
-                    archive: candidate.size > Self.recentTailBytes ? IncrementalJSONLMetricReader(url: candidate.url) : nil,
+                    archive: candidate.size > Self.recentTailBytes ? IncrementalJSONLMetricReader(url: candidate.url, isFinalRead: true) : nil,
                     modifiedAt: candidate.modified
                 )
             }

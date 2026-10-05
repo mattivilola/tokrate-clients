@@ -1,4 +1,5 @@
-import { communityId, type Metric } from "../metrics";
+import { communityId, type LiveResponse, type Metric } from "../metrics";
+import { parseSelection } from "../response";
 import type {
   Board,
   Bridge,
@@ -71,6 +72,8 @@ interface Series {
   spread: number;
   ttft: boolean;
   offset: number;
+  /** Response speed relative to the whole-turn speed; tools and waiting dilute the turn. */
+  responseFactor: number;
 }
 
 const SERIES: Series[] = [
@@ -79,7 +82,7 @@ const SERIES: Series[] = [
     client: "codex",
     effort: "high",
     provider: "openai",
-    parser: "codex-rollout-v1",
+    parser: "codex-rollout-v2",
     metricVersion: "turn-v1",
     sourceKind: "primary",
     everyMinutes: 47,
@@ -87,13 +90,14 @@ const SERIES: Series[] = [
     spread: 22,
     ttft: true,
     offset: 4,
+    responseFactor: 2.3,
   },
   {
     model: "Example model B",
     client: "codex",
     effort: "medium",
     provider: "openai",
-    parser: "codex-rollout-v1",
+    parser: "codex-rollout-v2",
     metricVersion: "turn-v1",
     sourceKind: "primary",
     everyMinutes: 83,
@@ -101,13 +105,14 @@ const SERIES: Series[] = [
     spread: 28,
     ttft: true,
     offset: 19,
+    responseFactor: 1.9,
   },
   {
     model: "Example Claude model",
     client: "claude-code",
     effort: "high",
     provider: "anthropic",
-    parser: "claude-transcript-v3",
+    parser: "claude-transcript-v4",
     metricVersion: "claude-observed-turn-v1",
     sourceKind: "primary",
     everyMinutes: 121,
@@ -115,13 +120,14 @@ const SERIES: Series[] = [
     spread: 20,
     ttft: false,
     offset: 33,
+    responseFactor: 2.1,
   },
   {
     model: "Example Claude model",
     client: "claude-code",
     effort: "high",
-    provider: "unknown",
-    parser: "claude-transcript-v3",
+    provider: "anthropic",
+    parser: "claude-transcript-v4",
     metricVersion: "claude-observed-subagent-turn-v1",
     sourceKind: "subagent",
     everyMinutes: 150,
@@ -129,6 +135,7 @@ const SERIES: Series[] = [
     spread: 14,
     ttft: false,
     offset: 52,
+    responseFactor: 3.0,
   },
 ];
 
@@ -146,6 +153,9 @@ export function previewRecords(now: number): Metric[] {
           Math.sin(i / 5 + index) * s.spread * 0.4,
       );
       const outputTokens = Math.round(250 + jitter * 900);
+      const responseCount = 2 + Math.floor(random() * 4);
+      const responseTokens = Math.round(outputTokens * (0.7 + random() * 0.25));
+      const responseTps = tps * s.responseFactor * (0.85 + random() * 0.3);
       records.push({
         id: `demo-${index}-${i}`,
         completedAt: new Date(
@@ -163,12 +173,67 @@ export function previewRecords(now: number): Metric[] {
         durationSeconds: outputTokens / tps,
         codexTTFTSeconds: s.ttft ? 1.2 + random() * 2.4 : null,
         turnThroughputTPS: tps,
+        responseOutputTokens: responseTokens,
+        responseDurationSeconds: responseTokens / responseTps,
+        responseCount,
       });
     }
   });
   return records.sort(
     (a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt),
   );
+}
+
+/** A few responses completed in the last minutes, newest model first in the burst. */
+export function previewLive(now: number): LiveResponse[] {
+  const response = (
+    id: string,
+    minutesAgo: number,
+    model: string,
+    client: string,
+    provider: string,
+    sourceKind: string,
+    tokens: number,
+    tps: number,
+  ): LiveResponse => ({
+    id,
+    completedAt: new Date(now - minutesAgo * MINUTE).toISOString(),
+    model,
+    provider,
+    client,
+    sourceKind,
+    metricVersion: "response-v1",
+    reasoningEffort: "high",
+    outputTokens: tokens,
+    durationSeconds: tokens / tps,
+  });
+  const claude = (id: string, minutesAgo: number, tokens: number, tps: number) =>
+    response(id, minutesAgo, "Example Claude model", "claude-code", "anthropic", "primary", tokens, tps);
+  return [
+    claude("live-1", 7.5, 640, 118),
+    claude("live-2", 5.2, 410, 126),
+    response("live-3", 4.1, "Example model A", "codex", "openai", "primary", 300, 58),
+    claude("live-4", 3.3, 880, 109),
+    claude("live-5", 1.6, 520, 121),
+    claude("live-6", 0.4, 760, 133),
+  ];
+}
+
+/** Dominant live model of the last ten minutes, restricted to one tool for `auto:<tool>`. */
+function previewActive(live: LiveResponse[], selection: string, now: number) {
+  const mode = parseSelection(selection);
+  if (mode.kind !== "auto") return null;
+  const tokens = new Map<string, { model: string | null; provider: string | null; tokens: number }>();
+  for (const r of live) {
+    if (now - Date.parse(r.completedAt) > 10 * MINUTE) continue;
+    if (mode.tool && r.client !== mode.tool) continue;
+    const key = `${r.model}|${r.provider}`;
+    const entry = tokens.get(key) ?? { model: r.model, provider: r.provider, tokens: 0 };
+    entry.tokens += r.outputTokens;
+    tokens.set(key, entry);
+  }
+  const best = [...tokens.values()].sort((a, b) => b.tokens - a.tokens)[0];
+  return best ? { model: best.model, provider: best.provider } : null;
 }
 
 const DEFAULT_ROOTS: Record<SourceId, string> = {
@@ -211,7 +276,8 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     sharing: params.scenario === "sharing",
     monitoring: true,
     showSpeed: true,
-    selection: params.view === "compare" ? "all" : "latest",
+    showProviderBadge: true,
+    selection: params.view === "compare" ? "all" : "auto",
     days: 1,
     root: "",
     claudeRoot: "",
@@ -238,9 +304,12 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     revision: 1,
     recordsChanged: true,
   };
+  const live = params.scenario === "empty" ? [] : previewLive(now);
   const read = (since: number | null): Snapshot => ({
     ...snap,
     sources: sources(),
+    live,
+    active: previewActive(live, snap.settings.selection, Date.now()),
     records: since === snap.revision ? [] : snap.records,
     recordsChanged: since !== snap.revision,
   });

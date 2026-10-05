@@ -14,6 +14,7 @@ struct HistoryView: View {
             records: store.records,
             range: range,
             selection: store.dashboardSelection,
+            activeModel: store.activeModel,
             now: now,
             clientFilter: store.clientFilter,
             providerFilter: store.providerFilter
@@ -22,10 +23,10 @@ struct HistoryView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 if store.sharingPreferences.isConsentDisclosureVisible {
-                    SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, latestCohort: store.latestCohort, compact: false, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
+                    SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, resolvedCohort: store.resolvedCohort, compact: false, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
                 }
                 HStack(alignment: .center, spacing: 10) {
-                    CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, latest: store.latestCohort)
+                    CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, clients: store.availableClients, resolved: store.resolvedCohort)
                     ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
                         .fixedSize()
                 }
@@ -34,13 +35,14 @@ struct HistoryView: View {
                         store.dashboardSelection = .cohort(cohort)
                     }
                 } else {
+                    let reading = snapshot.heroReading(live: store.liveSpeed, liveGroup: store.liveSpeed == nil ? nil : store.menuBarReadout.group)
                     HStack(alignment: .top, spacing: 18) {
                         ThroughputGaugeView(
-                            metric: snapshot.heroMetric,
+                            reading: reading,
                             compact: false,
-                            delta: snapshot.speedDelta,
+                            delta: snapshot.speedDelta(for: reading),
                             slowerThanUsual: snapshot.personalTrend?.status == .slower,
-                            groupMedian: snapshot.gaugeGroupMedian,
+                            groupMedian: reading.usesResponseSpeed ? snapshot.responseGaugeMedian : snapshot.turnGaugeMedian,
                             now: now
                         )
                         .frame(width: 360)
@@ -54,7 +56,7 @@ struct HistoryView: View {
                 SharingView(
                     preferences: store.sharingPreferences,
                     selection: store.dashboardSelection,
-                    latestCohort: store.latestCohort,
+                    resolvedCohort: store.resolvedCohort,
                     compact: false,
                     showToggle: !store.sharingPreferences.isConsentDisclosureVisible,
                     showConsentDisclosure: false,
@@ -103,7 +105,7 @@ struct HistoryView: View {
                     .font(DashboardStyle.Typography.largeTitle).tracking(-0.4)
                     .foregroundStyle(DashboardStyle.ink)
                     .accessibilityAddTraits(.isHeader)
-                Text("Turn speed · output tokens per whole-turn second")
+                Text("Response speed · output tokens per second while the model is responding")
                     .font(DashboardStyle.Typography.footnote)
                     .foregroundStyle(DashboardStyle.muted)
             }
@@ -158,12 +160,23 @@ struct HistoryView: View {
                     .help("Source-reported first-token wait when available; first-visible-text semantics are unverified.")
             }
             .width(min: 100)
+            TableColumn("Response speed") { record in
+                if let speed = record.responseSpeedTPS, let count = record.responseCount {
+                    Text("\(speed, specifier: "%.1f") tok/s · \(count)")
+                        .monospacedDigit()
+                        .help("\(count) \(count == 1 ? "response" : "responses"): \(ResponseSpeedCopy.definition)")
+                } else {
+                    Text("—").foregroundStyle(DashboardStyle.muted)
+                        .help("No response of at least 200 output tokens, or the source has no per-response timing.")
+                }
+            }
+            .width(min: 140)
             TableColumn("Turn speed") { record in
                 Text("\(record.turnThroughputTPS, specifier: "%.1f") tok/s")
                     .monospacedDigit()
                     .help(ModelCohort(record).measurement.title)
             }
-            .width(min: 120)
+            .width(min: 110)
         }
         .frame(height: 320)
         .clipShape(RoundedRectangle(cornerRadius: DashboardStyle.Radius.control, style: .continuous))
@@ -183,7 +196,7 @@ struct HistoryView: View {
                 .lineLimit(1)
                 .help(store.folderDescription)
             Spacer()
-            Text("Streaming speed unavailable · first-token semantics unverified")
+            Text("Response speed excludes tools and waiting · streaming speed unavailable · first-token semantics unverified")
                 .foregroundStyle(DashboardStyle.muted)
         }
         .font(DashboardStyle.Typography.footnote)

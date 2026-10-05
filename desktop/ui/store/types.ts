@@ -1,4 +1,4 @@
-import type { Metric } from "../metrics";
+import type { LiveResponse, Metric } from "../metrics";
 
 export type SourceId = "codex" | "claude-code" | "grok-build";
 
@@ -6,6 +6,9 @@ export interface Settings {
   sharing: boolean;
   monitoring: boolean;
   showSpeed: boolean;
+  /** Letter badge for the model's provider in the tray icon and the window. */
+  showProviderBadge: boolean;
+  /** `auto`, `auto:<tool>`, `all`, `model:[model,provider]` or a pinned nine-part cohort. */
   selection: string;
   days: number;
   root: string;
@@ -68,10 +71,17 @@ export interface Snapshot {
   recordsChanged: boolean;
   sources?: SourceStatus[];
   smoke?: boolean;
+  /** Qualifying responses completed since launch, oldest first (local only). */
+  live?: LiveResponse[];
+  /** The model an Auto selection follows while live responses exist; null otherwise. */
+  active?: { model: string | null; provider: string | null } | null;
 }
 
 export type SettingsPatch = Partial<
-  Pick<Settings, "sharing" | "monitoring" | "showSpeed" | "selection" | "days">
+  Pick<
+    Settings,
+    "sharing" | "monitoring" | "showSpeed" | "showProviderBadge" | "selection" | "days"
+  >
 >;
 
 export interface UpdatePreferences {
@@ -125,7 +135,9 @@ export type ProviderFilter =
   | "google-vertex"
   | "xai"
   | "unknown";
-export type ChartMetric = "throughput" | "ttft";
+export type ChartMetric = "response" | "throughput" | "ttft";
+/** Model lists rank by response speed or keep the per-measurement turn groups. */
+export type ModelsView = "response" | "turn";
 export type View = "home" | "settings";
 
 export interface UiState {
@@ -134,6 +146,7 @@ export interface UiState {
   providerFilter: ProviderFilter;
   chartMetric: ChartMetric;
   sort: "recent" | "throughput" | "ttft";
+  modelsView: ModelsView;
   /** 0 welcome, 1 sharing choice, 2 where to find Tokrate. */
   onboardingStep: 0 | 1 | 2;
   /** Section id to scroll to when Settings opens (for example the update banner's Details). */

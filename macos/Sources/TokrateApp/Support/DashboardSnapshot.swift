@@ -30,6 +30,20 @@ enum CohortComparisonSort: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which speed the model comparison ranks. Response speed is the primary metric.
+enum ComparisonMetric: String, CaseIterable, Identifiable {
+    case responseSpeed, turnSpeed
+    var id: String { rawValue }
+    var title: String { self == .responseSpeed ? "Response speed" : "Turn speed" }
+}
+
+/// Sorting for the response-speed model list.
+enum ResponseComparisonSort: String, CaseIterable, Identifiable {
+    case recent, faster
+    var id: String { rawValue }
+    var title: String { self == .recent ? "Most recent" : "Faster response speed" }
+}
+
 /// The exact local comparison dimensions. Missing fields stay distinct from explicit values.
 struct ModelCohort: Hashable, Identifiable, Sendable {
     let model: String?
@@ -39,13 +53,17 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     let client: String
     let parserVersion: String
     let metricVersion: String
+    /// Bedrock inference-profile region; nil for every other provider.
+    let providerRegion: String?
 
     init(
         model: String?, provider: String?, clientVersion: String?, reasoningEffort: String? = nil,
         client: String = TurnMetric.codexClient,
         parserVersion: String = TurnMetric.codexParserVersion,
-        metricVersion: String = TurnMetric.codexMetricVersion
+        metricVersion: String = TurnMetric.codexMetricVersion,
+        providerRegion: String? = nil
     ) {
+        self.providerRegion = providerRegion
         self.model = model
         self.provider = provider
         self.clientVersion = clientVersion
@@ -63,12 +81,16 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
             reasoningEffort: metric.reasoningEffort,
             client: metric.client,
             parserVersion: metric.parserVersion,
-            metricVersion: metric.metricVersion
+            metricVersion: metric.metricVersion,
+            providerRegion: metric.providerRegion
         )
     }
 
+    /// Local cohort identity. The region is appended only when present so existing persisted
+    /// selections (seven parts) keep restoring.
     var id: String {
-        [model, provider, clientVersion, parserVersion, metricVersion, reasoningEffort, client].map(Self.encode).joined(separator: ".")
+        let parts = [model, provider, clientVersion, parserVersion, metricVersion, reasoningEffort, client] + (providerRegion.map { [$0] } ?? [])
+        return parts.map(Self.encode).joined(separator: ".")
     }
 
     var displayModel: String { model ?? "Unknown model" }
@@ -84,6 +106,16 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         }
     }
     /// Display name for an inference provider value; unknown values are shown as recorded.
+    /// "us-gov" is shown as "US GovCloud", other regions in upper case ("EU", "APAC"), and "unknown" as is.
+    static func regionTitle(_ region: String) -> String {
+        switch region {
+        case "unknown": "region unknown"
+        case "global": "Global"
+        case "us-gov": "US GovCloud"
+        default: region.uppercased()
+        }
+    }
+
     static func providerTitle(_ provider: String?) -> String {
         switch provider {
         case nil, "unknown": "Unknown"
@@ -96,7 +128,8 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         }
     }
     var detailLabel: String {
-        [clientLabel, "parser \(parserVersion)", "metric \(metricVersion)", "provider \(Self.providerTitle(provider))", clientVersion.map { "version \($0)" } ?? "version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
+        [clientLabel, "parser \(parserVersion)", "metric \(metricVersion)",
+         "provider \(Self.providerTitle(provider))\(providerRegion.map { " (\(Self.regionTitle($0)))" } ?? "")", clientVersion.map { "version \($0)" } ?? "version unknown", "reasoning effort \(reasoningEffort ?? "unknown")"]
             .joined(separator: " · ")
     }
     var selectionLabel: String { "\(displayModel) · \(detailLabel)" }
@@ -126,7 +159,7 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
             self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort)
             return
         }
-        guard parts.count == 7,
+        guard parts.count == 7 || parts.count == 8,
               let model = Self.decode(parts[0]),
               let provider = Self.decode(parts[1]),
               let clientVersion = Self.decode(parts[2]),
@@ -134,7 +167,9 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
               let metricValue = Self.decode(parts[4]), let metricVersion = metricValue,
               let effort = Self.decode(parts[5]),
               let clientValue = Self.decode(parts[6]), let client = clientValue else { return nil }
-        self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort, client: client, parserVersion: parserVersion, metricVersion: metricVersion)
+        let region: String?? = parts.count == 8 ? Self.decode(parts[7]) : .some(nil)
+        guard let region else { return nil }
+        self.init(model: model, provider: provider, clientVersion: clientVersion, reasoningEffort: effort, client: client, parserVersion: parserVersion, metricVersion: metricVersion, providerRegion: region)
     }
 
     private static func encode(_ value: String?) -> String {
@@ -166,23 +201,32 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
 }
 
 enum DashboardSelection: Hashable, Sendable {
-    case latest
+    /// Follows the model that is most active right now (default).
+    case auto
+    /// Like `auto`, restricted to one coding tool.
+    case autoTool(String)
     case cohort(ModelCohort)
     case all
 
     static func restored(from value: String?) -> DashboardSelection {
-        guard let value else { return .latest }
-        if value == "latest" { return .latest }
+        guard let value else { return .auto }
+        // "latest" was the default before Auto existed.
+        if value == "auto" || value == "latest" { return .auto }
         if value == "all" { return .all }
+        if value.hasPrefix("auto:") {
+            let client = String(value.dropFirst("auto:".count))
+            return client.isEmpty ? .auto : .autoTool(client)
+        }
         guard value.hasPrefix("cohort:"), let cohort = ModelCohort(id: String(value.dropFirst("cohort:".count))) else {
-            return .latest
+            return .auto
         }
         return .cohort(cohort)
     }
 
     var persistenceValue: String {
         switch self {
-        case .latest: "latest"
+        case .auto: "auto"
+        case .autoTool(let client): "auto:\(client)"
         case .all: "all"
         case .cohort(let cohort): "cohort:\(cohort.id)"
         }
@@ -193,9 +237,24 @@ enum DashboardSelection: Hashable, Sendable {
         return false
     }
 
-    func displayLabel(latest: ModelCohort?) -> String {
+    var isAuto: Bool {
         switch self {
-        case .latest: latest.map { "Latest · \($0.selectionLabel)" } ?? "Latest completed model"
+        case .auto, .autoTool: true
+        default: false
+        }
+    }
+
+    /// The coding tool an Auto selection is restricted to.
+    var autoClient: String? {
+        if case .autoTool(let client) = self { return client }
+        return nil
+    }
+
+    func displayLabel(resolved: ModelCohort?) -> String {
+        switch self {
+        case .auto: resolved.map { "Auto (most active) · \($0.selectionLabel)" } ?? "Auto (most active)"
+        case .autoTool(let client):
+            "Auto within \(ModelCohort.clientTitle(client))" + (resolved.map { " · \($0.selectionLabel)" } ?? "")
         case .cohort(let cohort): cohort.selectionLabel
         case .all: "All models"
         }
@@ -223,8 +282,11 @@ struct MetricStats: Equatable, Sendable {
 }
 
 struct PeriodMetricStats: Equatable, Sendable {
+    /// Turn speed.
     let throughput: MetricStats
     let ttft: MetricStats
+    /// Per-turn response speed.
+    let response: MetricStats
 }
 
 struct LocalPeriodComparison: Equatable, Sendable {
@@ -235,28 +297,42 @@ struct LocalPeriodComparison: Equatable, Sendable {
     let currentRange: PeriodMetricStats
     let previousRange: PeriodMetricStats?
     let throughputChangePercent: Double?
+    let responseChangePercent: Double?
     let ttftChangePercent: Double?
 
-    init(records: [TurnMetric], range: DashboardRange, now: Date) {
-        func stats(from values: [TurnMetric]) -> PeriodMetricStats {
+    /// `records` are the selected cohort's turns (turn speed, first token); `responseRecords` the
+    /// selected model's turns across coding tools and source kinds (response speed).
+    init(records: [TurnMetric], responseRecords: [TurnMetric], range: DashboardRange, now: Date) {
+        func stats(from values: [TurnMetric], responses: [TurnMetric]) -> PeriodMetricStats {
             let throughput = values.filter { $0.outputTokens >= 20 && $0.turnThroughputTPS.isFinite && $0.turnThroughputTPS >= 0 }
             let ttft = values.compactMap(\.ttftSeconds).filter { $0.isFinite && $0 >= 0 }
             return PeriodMetricStats(
                 throughput: MetricStats(values: throughput.map(\.turnThroughputTPS)),
-                ttft: MetricStats(values: ttft)
+                ttft: MetricStats(values: ttft),
+                response: MetricStats(values: responses.compactMap(\.responseSpeedTPS))
+            )
+        }
+        func window(_ lower: TimeInterval, _ upper: TimeInterval) -> PeriodMetricStats {
+            let low = now.addingTimeInterval(-lower), high = now.addingTimeInterval(-upper)
+            return stats(
+                from: records.filter { $0.completedAt >= low && $0.completedAt <= high },
+                responses: responseRecords.filter { $0.completedAt >= low && $0.completedAt <= high }
             )
         }
 
         self.range = range
-        let recentStart = now.addingTimeInterval(-15 * 60)
+        recent15Minutes = window(15 * 60, 0)
+        last24Hours = window(86_400, 0)
         let dayStart = now.addingTimeInterval(-86_400)
         let previousDayStart = now.addingTimeInterval(-2 * 86_400)
-        recent15Minutes = stats(from: records.filter { $0.completedAt >= recentStart && $0.completedAt <= now })
-        last24Hours = stats(from: records.filter { $0.completedAt >= dayStart && $0.completedAt <= now })
-        previous24Hours = stats(from: records.filter { $0.completedAt >= previousDayStart && $0.completedAt < dayStart })
-        currentRange = range == .day ? last24Hours : stats(from: records)
+        previous24Hours = stats(
+            from: records.filter { $0.completedAt >= previousDayStart && $0.completedAt < dayStart },
+            responses: responseRecords.filter { $0.completedAt >= previousDayStart && $0.completedAt < dayStart }
+        )
+        currentRange = range == .day ? last24Hours : stats(from: records, responses: responseRecords)
         previousRange = range == .day ? previous24Hours : nil
         throughputChangePercent = Self.changePercent(current: last24Hours.throughput, previous: previous24Hours.throughput)
+        responseChangePercent = Self.changePercent(current: last24Hours.response, previous: previous24Hours.response)
         ttftChangePercent = Self.changePercent(current: last24Hours.ttft, previous: previous24Hours.ttft)
     }
 
@@ -277,13 +353,68 @@ struct PersonalTrend: Equatable, Sendable {
         case slower
     }
 
+    /// Which speed the slower-than-usual signal compares: response speed whenever the model has any
+    /// response data, whole-turn speed for sources that cannot provide it.
+    enum Basis: Equatable, Sendable { case response, turn }
+
     let status: Status
+    let basis: Basis
     let currentThroughput: MetricStats
     let baselineThroughput: MetricStats
+    let currentResponse: MetricStats
+    let baselineResponse: MetricStats
     let currentTTFT: MetricStats
     let baselineTTFT: MetricStats
-    let comparesThroughput: Bool
+    /// True when the compared speed (per `basis`) met the evidence requirements.
+    let comparesSpeed: Bool
     let comparesTTFT: Bool
+
+    var currentSpeed: MetricStats { basis == .response ? currentResponse : currentThroughput }
+    var baselineSpeed: MetricStats { basis == .response ? baselineResponse : baselineThroughput }
+    var speedTitle: String { basis == .response ? "Response speed" : "Turn speed" }
+}
+
+/// What the gauge shows and where it came from. Response speed is primary; a source without
+/// per-response timing falls back to its latest whole-turn speed, labelled as such.
+struct HeroReading: Equatable {
+    enum Kind: Equatable {
+        /// Median of the latest live responses of the selected model.
+        case live
+        /// The selected model's latest turn that has response data.
+        case latestTurnResponse
+        /// The selected cohort's latest turn speed, for sources without per-response timing.
+        case turnFallback
+        case empty
+    }
+
+    let kind: Kind
+    let value: Double?
+    let model: String?
+    let provider: String?
+    let effort: String?
+    /// Source chips such as "Subagent" or "Work turn".
+    let chip: String?
+    /// When the underlying measurement completed.
+    let completedAt: Date?
+    /// Live readings: how many responses the median covers.
+    let responseCount: Int?
+    let cohort: ModelCohort?
+
+    var usesResponseSpeed: Bool { kind == .live || kind == .latestTurnResponse }
+
+    /// "last 5 responses · 2 min ago" for live readings, "latest turn · 3 h ago" otherwise.
+    func caption(now: Date) -> String? {
+        guard let completedAt else { return nil }
+        let when = RelativeTime.string(from: completedAt, now: now)
+        switch kind {
+        case .live: return "last \(responseCount ?? 1) \((responseCount ?? 1) == 1 ? "response" : "responses") · \(when)"
+        case .latestTurnResponse: return "latest turn · \(when)"
+        case .turnFallback: return "latest turn · \(when)"
+        case .empty: return nil
+        }
+    }
+
+    static let empty = HeroReading(kind: .empty, value: nil, model: nil, provider: nil, effort: nil, chip: nil, completedAt: nil, responseCount: nil, cohort: nil)
 }
 
 /// Pure presentation data: safe to construct for previews without any store, monitor, or network.
@@ -295,6 +426,7 @@ struct DashboardSnapshot {
         let turns: Int
     }
 
+    /// One exact cohort (coding tool, version, parser, metric, effort): the Turn speed list.
     struct CohortSummary: Identifiable {
         var id: String { cohort.id }
         let cohort: ModelCohort
@@ -303,24 +435,51 @@ struct DashboardSnapshot {
         let latestAt: Date
     }
 
+    /// One model and provider across every coding tool and source kind: the Response speed list.
+    struct ResponseSummary: Identifiable {
+        var id: String { "\(group.model ?? "~")|\(group.provider)" }
+        let group: ResponseGroupKey
+        /// Per-turn response speed.
+        let response: MetricStats
+        /// Turn speed, shown as secondary text.
+        let throughput: MetricStats
+        /// Qualifying responses behind `response`.
+        let responseCount: Int
+        /// Coding tools that contributed, alphabetical.
+        let clients: [String]
+        let includesSubagent: Bool
+        let latestAt: Date
+        /// The cohort of the model's most recent turn; selecting the row pins it.
+        let latestCohort: ModelCohort
+    }
+
     let range: DashboardRange
     let selection: DashboardSelection
     let selectedCohort: ModelCohort?
     let throughputLabel: String
     let latest: TurnMetric?
-    /// The selected cohort's latest eligible turn within local retention, independent of the range control.
-    let heroMetric: TurnMetric?
-    /// Largest 24 h median among cohorts sharing the hero turn's coding tool, metric version and
-    /// source kind. Sets the gauge scale; other measurement definitions never stretch it.
-    let gaugeGroupMedian: Double?
+    /// The selected model's latest turn with response data (any coding tool), within retention.
+    let responseHero: TurnMetric?
+    /// The selected cohort's latest eligible turn: the gauge fallback for sources without response data.
+    let turnHero: TurnMetric?
+    /// Largest 24 h median of per-turn response speed among all models; sets the gauge scale.
+    let responseGaugeMedian: Double?
+    /// Largest 24 h median of per-turn speed within the selected cohort's measurement group.
+    let turnGaugeMedian: Double?
     let points: [Bucket]
+    let responsePoints: [Bucket]
+    let ttftPoints: [Bucket]
     let turnCount: Int
     let throughput: MetricStats
     let ttft: MetricStats
+    let response: MetricStats
+    /// Qualifying responses behind `response` in the selected range.
+    let responseCount: Int
     let medianRate: Double?
     let medianTTFT: Double?
     let personalTrend: PersonalTrend?
     let cohortSummaries: [CohortSummary]
+    let responseSummaries: [ResponseSummary]
     let localPeriodComparison: LocalPeriodComparison?
     let records: [TurnMetric]
     let dates: ClosedRange<Date>
@@ -328,7 +487,8 @@ struct DashboardSnapshot {
     init(
         records: [TurnMetric],
         range: DashboardRange,
-        selection: DashboardSelection = .latest,
+        selection: DashboardSelection = .auto,
+        activeModel: ResponseGroupKey? = nil,
         now: Date = .now,
         calendar: Calendar = .current,
         clientFilter: String? = nil,
@@ -337,16 +497,15 @@ struct DashboardSnapshot {
         self.range = range
         self.selection = selection
         let retentionCutoff = now.addingTimeInterval(-MetricHistory.retention)
-        let retained = records.filter { metric in
-            metric.completedAt >= retentionCutoff && metric.completedAt <= now
-                && (clientFilter == nil || metric.client == clientFilter)
+        let inRetention = records.filter { $0.completedAt >= retentionCutoff && $0.completedAt <= now }
+        let retained = inRetention.filter { metric in
+            (clientFilter == nil || metric.client == clientFilter)
                 && (providerFilter == nil || (metric.provider ?? "unknown") == providerFilter)
         }
-        let latestCohort = retained.max { $0.completedAt < $1.completedAt }.map(ModelCohort.init)
         let resolvedCohort: ModelCohort?
         switch selection {
-        case .latest:
-            resolvedCohort = latestCohort
+        case .auto, .autoTool:
+            resolvedCohort = AutoSelection.resolve(records: retained, activeModel: activeModel, client: selection.autoClient)
         case .cohort(let cohort):
             resolvedCohort = cohort
         case .all:
@@ -355,43 +514,52 @@ struct DashboardSnapshot {
         selectedCohort = resolvedCohort
         throughputLabel = resolvedCohort?.throughputLabel ?? "Turn speed"
 
-        let selectedRetained = resolvedCohort.map { cohort in
-            retained.filter { ModelCohort($0) == cohort }
-        } ?? []
-        localPeriodComparison = selection.isAllModels || resolvedCohort == nil
-            ? nil
-            : LocalPeriodComparison(records: selectedRetained, range: range, now: now)
-
         let start = now.addingTimeInterval(-range.duration)
         dates = start...max(now, start.addingTimeInterval(1))
         let inRange = retained.filter { $0.completedAt >= start }
         let sortedRange = inRange.sorted { $0.completedAt > $1.completedAt }
-        let allSummaries = Self.summaries(in: sortedRange)
-        cohortSummaries = allSummaries
+        cohortSummaries = Self.summaries(in: sortedRange)
+        responseSummaries = Self.responseSummaries(in: sortedRange)
+        let gaugeMedian = Self.responseGaugeMedian(in: inRetention, now: now)
 
         if selection.isAllModels {
             self.records = sortedRange
             turnCount = 0
             throughput = MetricStats(values: [])
             ttft = MetricStats(values: [])
+            response = MetricStats(values: [])
+            responseCount = 0
             medianRate = nil
             medianTTFT = nil
             latest = nil
-            heroMetric = nil
-            gaugeGroupMedian = nil
+            responseHero = nil
+            turnHero = nil
+            responseGaugeMedian = gaugeMedian
+            turnGaugeMedian = nil
             points = []
+            responsePoints = []
+            ttftPoints = []
             personalTrend = nil
+            localPeriodComparison = nil
             return
         }
 
-        let scoped: [TurnMetric]
-        if let resolvedCohort {
-            scoped = sortedRange.filter { ModelCohort($0) == resolvedCohort }
+        let selectedRetained = resolvedCohort.map { cohort in retained.filter { ModelCohort($0) == cohort } } ?? []
+        // Response speed is one definition across tools: it merges a model's cohorts. An unknown
+        // model has no identity to merge on, so it stays in its exact cohort.
+        let responseScope: [TurnMetric]
+        if let cohort = resolvedCohort, cohort.model != nil {
+            let group = ResponseGroupKey(cohort)
+            responseScope = retained.filter { ResponseGroupKey($0) == group }
         } else {
-            scoped = []
+            responseScope = selectedRetained
         }
-        self.records = scoped
+        localPeriodComparison = resolvedCohort == nil
+            ? nil
+            : LocalPeriodComparison(records: selectedRetained, responseRecords: responseScope, range: range, now: now)
 
+        let scoped = sortedRange.filter { metric in resolvedCohort.map { ModelCohort(metric) == $0 } ?? false }
+        self.records = scoped
         let eligible = scoped.filter(Self.isThroughputEligible)
         turnCount = eligible.count
         throughput = MetricStats(values: eligible.map(\.turnThroughputTPS))
@@ -399,37 +567,62 @@ struct DashboardSnapshot {
         medianRate = throughput.median
         medianTTFT = ttft.median
         latest = eligible.max { $0.completedAt < $1.completedAt }
-        let hero = selectedRetained.filter(Self.isThroughputEligible).max { $0.completedAt < $1.completedAt }
-        heroMetric = hero
-        gaugeGroupMedian = hero.flatMap { Self.groupMedianMaximum(for: $0, in: records, now: now) }
+        turnHero = selectedRetained.filter(Self.isThroughputEligible).max { $0.completedAt < $1.completedAt }
+        turnGaugeMedian = turnHero.flatMap { Self.groupMedianMaximum(for: $0, in: inRetention, now: now) }
 
-        let maximumBuckets = range.bucketCount
-        let bucketWidth = max(1, range.duration / Double(maximumBuckets))
-        var buckets: [Int: [Double]] = [:]
-        for record in eligible {
-            let index = min(maximumBuckets - 1, max(0, Int(record.completedAt.timeIntervalSince(start) / bucketWidth)))
-            buckets[index, default: []].append(record.turnThroughputTPS)
-        }
-        points = buckets.keys.sorted().map { index in
-            let values = buckets[index]!
-            return Bucket(
-                date: min(now, start.addingTimeInterval((Double(index) + 0.5) * bucketWidth)),
-                median: MetricStats(values: values).median ?? 0,
-                turns: values.count
-            )
-        }
+        let scopedResponses = responseScope.filter { $0.completedAt >= start && $0.responseSpeedTPS != nil }
+        response = MetricStats(values: scopedResponses.compactMap(\.responseSpeedTPS))
+        responseCount = scopedResponses.reduce(0) { $0 + ($1.responseCount ?? 0) }
+        responseHero = responseScope.filter { $0.responseSpeedTPS != nil }.max { $0.completedAt < $1.completedAt }
+        responseGaugeMedian = gaugeMedian
 
-        let scopedRetained = retained.filter { ModelCohort($0) == resolvedCohort }
+        points = Self.buckets(eligible.map { ($0.completedAt, $0.turnThroughputTPS) }, start: start, now: now, range: range)
+        responsePoints = Self.buckets(scopedResponses.compactMap { turn in turn.responseSpeedTPS.map { (turn.completedAt, $0) } }, start: start, now: now, range: range)
+        ttftPoints = Self.buckets(scoped.compactMap { turn in turn.ttftSeconds.flatMap { $0.isFinite && $0 >= 0 ? (turn.completedAt, $0) : nil } }, start: start, now: now, range: range)
+
         let hasKnownModelAndProvider = resolvedCohort?.model.map { !$0.isEmpty && $0 != "unknown" } == true
             && resolvedCohort?.provider.map { !$0.isEmpty && $0 != "unknown" } == true
         personalTrend = hasKnownModelAndProvider
-            ? Self.personalTrend(in: scopedRetained, now: now, calendar: calendar)
+            ? Self.personalTrend(cohortRecords: selectedRetained, responseRecords: responseScope, now: now, calendar: calendar)
             : nil
     }
 
-    /// The latest turn compared with the selected cohort's own 24 h median.
-    var speedDelta: SpeedDelta? {
-        SpeedDelta(latest: heroMetric?.turnThroughputTPS, median: localPeriodComparison?.last24Hours.throughput ?? MetricStats(values: []))
+    /// The gauge reading: live median first, then the model's latest turn with response data, then
+    /// the cohort's latest turn speed for sources without per-response timing.
+    func heroReading(live: LiveSpeed?, liveGroup: ResponseGroupKey?) -> HeroReading {
+        guard let cohort = selectedCohort else { return .empty }
+        let chip = cohort.measurement.chipTitle
+        if let live, let liveGroup {
+            return HeroReading(
+                kind: .live, value: live.medianTPS, model: liveGroup.model, provider: liveGroup.provider,
+                effort: cohort.reasoningEffort, chip: chip, completedAt: live.latestAt, responseCount: live.responseCount, cohort: cohort
+            )
+        }
+        if let turn = responseHero, let speed = turn.responseSpeedTPS {
+            return HeroReading(
+                kind: .latestTurnResponse, value: speed, model: turn.model, provider: turn.provider,
+                effort: turn.reasoningEffort, chip: turn.isSubagentTurn ? "Subagent" : ModelCohort(turn).measurement.chipTitle,
+                completedAt: turn.completedAt, responseCount: turn.responseCount, cohort: ModelCohort(turn)
+            )
+        }
+        if let turn = turnHero {
+            return HeroReading(
+                kind: .turnFallback, value: turn.turnThroughputTPS, model: turn.model, provider: turn.provider,
+                effort: turn.reasoningEffort, chip: turn.isSubagentTurn ? "Subagent" : ModelCohort(turn).measurement.chipTitle,
+                completedAt: turn.completedAt, responseCount: nil, cohort: ModelCohort(turn)
+            )
+        }
+        return HeroReading(kind: .empty, value: nil, model: cohort.model, provider: cohort.provider, effort: cohort.reasoningEffort, chip: chip, completedAt: nil, responseCount: nil, cohort: cohort)
+    }
+
+    /// The reading compared with the selected model's own 24 h response-speed median (or the turn
+    /// speed median for the turn fallback).
+    func speedDelta(for reading: HeroReading) -> SpeedDelta? {
+        guard let comparison = localPeriodComparison else { return nil }
+        return SpeedDelta(
+            latest: reading.value,
+            median: reading.usesResponseSpeed ? comparison.last24Hours.response : comparison.last24Hours.throughput
+        )
     }
 
     /// The largest 24 h median of any cohort in `hero`'s measurement group (same client, metric
@@ -443,6 +636,16 @@ struct DashboardSnapshot {
         return Dictionary(grouping: group, by: ModelCohort.init)
             .values
             .compactMap { MetricStats(values: $0.map(\.turnThroughputTPS)).median }
+            .max()
+    }
+
+    /// The largest 24 h median of per-turn response speed among models (response speed is one
+    /// definition, so every model shares one gauge scale).
+    static func responseGaugeMedian(in records: [TurnMetric], now: Date) -> Double? {
+        let start = now.addingTimeInterval(-86_400)
+        return Dictionary(grouping: records.filter { $0.completedAt >= start && $0.completedAt <= now && $0.responseSpeedTPS != nil }, by: ResponseGroupKey.init)
+            .values
+            .compactMap { MetricStats(values: $0.compactMap(\.responseSpeedTPS)).median }
             .max()
     }
 
@@ -461,9 +664,21 @@ struct DashboardSnapshot {
                     ? left.id < right.id
                     : left.latestAt > right.latestAt
             case .higherThroughput:
-                return compare(left.throughput.median, right.throughput.median, descending: true, left: left, right: right)
+                return compare(left.throughput.median, right.throughput.median, descending: true, leftAt: left.latestAt, rightAt: right.latestAt, leftID: left.id, rightID: right.id)
             case .lowerTTFT:
-                return compare(left.ttft.median, right.ttft.median, descending: false, left: left, right: right)
+                return compare(left.ttft.median, right.ttft.median, descending: false, leftAt: left.latestAt, rightAt: right.latestAt, leftID: left.id, rightID: right.id)
+            }
+        }
+    }
+
+    /// Models with a response-speed median first (fastest first), then the rest by recency.
+    static func ordered(_ summaries: [ResponseSummary], by sort: ResponseComparisonSort) -> [ResponseSummary] {
+        summaries.sorted { left, right in
+            switch sort {
+            case .recent:
+                return left.latestAt == right.latestAt ? left.id < right.id : left.latestAt > right.latestAt
+            case .faster:
+                return compare(left.response.median, right.response.median, descending: true, leftAt: left.latestAt, rightAt: right.latestAt, leftID: left.id, rightID: right.id)
             }
         }
     }
@@ -472,8 +687,7 @@ struct DashboardSnapshot {
         _ leftValue: Double?,
         _ rightValue: Double?,
         descending: Bool,
-        left: CohortSummary,
-        right: CohortSummary
+        leftAt: Date, rightAt: Date, leftID: String, rightID: String
     ) -> Bool {
         switch (leftValue, rightValue) {
         case let (left?, right?) where left != right:
@@ -481,12 +695,31 @@ struct DashboardSnapshot {
         case (_?, nil): return true
         case (nil, _?): return false
         default:
-            return left.latestAt == right.latestAt ? left.id < right.id : left.latestAt > right.latestAt
+            return leftAt == rightAt ? leftID < rightID : leftAt > rightAt
         }
     }
 
     private static func isThroughputEligible(_ metric: TurnMetric) -> Bool {
         metric.outputTokens >= 20 && metric.turnThroughputTPS.isFinite && metric.turnThroughputTPS >= 0
+    }
+
+    /// Median per time bucket; at most `range.bucketCount` buckets.
+    private static func buckets(_ values: [(Date, Double)], start: Date, now: Date, range: DashboardRange) -> [Bucket] {
+        let maximumBuckets = range.bucketCount
+        let bucketWidth = max(1, range.duration / Double(maximumBuckets))
+        var grouped: [Int: [Double]] = [:]
+        for (date, value) in values {
+            let index = min(maximumBuckets - 1, max(0, Int(date.timeIntervalSince(start) / bucketWidth)))
+            grouped[index, default: []].append(value)
+        }
+        return grouped.keys.sorted().map { index in
+            let values = grouped[index]!
+            return Bucket(
+                date: min(now, start.addingTimeInterval((Double(index) + 0.5) * bucketWidth)),
+                median: MetricStats(values: values).median ?? 0,
+                turns: values.count
+            )
+        }
     }
 
     private static func summaries(in records: [TurnMetric]) -> [CohortSummary] {
@@ -504,49 +737,86 @@ struct DashboardSnapshot {
         .sorted { $0.latestAt > $1.latestAt }
     }
 
-    private static func personalTrend(in records: [TurnMetric], now: Date, calendar: Calendar) -> PersonalTrend {
+    private static func responseSummaries(in records: [TurnMetric]) -> [ResponseSummary] {
+        Dictionary(grouping: records, by: ResponseGroupKey.init).compactMap { group, turns in
+            guard let newest = turns.max(by: { $0.completedAt < $1.completedAt }) else { return nil }
+            let withResponse = turns.filter { $0.responseSpeedTPS != nil }
+            return ResponseSummary(
+                group: group,
+                response: MetricStats(values: withResponse.compactMap(\.responseSpeedTPS)),
+                throughput: MetricStats(values: turns.filter(isThroughputEligible).map(\.turnThroughputTPS)),
+                responseCount: withResponse.reduce(0) { $0 + ($1.responseCount ?? 0) },
+                clients: Array(Set(turns.map(\.client))).sorted(),
+                includesSubagent: turns.contains(where: \.isSubagentTurn),
+                latestAt: newest.completedAt,
+                latestCohort: ModelCohort(turns.filter { !$0.isSubagentTurn }.max { $0.completedAt < $1.completedAt } ?? newest)
+            )
+        }
+        .sorted { $0.latestAt > $1.latestAt }
+    }
+
+    private static func personalTrend(cohortRecords: [TurnMetric], responseRecords: [TurnMetric], now: Date, calendar: Calendar) -> PersonalTrend {
         let currentStart = now.addingTimeInterval(-86_400)
         let baselineStart = now.addingTimeInterval(-MetricHistory.retention)
-        let eligible = records.filter(isThroughputEligible)
-        let current = eligible.filter { $0.completedAt >= currentStart }
-        let baseline = eligible.filter { $0.completedAt < currentStart && $0.completedAt >= baselineStart }
-        let ttftRecords = records.filter { $0.ttftSeconds.map { $0.isFinite && $0 >= 0 } == true }
+        let basis: PersonalTrend.Basis = responseRecords.contains { $0.responseSpeedTPS != nil } ? .response : .turn
+
+        // Turn speed (cohort) and response speed (model) are both measured; `basis` picks the one
+        // that drives the signal.
+        let turnEligible = cohortRecords.filter(isThroughputEligible)
+        let turnCurrent = turnEligible.filter { $0.completedAt >= currentStart }
+        let turnBaseline = turnEligible.filter { $0.completedAt < currentStart && $0.completedAt >= baselineStart }
+        let responseEligible = responseRecords.filter { $0.responseSpeedTPS != nil }
+        let responseCurrent = responseEligible.filter { $0.completedAt >= currentStart }
+        let responseBaseline = responseEligible.filter { $0.completedAt < currentStart && $0.completedAt >= baselineStart }
+        let ttftRecords = cohortRecords.filter { $0.ttftSeconds.map { $0.isFinite && $0 >= 0 } == true }
         let currentTTFTRecords = ttftRecords.filter { $0.completedAt >= currentStart }
         let baselineTTFTRecords = ttftRecords.filter { $0.completedAt < currentStart && $0.completedAt >= baselineStart }
-        let currentThroughput = MetricStats(values: current.map(\.turnThroughputTPS))
-        let baselineThroughput = MetricStats(values: baseline.map(\.turnThroughputTPS))
+
+        let currentThroughput = MetricStats(values: turnCurrent.map(\.turnThroughputTPS))
+        let baselineThroughput = MetricStats(values: turnBaseline.map(\.turnThroughputTPS))
+        let currentResponse = MetricStats(values: responseCurrent.compactMap(\.responseSpeedTPS))
+        let baselineResponse = MetricStats(values: responseBaseline.compactMap(\.responseSpeedTPS))
         let currentTTFT = MetricStats(values: currentTTFTRecords.compactMap(\.ttftSeconds))
         let baselineTTFT = MetricStats(values: baselineTTFTRecords.compactMap(\.ttftSeconds))
 
-        let status: PersonalTrend.Status
-        let latestCurrentObservation = [current.map(\.completedAt).max(), currentTTFTRecords.map(\.completedAt).max()]
+        func trend(_ status: PersonalTrend.Status, speed: Bool, ttft: Bool) -> PersonalTrend {
+            PersonalTrend(
+                status: status, basis: basis,
+                currentThroughput: currentThroughput, baselineThroughput: baselineThroughput,
+                currentResponse: currentResponse, baselineResponse: baselineResponse,
+                currentTTFT: currentTTFT, baselineTTFT: baselineTTFT,
+                comparesSpeed: speed, comparesTTFT: ttft
+            )
+        }
+
+        let speedCurrent = basis == .response ? responseCurrent : turnCurrent
+        let speedBaseline = basis == .response ? responseBaseline : turnBaseline
+        let currentSpeed = basis == .response ? currentResponse : currentThroughput
+        let baselineSpeed = basis == .response ? baselineResponse : baselineThroughput
+        let latestCurrentObservation = [speedCurrent.map(\.completedAt).max(), currentTTFTRecords.map(\.completedAt).max()]
             .compactMap { $0 }
             .max()
         guard latestCurrentObservation.map({ now.timeIntervalSince($0) <= 3_600 }) == true else {
-            status = .noRecentObservations
-            return PersonalTrend(status: status, currentThroughput: currentThroughput, baselineThroughput: baselineThroughput, currentTTFT: currentTTFT, baselineTTFT: baselineTTFT, comparesThroughput: false, comparesTTFT: false)
+            return trend(.noRecentObservations, speed: false, ttft: false)
         }
 
-        let throughputBaselineDays = Set(baseline.map { calendar.startOfDay(for: $0.completedAt) })
+        let speedBaselineDays = Set(speedBaseline.map { calendar.startOfDay(for: $0.completedAt) })
         let ttftBaselineDays = Set(baselineTTFTRecords.map { calendar.startOfDay(for: $0.completedAt) })
-        let comparesThroughput = current.count >= 5 && baseline.count >= 20 && throughputBaselineDays.count >= 2
-            && current.map(\.completedAt).max().map { now.timeIntervalSince($0) <= 3_600 } == true
-            && (baselineThroughput.median ?? 0) > 0
+        let comparesSpeed = speedCurrent.count >= 5 && speedBaseline.count >= 20 && speedBaselineDays.count >= 2
+            && speedCurrent.map(\.completedAt).max().map { now.timeIntervalSince($0) <= 3_600 } == true
+            && (baselineSpeed.median ?? 0) > 0
         let comparesTTFT = currentTTFTRecords.count >= 5 && baselineTTFTRecords.count >= 20 && ttftBaselineDays.count >= 2
             && currentTTFTRecords.map(\.completedAt).max().map { now.timeIntervalSince($0) <= 3_600 } == true
             && (baselineTTFT.median ?? 0) > 0
 
-        guard comparesThroughput || comparesTTFT else {
-            status = .buildingBaseline
-            return PersonalTrend(status: status, currentThroughput: currentThroughput, baselineThroughput: baselineThroughput, currentTTFT: currentTTFT, baselineTTFT: baselineTTFT, comparesThroughput: false, comparesTTFT: false)
+        guard comparesSpeed || comparesTTFT else {
+            return trend(.buildingBaseline, speed: false, ttft: false)
         }
 
-        let throughputDrop = comparesThroughput
-            && (currentThroughput.median ?? .infinity) <= (baselineThroughput.median ?? 0) * 0.7
+        let speedDrop = comparesSpeed && (currentSpeed.median ?? .infinity) <= (baselineSpeed.median ?? 0) * 0.7
         let ttftIncrease = comparesTTFT
             && (currentTTFT.median ?? 0) >= (baselineTTFT.median ?? 0) * 1.5
             && (currentTTFT.median ?? 0) - (baselineTTFT.median ?? 0) >= 1
-        status = throughputDrop || ttftIncrease ? .slower : .noLargeChange
-        return PersonalTrend(status: status, currentThroughput: currentThroughput, baselineThroughput: baselineThroughput, currentTTFT: currentTTFT, baselineTTFT: baselineTTFT, comparesThroughput: comparesThroughput, comparesTTFT: comparesTTFT)
+        return trend(speedDrop || ttftIncrease ? .slower : .noLargeChange, speed: comparesSpeed, ttft: comparesTTFT)
     }
 }

@@ -105,7 +105,9 @@ struct GaugeDial: View, @preconcurrency Animatable {
 struct GaugeInstrument: View {
     let value: Double?
     var compact = true
-    /// Qualifier shown after the unit, such as "whole turn, incl. tools & waiting".
+    /// Name of the measurement for accessibility ("Response speed", "Turn speed").
+    var title = ResponseSpeedCopy.title
+    /// Qualifier shown after the unit, such as "while responding, tools excluded".
     var qualifier: String?
     /// The largest 24 h median in the value's measurement group; stretches the scale, never other groups.
     var groupMedian: Double?
@@ -151,26 +153,34 @@ struct GaugeInstrument: View {
         .frame(height: height)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.4), value: finiteValue)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Turn speed")
-        .accessibilityValue(finiteValue.map { String(format: "%.1f output tokens per second, whole turn", $0) } ?? "No completed turns yet")
+        .accessibilityLabel(title)
+        .accessibilityValue(finiteValue.map { String(format: "%.1f output tokens per second", $0) } ?? "No measurement yet")
     }
 }
 
-/// A static dial representing an actual completed turn, never an instantaneous streaming estimate.
+/// The hero gauge. Response speed is primary: the live median of the latest responses, else the
+/// selected model's latest turn with response data. A source without per-response timing shows its
+/// latest whole-turn speed, labelled as turn speed. Never an instantaneous streaming estimate.
 /// Presentation-only: it reads no store, logs, Keychain or network.
 struct ThroughputGaugeView: View {
-    let metric: TurnMetric?
+    let reading: HeroReading
     var compact = true
-    /// Change against the selected cohort's 24 h median, when there is enough history.
+    /// Change against the selected model's 24 h median, when there is enough history.
     var delta: SpeedDelta?
     var slowerThanUsual = false
-    /// Largest 24 h median within the latest turn's measurement group, for the scale.
+    /// Largest 24 h median among the reading's measurement group, for the scale.
     var groupMedian: Double?
     var now: Date = .now
 
-    private var value: Double? { metric.map(\.turnThroughputTPS).flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } }
-    private var cohort: ModelCohort? { metric.map(ModelCohort.init) }
-    private var measurement: SpeedMeasurement { cohort?.measurement ?? .turn }
+    private var measurementTitle: String {
+        reading.usesResponseSpeed || reading.kind == .empty ? ResponseSpeedCopy.title : (reading.cohort?.measurement.title ?? "Turn speed")
+    }
+    private var qualifier: String {
+        reading.usesResponseSpeed || reading.kind == .empty ? ResponseSpeedCopy.shortDefinition : (reading.cohort?.measurement.shortDefinition ?? "whole turn")
+    }
+    private var definition: String {
+        reading.usesResponseSpeed || reading.kind == .empty ? ResponseSpeedCopy.definition : (reading.cohort?.measurement.definition ?? "")
+    }
 
     var body: some View {
         if compact {
@@ -183,7 +193,7 @@ struct ThroughputGaugeView: View {
     private var content: some View {
         VStack(spacing: compact ? 8 : 12) {
             if !compact { header }
-            GaugeInstrument(value: value, compact: compact, qualifier: compact ? measurement.shortDefinition : nil, groupMedian: groupMedian)
+            GaugeInstrument(value: reading.value, compact: compact, title: measurementTitle, qualifier: compact ? qualifier : nil, groupMedian: groupMedian)
             meta
         }
         .frame(maxWidth: .infinity)
@@ -191,48 +201,47 @@ struct ThroughputGaugeView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(measurement.title)
+            Text(measurementTitle)
                 .font(DashboardStyle.Typography.footnoteEmphasis)
                 .foregroundStyle(DashboardStyle.muted)
                 .lineLimit(2)
             Spacer()
-            if let metric {
-                Text(metric.completedAt.formatted(date: .omitted, time: .shortened))
+            if let completedAt = reading.completedAt {
+                Text(completedAt.formatted(date: .omitted, time: .shortened))
                     .font(DashboardStyle.Typography.caption.monospacedDigit())
                     .foregroundStyle(DashboardStyle.muted)
-                    .help("Completed \(RelativeTime.exact(metric.completedAt))")
+                    .help("Completed \(RelativeTime.exact(completedAt))")
             }
         }
     }
 
     @ViewBuilder
     private var meta: some View {
-        if let metric, let cohort {
+        if reading.kind != .empty, let cohort = reading.cohort {
             VStack(spacing: 5) {
                 HStack(spacing: 6) {
-                    Text(metric.model ?? "Model not reported")
+                    ProviderBadgeView(maker: ModelMaker(model: reading.model, provider: reading.provider), size: 16)
+                    Text(reading.model ?? "Model not reported")
                         .font(DashboardStyle.Typography.bodyEmphasis)
                         .foregroundStyle(DashboardStyle.ink)
                         .lineLimit(1).truncationMode(.middle)
-                    if let effort = cohort.reasoningEffort { ChipView(text: effort).fixedSize() }
-                    if metric.isSubagentTurn { ChipView(text: "Subagent", tone: .accent).fixedSize() }
-                    else if let chip = cohort.measurement.chipTitle { ChipView(text: chip, tone: .accent).fixedSize() }
+                    if let effort = reading.effort { ChipView(text: effort).fixedSize() }
+                    if let chip = reading.chip { ChipView(text: chip, tone: .accent).fixedSize() }
                 }
-                deltaLine(for: metric)
+                deltaLine
+                captionLine
                 if slowerThanUsual {
-                    Label("Your recent turns are slower than usual", systemImage: "exclamationmark.circle.fill")
+                    Label(reading.usesResponseSpeed ? "Your recent responses are slower than usual" : "Your recent turns are slower than usual", systemImage: "exclamationmark.circle.fill")
                         .font(DashboardStyle.Typography.footnoteEmphasis)
                         .foregroundStyle(DashboardStyle.warn)
-                        .help("A personal whole-turn speed trend only; it does not measure answer quality or confirm provider health.")
+                        .help("A personal speed trend only; it does not measure answer quality or confirm provider health.")
                 }
                 if !compact {
                     Text(cohort.detailLabel)
                         .font(DashboardStyle.Typography.caption)
                         .foregroundStyle(DashboardStyle.muted)
                         .lineLimit(2).multilineTextAlignment(.center)
-                }
-                if !compact {
-                    Text(cohort.measurement.definition)
+                    Text(definition)
                         .font(DashboardStyle.Typography.caption)
                         .foregroundStyle(DashboardStyle.muted)
                         .multilineTextAlignment(.center)
@@ -240,34 +249,43 @@ struct ThroughputGaugeView: View {
             }
             .frame(maxWidth: .infinity)
             .accessibilityElement(children: .combine)
-            .help("\(measurement.title) is output tokens divided by whole-turn seconds. It is not streaming speed.")
+            .help(reading.usesResponseSpeed ? ResponseSpeedCopy.explanation : "\(measurementTitle) is output tokens divided by whole-turn seconds. It is not streaming speed.")
         } else {
-            Text("Waiting for a completed turn")
+            Text("Waiting for a completed response")
                 .font(DashboardStyle.Typography.footnote)
                 .foregroundStyle(DashboardStyle.muted)
         }
     }
 
-    private func deltaLine(for metric: TurnMetric) -> some View {
-        let when = RelativeTime.string(from: metric.completedAt, now: now)
+    private var deltaLine: some View {
+        let medianName = reading.usesResponseSpeed ? "response-speed median" : "median"
         return HStack(spacing: 4) {
             if let delta {
                 Image(systemName: delta.isFaster ? "arrow.up.right" : delta.isSlower ? "arrow.down.right" : "equal")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(tint(for: delta))
                     .accessibilityHidden(true)
-                Text(delta.summary).foregroundStyle(tint(for: delta))
+                Text(delta.summary(medianName: medianName)).foregroundStyle(tint(for: delta))
             } else {
                 Text("Collecting your 24 h baseline").foregroundStyle(DashboardStyle.muted)
             }
-            Text("· \(when)").foregroundStyle(DashboardStyle.muted)
-                .help("Completed \(RelativeTime.exact(metric.completedAt))")
         }
         .font(DashboardStyle.Typography.footnote.monospacedDigit())
         .lineLimit(1).minimumScaleFactor(0.9)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Latest turn")
-        .accessibilityValue("\(delta?.accessibilitySummary ?? "Collecting your 24 hour baseline"), completed \(when)")
+        .accessibilityLabel(reading.usesResponseSpeed ? "Response speed change" : "Turn speed change")
+        .accessibilityValue(delta?.accessibilitySummary ?? "Collecting your 24 hour baseline")
+    }
+
+    @ViewBuilder
+    private var captionLine: some View {
+        if let caption = reading.caption(now: now) {
+            Text(caption)
+                .font(DashboardStyle.Typography.footnote.monospacedDigit())
+                .foregroundStyle(DashboardStyle.muted)
+                .lineLimit(1)
+                .help(reading.completedAt.map { "Completed \(RelativeTime.exact($0))" } ?? "")
+        }
     }
 
     private func tint(for delta: SpeedDelta) -> Color {

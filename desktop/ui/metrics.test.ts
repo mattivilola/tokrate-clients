@@ -91,6 +91,7 @@ it("keeps missing and explicit unknown provider cohorts distinct", () => {
     "turn-v1",
     "gpt-test",
     null,
+    null,
     "high",
     null,
   ]);

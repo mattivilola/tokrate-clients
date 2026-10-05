@@ -43,6 +43,42 @@ final class HistoryStoreFolderTests: XCTestCase {
         return url.resolvingSymlinksInPath()
     }
 
+    func testLiveResponsesDriveTheMenuBarReadoutAndAutoModel() throws {
+        let store = makeStore()
+        defer { store.stopMonitoring() }
+        let now = Date.now
+        func response(_ id: String, _ secondsAgo: Double, model: String, provider: String, client: String, tokens: Int, speed: Double) -> LiveResponse {
+            LiveResponse(id: id, model: model, provider: provider, client: client, sourceKind: "primary", metricVersion: "turn-v1",
+                         reasoningEffort: nil, completedAt: now.addingTimeInterval(-secondsAgo), outputTokens: tokens, durationSeconds: Double(tokens) / speed)
+        }
+        XCTAssertEqual(store.dashboardSelection, .auto)
+        XCTAssertEqual(store.menuBarReadout, .unavailable)
+        store.startMonitoring()
+        XCTAssertEqual(store.menuBarReadout.speedText, "— tok/s")
+
+        store.recordLiveResponses((0..<6).map { response("c\($0)", Double($0) * 20 + 5, model: "claude-opus-5-5", provider: "anthropic", client: "claude-code", tokens: 600, speed: 100 + Double($0)) }, now: now)
+        XCTAssertEqual(store.activeModel, ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic"))
+        XCTAssertEqual(store.menuBarReadout.speedText, "102.0 tok/s", "median of the five latest of 100...105")
+        XCTAssertEqual(store.menuBarReadout.maker, .anthropic)
+        XCTAssertEqual(store.liveSpeed?.responseCount, 5)
+
+        // Pinning a model without live responses shows a dash with that model's badge.
+        store.dashboardSelection = .cohort(ModelCohort(model: "gpt-5-codex", provider: "openai", clientVersion: nil))
+        XCTAssertEqual(store.menuBarReadout.speedText, "— tok/s")
+        XCTAssertEqual(store.menuBarReadout.maker, .openAI)
+        store.dashboardSelection = .all
+        XCTAssertEqual(store.menuBarReadout.speedText, "Compare")
+        store.dashboardSelection = .autoTool("codex")
+        XCTAssertNil(store.activeModel, "Claude responses do not count within Codex")
+        store.dashboardSelection = .auto
+        XCTAssertNotNil(store.activeModel)
+        XCTAssertEqual(DashboardSelection.restored(from: defaults.string(forKey: "dashboardModelSelection")), .auto)
+
+        store.stopMonitoring()
+        XCTAssertEqual(store.menuBarReadout, .unavailable)
+        XCTAssertNil(store.liveSpeed)
+    }
+
     func testDefaultsApplyUntilAFolderIsChosen() {
         let store = makeStore()
         for kind in SourceFolderKind.allCases { XCTAssertFalse(store.hasCustomFolder(for: kind)) }
@@ -115,7 +151,7 @@ final class HistoryStoreFolderTests: XCTestCase {
         }
         XCTAssertNotNil(id("amazon-bedrock", client: "claude-code", parser: "claude-transcript-v3", metric: "claude-observed-turn-v1"))
         XCTAssertNotNil(id("google-vertex", client: "claude-code", parser: "claude-transcript-v3", metric: "claude-observed-turn-v1"))
-        XCTAssertNil(id("amazon-bedrock", client: "codex", parser: "codex-rollout-v1", metric: "turn-v1"))
+        XCTAssertNil(id("amazon-bedrock", client: "codex", parser: "codex-rollout-v2", metric: "turn-v1"))
     }
 }
 

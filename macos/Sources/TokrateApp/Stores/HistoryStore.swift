@@ -65,14 +65,33 @@ final class HistoryStore {
     private(set) var sourceStatus = "Waiting for session folders"
     private(set) var sourceStatuses: [SourceStatus] = []
     var dashboardSelection: DashboardSelection {
-        didSet { defaults.set(dashboardSelection.persistenceValue, forKey: Self.selectionDefaultsKey) }
+        didSet {
+            defaults.set(dashboardSelection.persistenceValue, forKey: Self.selectionDefaultsKey)
+            refreshLiveReadout()
+        }
     }
     var clientFilter: String? {
-        didSet { Self.persistFilter(clientFilter, key: Self.clientFilterDefaultsKey, defaults: defaults) }
+        didSet {
+            Self.persistFilter(clientFilter, key: Self.clientFilterDefaultsKey, defaults: defaults)
+            refreshLiveReadout()
+        }
     }
     var providerFilter: String? {
-        didSet { Self.persistFilter(providerFilter, key: Self.providerFilterDefaultsKey, defaults: defaults) }
+        didSet {
+            Self.persistFilter(providerFilter, key: Self.providerFilterDefaultsKey, defaults: defaults)
+            refreshLiveReadout()
+        }
     }
+    /// The model Auto mode follows, chosen from the live response stream; nil when no qualifying
+    /// response is recent.
+    private(set) var activeModel: ResponseGroupKey?
+    /// Live response speed of the selected model: the median of its latest responses in the last ten
+    /// minutes. In-memory only.
+    private(set) var liveSpeed: LiveSpeed?
+    /// What the menu-bar item shows.
+    private(set) var menuBarReadout = MenuBarReadout.unavailable
+    @ObservationIgnored private var liveResponses = LiveResponseBuffer()
+    @ObservationIgnored private var selector = ActiveModelSelector()
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let persistenceURL: URL
@@ -103,25 +122,14 @@ final class HistoryStore {
             .sorted { $0.1 > $1.1 }
             .map(\.0)
     }
-    var latestCohort: ModelCohort? {
-        filteredRecords.max { $0.completedAt < $1.completedAt }.map(ModelCohort.init)
-    }
-    var menuBarTitle: String {
-        guard isMonitoring else { return "— tok/s" }
-        if dashboardSelection.isAllModels { return "Compare" }
-        let selectedCohort: ModelCohort?
+    /// The cohort an Auto selection currently resolves to, or the pinned cohort.
+    var resolvedCohort: ModelCohort? {
         switch dashboardSelection {
-        case .latest: selectedCohort = latestCohort
-        case .cohort(let cohort): selectedCohort = cohort
-        case .all: selectedCohort = nil
+        case .auto, .autoTool:
+            AutoSelection.resolve(records: filteredRecords, activeModel: activeModel, client: dashboardSelection.autoClient)
+        case .cohort(let cohort): cohort
+        case .all: nil
         }
-        guard let selectedCohort,
-              let latest = filteredRecords.first(where: { ModelCohort($0) == selectedCohort && $0.outputTokens >= 20 && $0.turnThroughputTPS.isFinite && $0.turnThroughputTPS >= 0 }) else {
-            return "— tok/s"
-        }
-        let age = Date.now.timeIntervalSince(latest.completedAt)
-        guard age >= 0, age <= 900, latest.turnThroughputTPS.isFinite, latest.turnThroughputTPS >= 0 else { return "— tok/s" }
-        return String(format: "%.1f tok/s", latest.turnThroughputTPS)
     }
     var folderDescription: String { sourceStatus }
 
@@ -223,10 +231,13 @@ final class HistoryStore {
     func startMonitoring() {
         guard !isMonitoring else { return }
         errorMessage = nil
-        monitor = CodexSessionMonitor(root: folder(for: .codex))
-        claudeMonitor = ClaudeSessionMonitor(root: folder(for: .claudeCode))
+        // Only responses that complete from now on count as live; replayed history is not "now".
+        let launchedAt = Date.now
+        monitor = CodexSessionMonitor(root: folder(for: .codex), liveSince: launchedAt)
+        claudeMonitor = ClaudeSessionMonitor(root: folder(for: .claudeCode), liveSince: launchedAt)
         grokMonitor = GrokSessionMonitor(root: folder(for: .grokBuild))
         isMonitoring = true
+        refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
         saveHistory()
         let codexFolder = folder(for: .codex)
@@ -234,16 +245,21 @@ final class HistoryStore {
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 var newRecords: [TurnMetric] = []
+                var newResponses: [LiveResponse] = []
                 var failures: [String] = []
                 if FileManager.default.fileExists(atPath: codexFolder.path) {
                     do {
-                        newRecords += try await monitor.poll()
+                        let update = try await monitor.poll()
+                        newRecords += update.metrics
+                        newResponses += update.responses
                     } catch {
                         failures.append("Codex sessions")
                     }
                 }
                 do {
-                    newRecords += try await claudeMonitor.poll()
+                    let update = try await claudeMonitor.poll()
+                    newRecords += update.metrics
+                    newResponses += update.responses
                 } catch {
                     failures.append("Claude Code sessions")
                 }
@@ -263,6 +279,7 @@ final class HistoryStore {
                 self.history.prune()
                 for record in newRecords { self.history.upsert(record) }
                 if !newRecords.isEmpty { self.saveHistory() }
+                self.recordLiveResponses(newResponses)
                 if newRecords.isEmpty, failures.isEmpty {
                     self.errorMessage = nil
                 }
@@ -278,7 +295,38 @@ final class HistoryStore {
         claudeMonitor = nil
         grokMonitor = nil
         isMonitoring = false
+        refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
+    }
+
+    /// Adds completed responses to the live buffer and re-evaluates the active model and readout.
+    /// Called after every poll, so a model that has gone quiet also ages out of the readout.
+    func recordLiveResponses(_ responses: [LiveResponse], now: Date = .now) {
+        liveResponses.append(contentsOf: responses)
+        refreshLiveReadout(now: now)
+    }
+
+    private func refreshLiveReadout(now: Date = .now) {
+        let eligible = liveResponses.responses.filter { response in
+            (clientFilter == nil || response.client == clientFilter)
+                && (providerFilter == nil || (response.provider ?? "unknown") == providerFilter)
+        }
+        selector.clientRestriction = dashboardSelection.autoClient
+        let active = selector.update(responses: eligible, now: now)
+        let group: ResponseGroupKey? = switch dashboardSelection {
+        case .auto, .autoTool: active
+        case .cohort(let cohort): cohort.model == nil ? nil : ResponseGroupKey(cohort)
+        case .all: nil
+        }
+        let readout = MenuBarReadout.make(
+            isMonitoring: isMonitoring, selection: dashboardSelection, group: group,
+            liveSpeed: liveResponses.liveSpeed(for: group, now: now)
+        )
+        let speed = isMonitoring ? liveResponses.liveSpeed(for: group, now: now) : nil
+        // Assign only changes, so observers re-render when the readout actually moves.
+        if active != activeModel { activeModel = active }
+        if speed != liveSpeed { liveSpeed = speed }
+        if readout != menuBarReadout { menuBarReadout = readout }
     }
 
     private func saveHistory() {

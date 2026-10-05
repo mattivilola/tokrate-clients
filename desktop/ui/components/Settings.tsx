@@ -2,7 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import { ArrowLeft, ArrowUpRight, Check, FolderOpen, Minus, RotateCcw } from "lucide-react";
 import { client } from "../metrics";
 import { folderName, SOURCE_TITLES } from "../model/format";
-import { buildSentExample } from "./SharingChoice";
+import { REGION_NOTICE, buildSentExample } from "./SharingChoice";
 import { useStore } from "../store/store";
 import type { SourceId, SourceStatus } from "../store/types";
 import { Chip, Disclosure, StatusDot, Switch, useAppStore } from "./primitives";
@@ -145,9 +145,16 @@ export function SettingsView() {
           <SwitchRow
             id="show-speed"
             label="Show speed in tray"
-            hint="Shown in the tray tooltip and menu; adjacent tray text only on supported desktops. Values update after completed turns."
+            hint="Response speed: the median of your last 5 responses from the past 10 minutes. Shown in the tray tooltip and menu; adjacent tray text only on supported desktops. It shows — when nothing responded recently."
             checked={settings.showSpeed}
             onChange={(showSpeed) => void store.patch({ showSpeed })}
+          />
+          <SwitchRow
+            id="show-provider-badge"
+            label="Show provider badge"
+            hint="A filled circle with the provider's letter (A Anthropic, O OpenAI, X xAI) next to the model: in the tray icon where the desktop allows icon updates, and in this window."
+            checked={settings.showProviderBadge}
+            onChange={(showProviderBadge) => void store.patch({ showProviderBadge })}
           />
           <SwitchRow
             id="monitoring"
@@ -168,7 +175,7 @@ export function SettingsView() {
             label="Share with community"
             hint={
               settings.sharing
-                ? "On. New turn measurements are shared."
+                ? "On. New turn measurements, with their response timing, are shared."
                 : "Off. Your dashboard keeps working locally."
             }
             checked={settings.sharing}
@@ -196,7 +203,7 @@ export function SettingsView() {
           </div>
           <p className="fine">
             Contribution is off until you choose. No prompts, responses, code or local file
-            paths are uploaded. You can withdraw at any time: turning sharing off stops future
+            paths are uploaded. {REGION_NOTICE} You can withdraw at any time: turning sharing off stops future
             community requests and clears queued reports. Reports already received cannot be
             recalled by the switch.
           </p>

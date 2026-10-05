@@ -10,6 +10,8 @@ export function useDashboard(store: AppStore) {
   const toolFilter = useStore(store, (s) => s.ui.toolFilter);
   const providerFilter = useStore(store, (s) => s.ui.providerFilter);
   const sort = useStore(store, (s) => s.ui.sort);
+  const live = useStore(store, (s) => s.snapshot.live);
+  const active = useStore(store, (s) => s.snapshot.active);
   return useMemo(
     () =>
       buildDashboard({
@@ -20,7 +22,9 @@ export function useDashboard(store: AppStore) {
         provider: providerFilter,
         now,
         sort,
+        live,
+        active,
       }),
-    [records, settings.selection, settings.days, toolFilter, providerFilter, now, sort],
+    [records, settings.selection, settings.days, toolFilter, providerFilter, now, sort, live, active],
   );
 }

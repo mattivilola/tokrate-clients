@@ -3,10 +3,12 @@
 mod claude_parser;
 mod grok;
 mod history;
+mod live;
 mod model;
 mod monitor;
 mod parser;
 mod reader;
+mod selector;
 mod sharing;
 mod sources;
 
@@ -15,12 +17,21 @@ mod tests;
 
 pub use grok::GrokMonitor;
 pub use history::History;
+pub use live::{
+    LiveResponses, LiveScope, LiveValue, LIVE_CAPACITY, LIVE_VALUE_COUNT, LIVE_VALUE_WINDOW_MINUTES,
+};
 pub use model::{
-    ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
-    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION,
-    CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+    response_qualifies, ProviderBadge, ReportedReasoningEffort, ResponseMetric, TurnMetric,
+    CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
+    CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
+    GROK_PARSER_VERSION, RESPONSE_MAX_DURATION_SECONDS, RESPONSE_METRIC_VERSION,
+    RESPONSE_MIN_OUTPUT_TOKENS,
 };
 pub use monitor::Monitor;
+pub use selector::{
+    fallback_model, AutoSelector, ModelKey, SelectionMode, AUTO_LEAD_MINUTES, AUTO_QUIET_MINUTES,
+    AUTO_WINDOW_MINUTES,
+};
 pub use sharing::{
     signed_request, SharedSample, SharedSampleEnvelope, SharingQueue, SignedRequest, APP_VERSION,
     MAX_PENDING_SAMPLES,

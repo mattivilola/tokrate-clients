@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod badge;
 mod flyout;
 mod runtime;
 mod updater_state;
@@ -286,22 +287,15 @@ fn main() {
             let dashboard =
                 MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?;
             let history = MenuItem::with_id(app, "history", "Full history", true, None::<&str>)?;
-            let speed = MenuItem::with_id(
-                app,
-                "speed",
-                "Waiting for a completed turn",
-                false,
-                None::<&str>,
-            )?;
+            let speed =
+                MenuItem::with_id(app, "speed", "Waiting for a response", false, None::<&str>)?;
             let website =
                 MenuItem::with_id(app, "website", "Open global stats", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Tokrate", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&dashboard, &history, &speed, &website, &quit])?;
             let tray = TrayIconBuilder::with_id("tokrate")
-                .icon(tauri::image::Image::from_bytes(include_bytes!(
-                    "../icons/icon.png"
-                ))?)
-                .tooltip("Tokrate — completed-turn throughput")
+                .icon(badge::default_icon()?)
+                .tooltip("Tokrate — Response speed")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {

@@ -17,6 +17,11 @@ public struct CodexEventParser: Sendable {
         var modelWasAmbiguous = false
         var reasoningEffort: String?
         var reasoningEffortWasAmbiguous = false
+        /// Qualifying API responses of the turn (see `ResponseSpeed`).
+        var responseTokens = 0
+        var responseSeconds = 0.0
+        var responseCount = 0
+        var seenResponseIDs: Set<String> = []
     }
 
     private var sourceIdentity: String
@@ -27,6 +32,12 @@ public struct CodexEventParser: Sendable {
     private var clientVersion: String?
     private var sourceKind = "unknown"
     private var provider = "unknown"
+    /// Timestamp of the latest record that triggered a model request: the turn start, a user
+    /// message, a tool-call output or a message from another agent.
+    private var lastTriggerAt: Date?
+    /// The trigger the response in progress answers, fixed when its first output item arrives.
+    private var responseStartedAt: Date?
+    private var completedResponses: [LiveResponse] = []
 
     var excludesSessionFromMetrics: Bool { isAgentSession }
 
@@ -44,6 +55,15 @@ public struct CodexEventParser: Sendable {
         clientVersion = nil
         sourceKind = "unknown"
         provider = "unknown"
+        lastTriggerAt = nil
+        responseStartedAt = nil
+        completedResponses.removeAll(keepingCapacity: true)
+    }
+
+    /// Qualifying responses completed since the last call.
+    mutating func drainCompletedResponses() -> [LiveResponse] {
+        defer { completedResponses.removeAll(keepingCapacity: true) }
+        return completedResponses
     }
 
     /// Consumes one complete JSONL line. Malformed, unsupported, and incomplete events are ignored.
@@ -79,9 +99,15 @@ public struct CodexEventParser: Sendable {
             return nil
         }
 
+        if eventType == "response_item" {
+            consumeResponseItem(payload, at: parseDate(event["timestamp"]))
+            return nil
+        }
+
         if eventType == "token_usage_record" {
             guard let turnID = payload["turn_id"] as? String, !turnID.isEmpty else { return nil }
             var state = turns[turnID, default: TurnState()]
+            consumeResponseUsage(payload, completedAt: parseDate(event["timestamp"]), turnID: turnID, state: &state)
             if let usage = payload["turn_token_usage"] as? [String: Any],
                let output = nonnegativeInteger(usage["output_tokens"]) {
                 // Codex reports cumulative per-turn usage. A later record replaces the prior total.
@@ -100,6 +126,8 @@ public struct CodexEventParser: Sendable {
 
         let eventDate = parseDate(event["timestamp"])
         if subtype == "task_started" {
+            lastTriggerAt = eventDate
+            responseStartedAt = nil
             var state = turns[turnID, default: TurnState()]
             state.startObserved = true
             if state.startedAt == nil { state.startedAt = parseDate(payload["started_at"]) ?? eventDate }
@@ -165,8 +193,62 @@ public struct CodexEventParser: Sendable {
             reasoningOutputTokens: state.reasoningOutputTokens,
             sourceKind: sourceKind,
             provider: provider,
-            reasoningEffort: state.reasoningEffortWasAmbiguous ? nil : state.reasoningEffort
+            reasoningEffort: state.reasoningEffortWasAmbiguous ? nil : state.reasoningEffort,
+            responseOutputTokens: state.responseCount > 0 ? state.responseTokens : nil,
+            responseDurationSeconds: state.responseCount > 0 ? state.responseSeconds : nil,
+            responseCount: state.responseCount > 0 ? state.responseCount : nil
         )
+    }
+
+    /// Tracks which record the next response answers. Model output items fix the response's start;
+    /// everything that feeds the model (user messages, tool outputs, other agents) moves the trigger.
+    private mutating func consumeResponseItem(_ payload: [String: Any], at date: Date?) {
+        guard let type = payload["type"] as? String else { return }
+        let isTrigger = switch type {
+        case "message": payload["role"] as? String == "user"
+        case "agent_message": true
+        default: type.hasSuffix("_output")
+        }
+        if isTrigger {
+            if let date { lastTriggerAt = date }
+            return
+        }
+        // Developer instructions are context, not a request or a model output.
+        if type == "message", payload["role"] as? String != "assistant" { return }
+        if responseStartedAt == nil { responseStartedAt = lastTriggerAt }
+    }
+
+    /// One `token_usage_record` closes one API response: `usage` is that response's own usage, while
+    /// `turn_token_usage` is the cumulative turn total.
+    private mutating func consumeResponseUsage(_ payload: [String: Any], completedAt: Date?, turnID: String, state: inout TurnState) {
+        let started = responseStartedAt ?? lastTriggerAt
+        responseStartedAt = nil
+        guard let completedAt, let started,
+              let responseID = payload["response_id"] as? String, !responseID.isEmpty, responseID.count <= 200,
+              let usage = payload["usage"] as? [String: Any],
+              let tokens = nonnegativeInteger(usage["output_tokens"]),
+              !state.seenResponseIDs.contains(responseID) else { return }
+        if state.seenResponseIDs.count < 4_096 { state.seenResponseIDs.insert(responseID) }
+        let duration = completedAt.timeIntervalSince(started)
+        guard ResponseSpeed.qualifies(outputTokens: tokens, durationSeconds: duration) else { return }
+        let (sum, overflow) = state.responseTokens.addingReportingOverflow(tokens)
+        guard !overflow else { return }
+        state.responseTokens = sum
+        state.responseSeconds += duration
+        state.responseCount += 1
+        guard !isAgentSession, !state.modelWasAmbiguous, let model = state.model else { return }
+        completedResponses.append(LiveResponse(
+            id: "\(sessionIdentity ?? sourceIdentity)|\(responseID)",
+            model: model,
+            provider: provider,
+            client: TurnMetric.codexClient,
+            sourceKind: sourceKind,
+            metricVersion: TurnMetric.codexMetricVersion,
+            reasoningEffort: state.reasoningEffortWasAmbiguous ? nil : state.reasoningEffort,
+            completedAt: completedAt,
+            outputTokens: tokens,
+            durationSeconds: duration
+        ))
     }
 
     private func updateReasoningEffort(_ value: Any?, in state: inout TurnState) {

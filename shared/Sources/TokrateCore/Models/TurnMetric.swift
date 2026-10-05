@@ -3,7 +3,9 @@ import Foundation
 /// A completed client turn summarized without its prompt, response, or source path.
 public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     public static let codexClient = "codex"
-    public static let codexParserVersion = "codex-rollout-v1"
+    public static let codexParserVersion = "codex-rollout-v2"
+    /// Parser version of Codex records saved before response speed existed; the decoding default.
+    public static let legacyCodexParserVersion = "codex-rollout-v1"
     public static let codexMetricVersion = "turn-v1"
 
     /// Only populated when every observed turn_context agrees on an allowlisted effort.
@@ -23,8 +25,25 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     public let outputTokens: Int
     public let durationSeconds: Double
     public let codexTTFTSeconds: Double?
+    /// Output tokens summed over the turn's qualifying API responses (see `ResponseSpeed`). Nil when
+    /// no response qualified or the source cannot provide per-response timing.
+    public let responseOutputTokens: Int?
+    /// Seconds summed over the same qualifying responses.
+    public let responseDurationSeconds: Double?
+    /// Number of qualifying responses behind the two totals.
+    public let responseCount: Int?
+    /// Inference-profile region of a Claude model routed through Amazon Bedrock (`us`, `eu`, `apac`,
+    /// `global`, `jp`, `au`, `ca`, `us-gov`, or `unknown`). Nil for every other provider.
+    public let providerRegion: String?
     /// Generic name for the source-reported TTFT observation. The stored Codex name remains
     /// for backward compatibility with existing history files.
+    /// Output tokens per second while the model was responding: tools and waiting excluded.
+    public var responseSpeedTPS: Double? {
+        guard let tokens = responseOutputTokens, let seconds = responseDurationSeconds,
+              let count = responseCount, count > 0, tokens > 0, seconds > 0, seconds.isFinite else { return nil }
+        let speed = Double(tokens) / seconds
+        return speed.isFinite ? speed : nil
+    }
     public var isSupportedSourceTuple: Bool {
         Self.isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
     }
@@ -39,16 +58,19 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     }
 
     /// The single allowlist of client/parser/metric tuples that may be displayed as comparable
-    /// measurements or shared. Claude's v1 and v2 parsers stay listed so saved history keeps decoding;
-    /// `SharedSample` only shares v3.
+    /// measurements or shared. Older parser versions stay listed so saved history keeps decoding;
+    /// `SharedSample` refuses Claude v1 and v2.
     public static func isSupportedSourceTuple(client: String, parserVersion: String, metricVersion: String) -> Bool {
         switch (client, parserVersion, metricVersion) {
         case ("codex", "codex-rollout-v1", "turn-v1"),
+             ("codex", "codex-rollout-v2", "turn-v1"),
              ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v2", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v2", "claude-observed-subagent-turn-v1"),
              ("claude-code", "claude-transcript-v3", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v3", "claude-observed-subagent-turn-v1"),
+             ("claude-code", "claude-transcript-v4", "claude-observed-turn-v1"),
+             ("claude-code", "claude-transcript-v4", "claude-observed-subagent-turn-v1"),
              ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"):
             true
         default:
@@ -97,8 +119,20 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         reasoningOutputTokens: Int? = nil,
         sourceKind: String? = nil,
         provider: String? = nil,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        responseOutputTokens: Int? = nil,
+        responseDurationSeconds: Double? = nil,
+        responseCount: Int? = nil,
+        providerRegion: String? = nil
     ) {
+        // The three response fields travel together: a partial set carries no usable measurement.
+        let hasResponse = responseOutputTokens.map { $0 > 0 } == true
+            && responseDurationSeconds.map { $0.isFinite && $0 > 0 } == true
+            && responseCount.map { $0 > 0 } == true
+        self.responseOutputTokens = hasResponse ? responseOutputTokens : nil
+        self.responseDurationSeconds = hasResponse ? responseDurationSeconds : nil
+        self.responseCount = hasResponse ? responseCount : nil
+        self.providerRegion = providerRegion
         self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         self.client = client
         self.clientVersion = clientVersion
@@ -121,6 +155,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         case reasoningEffort, id, completedAt, client, model, clientVersion, parserVersion, metricVersion
         case reasoningOutputTokens, sourceKind, provider, outputTokens, durationSeconds, codexTTFTSeconds
         case turnThroughputTPS, streamingTPS
+        case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion
     }
 
     public init(from decoder: any Decoder) throws {
@@ -133,7 +168,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         client = try values.decodeIfPresent(String.self, forKey: .client) ?? Self.codexClient
         model = try values.decodeIfPresent(String.self, forKey: .model)
         clientVersion = try values.decodeIfPresent(String.self, forKey: .clientVersion)
-        parserVersion = try values.decodeIfPresent(String.self, forKey: .parserVersion) ?? Self.codexParserVersion
+        parserVersion = try values.decodeIfPresent(String.self, forKey: .parserVersion) ?? Self.legacyCodexParserVersion
         metricVersion = try values.decodeIfPresent(String.self, forKey: .metricVersion) ?? Self.codexMetricVersion
         reasoningOutputTokens = try values.decodeIfPresent(Int.self, forKey: .reasoningOutputTokens)
         sourceKind = try values.decodeIfPresent(String.self, forKey: .sourceKind)
@@ -143,6 +178,11 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         codexTTFTSeconds = try values.decodeIfPresent(Double.self, forKey: .codexTTFTSeconds)
         turnThroughputTPS = try values.decode(Double.self, forKey: .turnThroughputTPS)
         streamingTPS = try values.decodeIfPresent(Double.self, forKey: .streamingTPS)
+        // Records saved before response speed (0.1.14) carry none of these fields.
+        responseOutputTokens = try values.decodeIfPresent(Int.self, forKey: .responseOutputTokens)
+        responseDurationSeconds = try values.decodeIfPresent(Double.self, forKey: .responseDurationSeconds)
+        responseCount = try values.decodeIfPresent(Int.self, forKey: .responseCount)
+        providerRegion = try values.decodeIfPresent(String.self, forKey: .providerRegion)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -163,6 +203,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encodeIfPresent(codexTTFTSeconds, forKey: .codexTTFTSeconds)
         try values.encode(turnThroughputTPS, forKey: .turnThroughputTPS)
         try values.encodeIfPresent(streamingTPS, forKey: .streamingTPS)
+        try values.encodeIfPresent(responseOutputTokens, forKey: .responseOutputTokens)
+        try values.encodeIfPresent(responseDurationSeconds, forKey: .responseDurationSeconds)
+        try values.encodeIfPresent(responseCount, forKey: .responseCount)
+        try values.encodeIfPresent(providerRegion, forKey: .providerRegion)
     }
 }
 

@@ -1,7 +1,8 @@
 use crate::model::{
-    ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
-    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION,
-    CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+    bedrock_region_or_unknown, ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT,
+    CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT,
+    CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
+    GROK_PARSER_VERSION, RESPONSE_MIN_OUTPUT_TOKENS,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -13,12 +14,14 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.13";
+pub const APP_VERSION: &str = "0.1.14";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
 const QUEUE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 const MAX_SEEN_LOCAL_IDS: usize = 50_000;
+/// No model streams faster than this; a larger implied response speed is a measurement error.
+const MAX_RESPONSE_TPS: f64 = 2_000.0;
 
 /// A strictly allowlisted telemetry row. The local metric pseudonym is never included.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -39,6 +42,12 @@ pub struct SharedSample {
     pub reasoning_output_tokens: Option<i64>,
     pub duration_ms: f64,
     pub ttft_ms: Option<f64>,
+    /// Output tokens of the turn's qualifying API responses (always serialized, null if none).
+    pub response_output_tokens: Option<i64>,
+    pub response_duration_ms: Option<f64>,
+    pub response_count: Option<i64>,
+    /// Amazon Bedrock inference-profile region (`us`, `eu`, ... or `unknown`); null otherwise.
+    pub provider_region: Option<String>,
 }
 
 impl SharedSample {
@@ -91,6 +100,9 @@ impl SharedSample {
                 (milliseconds.is_finite() && (0.0..=duration_ms).contains(&milliseconds))
                     .then_some(milliseconds)
             });
+        let (response_output_tokens, response_duration_ms, response_count) =
+            shared_response_fields(metric, duration_ms);
+        let provider = shared_provider(client, metric.provider.as_deref());
         Some(Self {
             sample_id,
             observed_at: format_date(observed_at),
@@ -110,7 +122,7 @@ impl SharedSample {
                 .filter(|value| safe_identifier(value, 80, false))
                 .unwrap_or("unknown")
                 .to_owned(),
-            provider: shared_provider(client, metric.provider.as_deref()).to_owned(),
+            provider: provider.to_owned(),
             reasoning_effort: metric
                 .reasoning_effort
                 .as_deref()
@@ -127,8 +139,39 @@ impl SharedSample {
             reasoning_output_tokens,
             duration_ms,
             ttft_ms,
+            response_output_tokens,
+            response_duration_ms,
+            response_count,
+            provider_region: (provider == "amazon-bedrock")
+                .then(|| bedrock_region_or_unknown(metric.provider_region.as_deref()).to_owned()),
         })
     }
+}
+
+/// The response fields travel together or not at all: any inconsistency with the turn drops them.
+fn shared_response_fields(
+    metric: &TurnMetric,
+    turn_duration_ms: f64,
+) -> (Option<i64>, Option<f64>, Option<i64>) {
+    let (Some(tokens), Some(seconds), Some(count)) = (
+        metric.response_output_tokens,
+        metric.response_duration_seconds,
+        metric.response_count,
+    ) else {
+        return (None, None, None);
+    };
+    let milliseconds = seconds * 1_000.0;
+    if count < 1
+        || tokens < RESPONSE_MIN_OUTPUT_TOKENS.saturating_mul(count)
+        || tokens > metric.output_tokens
+        || !milliseconds.is_finite()
+        || milliseconds <= 0.0
+        || milliseconds > turn_duration_ms
+        || tokens as f64 / seconds > MAX_RESPONSE_TPS
+    {
+        return (None, None, None);
+    }
+    (Some(tokens), Some(milliseconds), Some(count))
 }
 
 /// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for

@@ -99,8 +99,11 @@ struct SpeedDelta: Equatable, Sendable {
         return value > 0 ? "+\(value)%" : value < 0 ? "−\(abs(value))%" : "0%"
     }
 
-    var summary: String {
-        roundedPercent == 0 ? "On par with your 24 h median" : "\(percentText) vs your 24 h median"
+    var summary: String { summary(medianName: "median") }
+
+    /// "+12% vs your 24 h response-speed median" for `medianName` "response-speed median".
+    func summary(medianName: String) -> String {
+        roundedPercent == 0 ? "On par with your 24 h \(medianName)" : "\(percentText) vs your 24 h \(medianName)"
     }
 
     var accessibilitySummary: String {
@@ -178,6 +181,9 @@ enum CohortLabeler {
             var parts: [String] = []
             if versions.count > 1 { parts.append(cohort.clientVersion.map { "v\($0)" } ?? "version unknown") }
             if providers.count > 1 { parts.append(cohort.provider.map(ModelCohort.providerTitle) ?? "Provider unknown") }
+            if Set(siblings.map { $0.providerRegion ?? "" }).count > 1 {
+                parts.append(cohort.providerRegion.map { "Bedrock \(ModelCohort.regionTitle($0))" } ?? "No region")
+            }
             if parts.isEmpty {
                 // Siblings differ only by parser or metric internals; keep entries distinguishable.
                 parts.append("parser \(cohort.parserVersion)")
@@ -206,14 +212,16 @@ enum ModelPickerGrouping {
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
-    /// The model picker button text for the current selection.
-    static func label(selection: DashboardSelection, latest: ModelCohort?, cohorts: [ModelCohort]) -> String {
+    /// The model picker button text for the current selection: "Auto · claude-opus-5-5".
+    static func label(selection: DashboardSelection, resolved: ModelCohort?, cohorts: [ModelCohort]) -> String {
         switch selection {
         case .all:
             return "All models"
-        case .latest:
-            guard let latest else { return "Latest model" }
-            return displayTitle(for: latest, in: cohorts)
+        case .auto:
+            return resolved.map { "Auto · \($0.displayModel)" } ?? "Auto"
+        case .autoTool(let client):
+            let tool = ModelCohort.clientTitle(client)
+            return resolved.map { "Auto in \(tool) · \($0.displayModel)" } ?? "Auto in \(tool)"
         case .cohort(let cohort):
             return displayTitle(for: cohort, in: cohorts)
         }
@@ -334,5 +342,49 @@ enum MeasurementGrouping {
                 )
             }
             .sorted { $0.latestAt == $1.latestAt ? $0.title < $1.title : $0.latestAt > $1.latestAt }
+    }
+}
+
+// MARK: - Response speed vocabulary
+
+/// The words for the primary metric. Response speed is the speed while the model is responding;
+/// turn speed (whole turn, tools and waiting included) stays the secondary metric.
+enum ResponseSpeedCopy {
+    static let title = "Response speed"
+    static let unit = "tok/s"
+    /// The one-line definition shown next to a response-speed readout.
+    static let definition = "Output tokens per second while the model is responding — tools and your time excluded."
+    /// Very short qualifier shown beside the unit under the readout.
+    static let shortDefinition = "while responding, tools excluded"
+    static let explanation = "Response speed is output tokens divided by the seconds the model spent producing each response, from the request that triggered it to its last output. Tool runs and your own time are excluded; reasoning tokens are included. Only responses of at least 200 tokens and at most 10 minutes count, so tiny automated check-ins never do. It is not streaming speed."
+}
+
+// MARK: - Menu-bar readout
+
+/// What the menu-bar item shows: the live response speed of the followed model and its maker.
+struct MenuBarReadout: Equatable, Sendable {
+    let speedText: String
+    let group: ResponseGroupKey?
+    let maker: ModelMaker?
+    let accessibilityLabel: String
+
+    static let unavailable = MenuBarReadout(speedText: "— tok/s", group: nil, maker: nil, accessibilityLabel: "Tokrate, response speed: unavailable")
+
+    static func make(isMonitoring: Bool, selection: DashboardSelection, group: ResponseGroupKey?, liveSpeed: LiveSpeed?) -> MenuBarReadout {
+        guard isMonitoring else { return .unavailable }
+        if selection.isAllModels {
+            return MenuBarReadout(speedText: "Compare", group: nil, maker: nil, accessibilityLabel: "Tokrate, model comparison")
+        }
+        let maker = group.map { ModelMaker($0) }
+        let provider = maker.map { $0 == .unknown ? "" : "\($0.title), " } ?? ""
+        guard let liveSpeed else {
+            return MenuBarReadout(speedText: "— tok/s", group: group, maker: maker, accessibilityLabel: "Tokrate, \(provider)response speed: unavailable")
+        }
+        return MenuBarReadout(
+            speedText: String(format: "%.1f tok/s", liveSpeed.medianTPS),
+            group: group,
+            maker: maker,
+            accessibilityLabel: String(format: "Tokrate, %@response speed: %.1f tokens per second", provider, liveSpeed.medianTPS)
+        )
     }
 }

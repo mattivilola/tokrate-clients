@@ -19,6 +19,11 @@
   --good: #2e8f62;
   --danger: #c8423b;
   --danger-tint: #fbe9e7;
+  --badge-anthropic: #d97757;
+  --badge-openai: #10a37f;
+  --badge-xai: #000000;
+  --badge-xai-letter: #ffffff;
+  --badge-unknown: #8a9ba3;
   --shadow: 0 1px 2px rgb(11 37 48 / 0.06), 0 8px 24px rgb(11 37 48 / 0.06);
   --radius-card: 16px;
   --radius-control: 10px;
@@ -52,6 +57,8 @@
     --good: #5bc98f;
     --danger: #f07a72;
     --danger-tint: #3c1a19;
+    --badge-xai: #ffffff;
+    --badge-xai-letter: #000000;
     --shadow: none;
   }
 }
@@ -245,6 +252,7 @@ time,
   border-color: var(--accent);
 }
 .picker-label {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -525,6 +533,32 @@ time,
   color: var(--muted);
 }
 
+/* ---- provider badge ------------------------------------------------------ */
+.provider-badge {
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.badge-letter {
+  fill: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.badge-anthropic .badge-disc {
+  fill: var(--badge-anthropic);
+}
+.badge-openai .badge-disc {
+  fill: var(--badge-openai);
+}
+.badge-xai .badge-disc {
+  fill: var(--badge-xai);
+}
+.badge-xai .badge-letter {
+  fill: var(--badge-xai-letter);
+}
+.badge-unknown .badge-disc {
+  fill: var(--badge-unknown);
+}
+
 /* ---- chips --------------------------------------------------------------- */
 .chip {
   display: inline-flex;
@@ -558,6 +592,7 @@ time,
 }
 .card-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -585,6 +620,7 @@ time,
 .segmented-sm .segment {
   font-size: 12px;
   padding: 4px 10px;
+  white-space: nowrap;
 }
 .segment[aria-checked="true"] {
   background: var(--surface);
@@ -936,6 +972,17 @@ time,
   background: linear-gradient(90deg, var(--arc-start), var(--arc-end));
   border-radius: 2px;
   transition: width 400ms var(--ease);
+}
+.view-toggle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 2px 0 8px;
+}
+.view-toggle .muted-line {
+  color: var(--muted);
+  font-size: 12px;
 }
 .compare .muted-line {
   margin-bottom: 8px;

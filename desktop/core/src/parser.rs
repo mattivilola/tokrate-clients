@@ -1,4 +1,6 @@
-use crate::model::{ReportedReasoningEffort, TurnMetric};
+use crate::model::{
+    response_qualifies, ReportedReasoningEffort, ResponseMetric, ResponseTotals, TurnMetric,
+};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
@@ -9,6 +11,7 @@ const MAX_TRACKED_TURNS: usize = 4_096;
 const MAX_EMITTED_TURNS: usize = 8_192;
 const MAX_TURN_ID_BYTES: usize = 512;
 const MAX_SESSION_ID_BYTES: usize = 512;
+const MAX_PENDING_RESPONSES: usize = 1_024;
 
 pub(crate) trait JsonlEventParser: Send {
     fn reset(&mut self, source_identity: String);
@@ -16,6 +19,16 @@ pub(crate) trait JsonlEventParser: Send {
     fn excludes_session(&self) -> bool;
     /// The reader started inside the file, after its header, so earlier records were never seen.
     fn begin_mid_file(&mut self) {}
+    /// Closes work that was waiting for more records, once the reader has nothing more to read:
+    /// a turn whose terminal message may still be written, or a complete tool-call response.
+    /// `final_read` marks a complete (non-live) read of the file.
+    fn flush_pending(&mut self, _now: DateTime<Utc>, _final_read: bool) -> Option<TurnMetric> {
+        None
+    }
+    /// Qualifying responses completed since the last call (the live stream).
+    fn take_responses(&mut self) -> Vec<ResponseMetric> {
+        Vec::new()
+    }
 }
 
 #[derive(Default)]
@@ -31,6 +44,9 @@ struct TurnState {
     model_was_ambiguous: bool,
     reasoning_effort: Option<String>,
     reasoning_effort_was_ambiguous: bool,
+    /// Qualifying model responses of this turn (one per token-usage record).
+    responses: ResponseTotals,
+    response_ids: HashSet<String>,
 }
 
 /// Parser state is intentionally bounded. Source IDs are held only long enough to derive a digest.
@@ -45,6 +61,11 @@ pub(crate) struct CodexEventParser {
     client_version: Option<String>,
     source_kind: String,
     provider: String,
+    /// Latest turn start, user message or tool output: what triggers the next model request.
+    latest_trigger: Option<DateTime<Utc>>,
+    /// The trigger in force when the current response's first item arrived.
+    response_start: Option<DateTime<Utc>>,
+    responses: Vec<ResponseMetric>,
 }
 
 impl CodexEventParser {
@@ -60,6 +81,9 @@ impl CodexEventParser {
             client_version: None,
             source_kind: "unknown".to_owned(),
             provider: "unknown".to_owned(),
+            latest_trigger: None,
+            response_start: None,
+            responses: Vec::new(),
         }
     }
 
@@ -93,8 +117,14 @@ impl CodexEventParser {
             return None;
         }
 
+        if event_type == "response_item" {
+            self.consume_response_item(payload, parse_date(event.get("timestamp")));
+            return None;
+        }
+
         if event_type == "token_usage_record" {
             let turn_id = valid_turn_id(payload.get("turn_id")?)?;
+            self.consume_response_usage(turn_id, payload, parse_date(event.get("timestamp")));
             let state = self.turn_state_mut(turn_id);
             if let Some(usage) = payload.get("turn_token_usage").and_then(Value::as_object) {
                 if let Some(output) = nonnegative_integer(usage.get("output_tokens")) {
@@ -119,6 +149,10 @@ impl CodexEventParser {
         let event_date = parse_date(event.get("timestamp"));
 
         if subtype == "task_started" {
+            if let Some(date) = event_date {
+                self.latest_trigger = Some(date);
+                self.response_start = None;
+            }
             let state = self.turn_state_mut(turn_id);
             state.start_observed = true;
             if state.started_at.is_none() {
@@ -171,6 +205,8 @@ impl CodexEventParser {
         self.remember_emitted(turn_id);
         self.turn_order.retain(|known| known != turn_id);
         let state = self.turns.remove(turn_id).unwrap_or_default();
+        let (response_output_tokens, response_duration_seconds, response_count) =
+            state.responses.fields();
         let identity = self
             .session_identity
             .as_deref()
@@ -206,7 +242,124 @@ impl CodexEventParser {
             } else {
                 state.reasoning_effort
             },
+            response_output_tokens,
+            response_duration_seconds,
+            response_count,
+            provider_region: None,
         })
+    }
+
+    /// Tracks what triggers each model request. A user message or a tool output starts the next
+    /// response; the first other item (reasoning, assistant text, a tool call) after it is the
+    /// response's first item, and its trigger is the response start.
+    fn consume_response_item(&mut self, payload: &Map<String, Value>, at: Option<DateTime<Utc>>) {
+        let kind = payload.get("type").and_then(Value::as_str);
+        let role = payload.get("role").and_then(Value::as_str);
+        match (kind, role) {
+            // Developer instructions are context: neither a request nor a model output.
+            (Some("message"), Some("developer")) | (None, _) => {}
+            // User messages and messages from other agents feed the model.
+            (Some("message"), Some("user")) | (Some("agent_message"), _) => {
+                self.latest_trigger = at.or(self.latest_trigger);
+                self.response_start = None;
+            }
+            (Some(kind), _) if kind.ends_with("_output") => {
+                self.latest_trigger = at.or(self.latest_trigger);
+                self.response_start = None;
+            }
+            _ => {
+                if self.response_start.is_none() {
+                    self.response_start = self.latest_trigger;
+                }
+            }
+        }
+    }
+
+    /// One `token_usage_record` closes one model response: its per-response `usage` output tokens,
+    /// from its start (see [`Self::consume_response_item`]) to this record.
+    fn consume_response_usage(
+        &mut self,
+        turn_id: &str,
+        payload: &Map<String, Value>,
+        at: Option<DateTime<Utc>>,
+    ) {
+        // Without a recorded first item the latest trigger still starts the response.
+        let start = self.response_start.take().or(self.latest_trigger);
+        let (Some(start), Some(end)) = (start, at) else {
+            return;
+        };
+        let Some(tokens) = payload
+            .get("usage")
+            .and_then(Value::as_object)
+            .and_then(|usage| nonnegative_integer(usage.get("output_tokens")))
+        else {
+            return;
+        };
+        let Some(nanos) = (end - start).num_nanoseconds() else {
+            return;
+        };
+        let duration = nanos as f64 / 1e9;
+        if !response_qualifies(tokens, duration) {
+            return;
+        }
+        // A record without a response id cannot be told apart from a repeat and is not counted.
+        let Some(response_id) = payload
+            .get("response_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= MAX_TURN_ID_BYTES)
+        else {
+            return;
+        };
+        let state = self.turn_state_mut(turn_id);
+        // A repeated record for the same response must not be counted twice.
+        if !state.response_ids.insert(response_id.to_owned()) {
+            return;
+        }
+        state.responses.add(tokens, duration);
+        if self.is_agent_session {
+            return;
+        }
+        let state = self.turn_state_mut(turn_id);
+        // The live stream needs a single, known model.
+        let model = match (&state.model, state.model_was_ambiguous) {
+            (Some(model), false) => model.clone(),
+            _ => return,
+        };
+        let reasoning_effort = if state.reasoning_effort_was_ambiguous {
+            None
+        } else {
+            state.reasoning_effort.clone()
+        };
+        let identity = self
+            .session_identity
+            .as_deref()
+            .unwrap_or(&self.source_identity);
+        let mut digest = Sha256::new();
+        for part in [
+            "response",
+            identity,
+            turn_id,
+            response_id,
+            &end.to_rfc3339(),
+        ] {
+            digest.update(part.as_bytes());
+            digest.update(b"|");
+        }
+        if self.responses.len() >= MAX_PENDING_RESPONSES {
+            self.responses.remove(0);
+        }
+        self.responses.push(ResponseMetric {
+            id: format!("{:x}", digest.finalize()),
+            completed_at: end,
+            model: Some(model),
+            provider: Some(self.provider.clone()),
+            client: crate::model::CODEX_CLIENT.to_owned(),
+            source_kind: Some(self.source_kind.clone()),
+            metric_version: crate::model::CODEX_METRIC_VERSION.to_owned(),
+            reasoning_effort,
+            output_tokens: tokens,
+            duration_seconds: duration,
+        });
     }
 
     fn consume_session_meta(&mut self, payload: &Map<String, Value>) {
@@ -299,6 +452,10 @@ impl JsonlEventParser for CodexEventParser {
 
     fn excludes_session(&self) -> bool {
         CodexEventParser::excludes_session(self)
+    }
+
+    fn take_responses(&mut self) -> Vec<ResponseMetric> {
+        std::mem::take(&mut self.responses)
     }
 }
 

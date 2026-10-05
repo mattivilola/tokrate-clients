@@ -19,7 +19,10 @@ enum SamplePayload {
             reasoningOutputTokens: 400,
             sourceKind: "primary",
             provider: "openai",
-            reasoningEffort: "medium"
+            reasoningEffort: "medium",
+            responseOutputTokens: 1_000,
+            responseDurationSeconds: 12.5,
+            responseCount: 3
         )
     }
 

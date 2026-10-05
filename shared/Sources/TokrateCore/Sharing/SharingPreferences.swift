@@ -69,7 +69,11 @@ public final class UserDefaultsSharingPreferenceStore: SharingPreferenceStore {
 /// Separates a saved consent decision from actual availability (for example, a locked Keychain).
 @MainActor @Observable
 public final class SharingPreferences {
-    public static let currentNoticeVersion = 1
+    /// Notice version 2 (0.1.14) adds response-speed totals, the Bedrock inference-profile region,
+    /// and the server-derived continent. A saved contribution consent for an older notice is paused
+    /// until the user chooses again, exactly like a legacy default-on setting; a saved opt-out stays
+    /// off.
+    public static let currentNoticeVersion = 2
 
     public let session: SharingSession
     public private(set) var isSharingRequested: Bool
