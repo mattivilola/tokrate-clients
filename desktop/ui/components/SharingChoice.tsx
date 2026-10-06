@@ -78,11 +78,16 @@ export function SharingChoice({
   return (
     <div className="choice">
       <h1 id={headingId} tabIndex={-1} ref={heading}>
-        Share your speed with the community?
+        We measure speed, not your conversations.
       </h1>
+      <p className="lede">
+        Tokrate reads your local session logs to time each answer. The text stays on this
+        computer. If you contribute, only the numbers are sent: which model, how many tokens,
+        how many seconds.
+      </p>
       <p className="lede" id={`${headingId}-description`}>
-        Optional. Tokrate works fully on this computer either way. If you contribute, your
-        anonymous measurements join the public board at tokrate.dev.
+        Optional. Local monitoring and history work either way. Contributions join the public
+        board at tokrate.dev.
       </p>
       <div className="share-lists">
         <div>
