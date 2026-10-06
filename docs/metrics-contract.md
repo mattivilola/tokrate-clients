@@ -361,7 +361,7 @@ Three new nullable per-turn fields describe the prompt tokens of a turn and how 
 | --- | --- | --- |
 | `inputTokens` | Int? | Total input (prompt) tokens processed across all model requests of the turn, **including** cached tokens. |
 | `cacheReadInputTokens` | Int? | Input tokens served from the provider's prompt cache. Never more than `inputTokens`. |
-| `cacheWriteInputTokens` | Int? | Tokens written to the prompt cache. Reported by Claude Code only; `null` for Codex and Grok Build. |
+| `cacheWriteInputTokens` | Int? | Tokens written to the prompt cache. Reported by Claude Code and by OpenCode turns whose provider is `anthropic`; `null` for Codex, Grok Build, Antigravity and every other OpenCode provider. |
 
 Hit ratio = `cacheReadInputTokens / inputTokens` (defined only when `inputTokens > 0`).
 

@@ -166,6 +166,24 @@ const SERIES: Series[] = [
     tokenFactor: 1.2,
     delegates: 0.0,
   },
+  {
+    // OpenCode keeps the raw provider id (here a gateway) locally.
+    model: "moonshotai/kimi-k2.5",
+    client: "opencode",
+    effort: "medium",
+    provider: "openrouter",
+    parser: "opencode-db-v1",
+    metricVersion: "opencode-observed-turn-v1",
+    sourceKind: "primary",
+    everyMinutes: 61,
+    base: 38,
+    spread: 14,
+    ttft: false,
+    offset: 27,
+    responseFactor: 1.8,
+    tokenFactor: 0.8,
+    delegates: 0.1,
+  },
 ];
 
 export function previewRecords(now: number): Metric[] {
@@ -280,6 +298,7 @@ const DEFAULT_ROOTS: Record<SourceId, string> = {
   "claude-code": "~/.claude/projects",
   "grok-build": "~/.grok/sessions",
   antigravity: "~/.gemini",
+  opencode: "~/.local/share/opencode",
 };
 
 function previewBoard(records: Metric[]): Board {
@@ -323,6 +342,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     claudeRoot: "",
     grokRoot: "",
     antigravityRoot: "",
+    opencodeRoot: "",
   };
   const custom: Partial<Record<SourceId, string>> = {};
   const sources = (): SourceStatus[] =>

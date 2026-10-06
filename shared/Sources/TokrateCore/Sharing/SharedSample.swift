@@ -95,12 +95,13 @@ public struct SharedSample: Encodable, Sendable {
     }
 
     /// Bedrock and Vertex are explicit-evidence providers only Claude Code reports; `google` is the
-    /// routing Antigravity's Gemini models have by construction.
+    /// routing Antigravity's Gemini models have by construction and OpenCode reports for Google's own API.
+    /// OpenCode records with any other provider id (gateways, vendor plans, local servers) stay local.
     public static func isAllowedProvider(_ provider: String?, client: String) -> Bool {
         switch provider ?? "unknown" {
         case "openai", "anthropic", "xai", "unknown": true
         case "amazon-bedrock", "google-vertex": client == "claude-code"
-        case "google": client == "antigravity"
+        case "google": client == "antigravity" || client == "opencode"
         default: false
         }
     }

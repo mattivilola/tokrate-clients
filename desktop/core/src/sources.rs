@@ -1,5 +1,7 @@
 use crate::delegation::DelegationTracker;
-use crate::{AntigravityMonitor, GrokMonitor, Monitor, ResponseMetric, TurnMetric};
+use crate::{
+    AntigravityMonitor, GrokMonitor, Monitor, OpenCodeMonitor, ResponseMetric, TurnMetric,
+};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::io;
@@ -12,18 +14,20 @@ const CLAUDE_TOTAL_BUDGET: usize = 360_448;
 // subagents each keep service while the other is catching up.
 const CLAUDE_SUBAGENT_BUDGET: usize = CLAUDE_TOTAL_BUDGET / 4;
 const CLAUDE_BUDGET: usize = CLAUDE_TOTAL_BUDGET - CLAUDE_SUBAGENT_BUDGET;
-// Antigravity reads whole SQLite databases, so its share limits how many are read per poll; a
-// database larger than the share is read alone and charged the share.
+// Antigravity and OpenCode read SQLite databases whole, so their shares limit how many are read
+// per poll; a read larger than the share is charged the share.
 const ANTIGRAVITY_BUDGET: usize = 131_072;
+const OPENCODE_BUDGET: usize = 65_536;
 const GROK_BUDGET: usize =
-    TOTAL_POLL_BUDGET - CODEX_BUDGET - CLAUDE_TOTAL_BUDGET - ANTIGRAVITY_BUDGET;
+    TOTAL_POLL_BUDGET - CODEX_BUDGET - CLAUDE_TOTAL_BUDGET - ANTIGRAVITY_BUDGET - OPENCODE_BUDGET;
 
-/// Polls the four supported local data roots under one aggregate content-read limit.
+/// Polls the five supported local data roots under one aggregate content-read limit.
 pub struct SourceMonitor {
     codex_root: PathBuf,
     claude_root: PathBuf,
     grok_root: PathBuf,
     antigravity_root: PathBuf,
+    opencode_root: PathBuf,
     codex: Monitor,
     claude: Monitor,
     claude_subagents: Monitor,
@@ -32,6 +36,7 @@ pub struct SourceMonitor {
     claude_delegation: DelegationTracker,
     grok: GrokMonitor,
     antigravity: AntigravityMonitor,
+    opencode: OpenCodeMonitor,
     bytes_read_last_poll: usize,
     had_source_error: bool,
 }
@@ -44,6 +49,7 @@ impl SourceMonitor {
         claude_root: PathBuf,
         grok_root: PathBuf,
         antigravity_root: PathBuf,
+        opencode_root: PathBuf,
     ) -> Self {
         Self {
             codex: Monitor::new(codex_root.clone()),
@@ -52,10 +58,12 @@ impl SourceMonitor {
             claude_delegation: DelegationTracker::new(),
             grok: GrokMonitor::new(grok_root.clone()),
             antigravity: AntigravityMonitor::new(antigravity_root.clone()),
+            opencode: OpenCodeMonitor::new(opencode_root.clone()),
             codex_root,
             claude_root,
             grok_root,
             antigravity_root,
+            opencode_root,
             bytes_read_last_poll: 0,
             had_source_error: false,
         }
@@ -81,6 +89,10 @@ impl SourceMonitor {
                 self.antigravity_root = root.clone();
                 self.antigravity = AntigravityMonitor::new(root);
             }
+            "opencode" => {
+                self.opencode_root = root.clone();
+                self.opencode = OpenCodeMonitor::new(root);
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -97,6 +109,7 @@ impl SourceMonitor {
             "claude-code" => Some(&self.claude_root),
             "grok-build" => Some(&self.grok_root),
             "antigravity" => Some(&self.antigravity_root),
+            "opencode" => Some(&self.opencode_root),
             _ => None,
         }
     }
@@ -167,6 +180,14 @@ impl SourceMonitor {
                 .bytes_read_last_poll()
                 .min(ANTIGRAVITY_BUDGET);
         }
+        if self.opencode_root.is_dir() {
+            match self.opencode.poll_with_budget(now, OPENCODE_BUDGET) {
+                Ok(found) => records.extend(found),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => self.had_source_error = true,
+            }
+            self.bytes_read_last_poll += self.opencode.bytes_read_last_poll().min(OPENCODE_BUDGET);
+        }
         if self.bytes_read_last_poll > TOTAL_POLL_BUDGET {
             return Err(io::Error::other("source monitor exceeded its read budget"));
         }
@@ -195,6 +216,7 @@ impl SourceMonitor {
         responses.extend(self.claude.take_live_responses());
         responses.extend(self.claude_subagents.take_live_responses());
         responses.extend(self.antigravity.take_live_responses());
+        responses.extend(self.opencode.take_live_responses());
         responses.sort_by(|left, right| {
             left.completed_at
                 .cmp(&right.completed_at)

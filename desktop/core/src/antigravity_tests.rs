@@ -1,9 +1,10 @@
 //! Tests for the protobuf reader, the Antigravity database reader, the execution/turn builder
 //! and the monitor, over synthetic SQLite databases with hand-encoded protobuf blobs.
 
-use crate::antigravity_db::{read_database, read_only_uri};
+use crate::antigravity_db::{read_database, GenerationCache};
 use crate::antigravity_turns::turn_id;
 use crate::protobuf::{Malformed, Message};
+use crate::sqlite_read::read_only_uri;
 use crate::{
     AntigravityMonitor, ProviderBadge, SharedSample, SourceMonitor, ToolSurface, TurnMetric,
     ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
@@ -113,6 +114,8 @@ struct StepSpec {
     /// (output tokens, thinking tokens)
     usage: Option<(u64, u64)>,
     generation: u64,
+    /// (uncached input tokens 9.2, cache-read tokens 9.5)
+    input: (u64, u64),
     omit_generation_message: bool,
     subtrajectory: bool,
 }
@@ -126,6 +129,7 @@ impl StepSpec {
             completed: None,
             usage: None,
             generation: 0,
+            input: (5_000, 4_000),
             omit_generation_message: false,
             subtrajectory: false,
         }
@@ -144,6 +148,11 @@ impl StepSpec {
 
     fn usage(mut self, output: u64, thinking: u64) -> Self {
         self.usage = Some((output, thinking));
+        self
+    }
+
+    fn input(mut self, uncached: u64, cache_read: u64) -> Self {
+        self.input = (uncached, cache_read);
         self
     }
 
@@ -169,9 +178,9 @@ impl StepSpec {
             pb = pb.message(
                 9,
                 Pb::default()
-                    .varint(2, 5_000)
+                    .varint_nonzero(2, self.input.0)
                     .varint_nonzero(3, output)
-                    .varint(5, 4_000)
+                    .varint_nonzero(5, self.input.1)
                     .varint_nonzero(9, thinking),
             );
         }
@@ -199,6 +208,13 @@ fn executor_blob(state: u64, id: &str, variant: Option<&str>) -> Vec<u8> {
         );
     }
     pb.done()
+}
+
+/// A generation row padded with an unrelated field, as the real ones carry megabytes of context.
+fn padded_generation_blob(model: &str, padding: usize) -> Vec<u8> {
+    let mut blob = generation_blob(model, Some("false"));
+    blob.extend(Pb::default().bytes(99, &vec![b'x'; padding]).done());
+    blob
 }
 
 fn generation_blob(model: &str, non_gemini: Option<&str>) -> Vec<u8> {
@@ -477,7 +493,7 @@ fn reading_leaves_the_database_byte_identical_and_decodes_the_field_map() {
     let before = fs::read(&db.path).unwrap();
     let modified = fs::metadata(&db.path).unwrap().modified().unwrap();
 
-    let snapshot = read_database(&db.path).unwrap();
+    let snapshot = read_database(&db.path, &mut GenerationCache::default()).unwrap();
     assert_eq!(snapshot.steps.len(), 5);
     assert!(!snapshot.is_subagent);
     assert_eq!(snapshot.executors.len(), 1);
@@ -516,7 +532,13 @@ fn a_database_in_a_folder_with_spaces_is_read() {
             .join(format!("{CONVERSATION}.db")),
     );
     finished_execution(&db, now() - Duration::seconds(120), 4);
-    assert_eq!(read_database(&db.path).unwrap().steps.len(), 5);
+    assert_eq!(
+        read_database(&db.path, &mut GenerationCache::default())
+            .unwrap()
+            .steps
+            .len(),
+        5
+    );
     let mut monitor = AntigravityMonitor::new(
         fixture
             .dir
@@ -601,8 +623,120 @@ fn a_finished_execution_becomes_one_turn_with_exact_values() {
     assert_eq!(turn.response_count, Some(2));
     assert_eq!(turn.delegated_output_tokens, Some(0));
     assert_eq!(turn.surface, Some(ToolSurface::Desktop));
+    // Three model calls of 5,000 uncached and 4,000 cache-read input tokens each; the input total
+    // includes the cached tokens and cache writes are not recorded.
+    assert_eq!(turn.input_tokens, Some(27_000));
+    assert_eq!(turn.cache_read_input_tokens, Some(12_000));
+    assert_eq!(turn.cache_write_input_tokens, None);
     // Each execution is emitted once.
     assert!(poll(&mut monitor, now()).is_empty());
+}
+
+#[test]
+fn prompt_cache_sums_uncached_and_cache_read_input_with_absent_counts_as_zero() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    let t0 = now() - Duration::seconds(120);
+    let seconds = |value: i64| t0 + Duration::seconds(value);
+    db.generation(0, &generation_blob(MODEL, Some("false")));
+    db.executor(0, &executor_blob(4, EXECUTION, None));
+    db.step(
+        &StepSpec::new(0, EXECUTION)
+            .span(seconds(0), seconds(10))
+            .usage(300, 0)
+            .input(1_000, 0),
+    );
+    // Nothing read from the cache and no uncached input: both counts absent, i.e. 0.
+    db.step(
+        &StepSpec::new(1, EXECUTION)
+            .span(seconds(10), seconds(20))
+            .usage(300, 0)
+            .input(0, 0),
+    );
+    db.step(
+        &StepSpec::new(2, EXECUTION)
+            .span(seconds(20), seconds(30))
+            .usage(300, 0)
+            .input(200, 3_000),
+    );
+    let turn = &poll(&mut fixture.monitor(), now())[0];
+    assert_eq!(turn.input_tokens, Some(1_000 + 200 + 3_000));
+    assert_eq!(turn.cache_read_input_tokens, Some(3_000));
+    assert_eq!(turn.cache_write_input_tokens, None);
+    // The shared sample carries the same consistent set (cache write explicitly null).
+    let sample = SharedSample::from_metric(turn, Uuid::new_v4()).unwrap();
+    assert_eq!(
+        (
+            sample.input_tokens,
+            sample.cache_read_input_tokens,
+            sample.cache_write_input_tokens
+        ),
+        (Some(4_200), Some(3_000), None)
+    );
+    let json = serde_json::to_value(&sample).unwrap();
+    assert!(json["cacheWriteInputTokens"].is_null());
+    assert_eq!(json["inputTokens"], 4_200);
+}
+
+#[test]
+fn known_generations_are_not_fetched_again_and_a_row_written_later_is_picked_up() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    let started = now();
+    let s = started - Duration::seconds(0);
+    db.executor(
+        0,
+        &executor_blob(0, EXECUTION, Some("gemini-3.8-flash-high")),
+    );
+    db.generation(0, &padded_generation_blob(MODEL, 30_000));
+    // Generation 1 exists but cannot be decoded; generation 2 is not written yet.
+    let mut garbage = vec![0x0a, 0x7f];
+    garbage.extend(vec![0u8; 20_000]);
+    db.generation(1, &garbage);
+    let call = |idx: i64, generation: u64, at: i64| {
+        StepSpec::new(idx, EXECUTION)
+            .span(s + Duration::seconds(at), s + Duration::seconds(at + 10))
+            .usage(500, 0)
+            .generation(generation)
+    };
+    db.step(&call(0, 0, 1));
+    db.step(&call(1, 1, 12));
+    db.step(&call(2, 2, 24));
+    let mut monitor = fixture.monitor();
+    poll(&mut monitor, started - Duration::seconds(1));
+    // The first read fetched both rows that exist: the 30 KB and the 20 KB one.
+    assert!(monitor.bytes_read_last_poll() >= 50_000);
+    monitor.take_live_responses();
+
+    // A later change re-reads steps but none of the known generation rows, readable or not.
+    db.step(&call(3, 0, 36));
+    poll(&mut monitor, started + Duration::seconds(50));
+    let bytes = monitor.bytes_read_last_poll();
+    assert!(bytes > 0 && bytes < 20_000, "{bytes}");
+    // Its model call is still attributed from the cache; the call of the absent row is not.
+    let live = monitor.take_live_responses();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].model.as_deref(), Some(MODEL));
+
+    // The absent row is written later: asked for again, decoded once and picked up.
+    db.generation(2, &padded_generation_blob("gemini-3.8-pro", 5_000));
+    db.step(&call(4, 2, 48));
+    poll(&mut monitor, started + Duration::seconds(70));
+    let live = monitor.take_live_responses();
+    assert_eq!(
+        live.iter()
+            .filter_map(|r| r.model.as_deref())
+            .collect::<Vec<_>>(),
+        ["gemini-3.8-pro", "gemini-3.8-pro"],
+        "the earlier call that waited for its row and the new one"
+    );
+    let bytes = monitor.bytes_read_last_poll();
+    assert!(bytes >= 5_000 && bytes < 20_000, "{bytes}");
+    // The unreadable row stays unfetched.
+    db.step(&call(5, 1, 60));
+    poll(&mut monitor, started + Duration::seconds(80));
+    assert!(monitor.bytes_read_last_poll() < 5_000);
+    assert!(monitor.take_live_responses().is_empty());
 }
 
 #[test]
@@ -1211,6 +1345,7 @@ fn source_monitor_polls_antigravity_under_its_own_root_and_charges_a_bounded_bud
         empty("claude"),
         empty("grok"),
         fixture.root(),
+        empty("opencode"),
     );
     assert_eq!(monitor.root("antigravity"), Some(&fixture.root()));
     let turns = monitor.poll(now()).unwrap();
@@ -1282,7 +1417,7 @@ fn the_google_badge_is_matched_by_model_prefix_or_provider() {
 #[test]
 fn unreadable_database_retry_delay_doubles_up_to_five_minutes() {
     let seconds: Vec<i64> = (1..=8)
-        .map(|failures| crate::antigravity::retry_delay(failures).num_seconds())
+        .map(|failures| crate::sqlite_read::retry_delay(failures).num_seconds())
         .collect();
     assert_eq!(seconds, [10, 20, 40, 80, 160, 300, 300, 300]);
 }

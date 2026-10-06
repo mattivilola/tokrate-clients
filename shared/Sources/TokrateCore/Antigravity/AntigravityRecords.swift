@@ -37,6 +37,9 @@ struct AntigravityStep: Sendable {
     struct Usage: Sendable {
         let outputTokens: Int
         let thinkingTokens: Int
+        /// Uncached input tokens (9.2) and tokens read from the prompt cache (9.5); proto3 omits a 0.
+        let inputTokens: Int
+        let cacheReadTokens: Int
     }
 
     let idx: Int64
@@ -82,8 +85,13 @@ struct AntigravityStep: Sendable {
         if message.contains(9) {
             if let nested = message.message(9),
                let output = nested.proto3Varint(3), output <= Self.maximumTokens,
-               let thinking = nested.proto3Varint(9), thinking <= Self.maximumTokens {
-                usage = Usage(outputTokens: Int(output), thinkingTokens: Int(thinking))
+               let thinking = nested.proto3Varint(9), thinking <= Self.maximumTokens,
+               let input = nested.proto3Varint(2), input <= Self.maximumTokens,
+               let cacheRead = nested.proto3Varint(5), cacheRead <= Self.maximumTokens {
+                usage = Usage(
+                    outputTokens: Int(output), thinkingTokens: Int(thinking),
+                    inputTokens: Int(input), cacheReadTokens: Int(cacheRead)
+                )
             } else {
                 usage = nil
                 unreadable = true

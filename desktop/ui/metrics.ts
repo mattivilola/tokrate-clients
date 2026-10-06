@@ -99,6 +99,7 @@ export const CODING_TOOLS: Record<SourceId, { title: string; chip: string }> = {
   "claude-code": { title: "Claude Code", chip: "CC" },
   "grok-build": { title: "Grok Build", chip: "GB" },
   antigravity: { title: "Antigravity", chip: "AG" },
+  opencode: { title: "OpenCode", chip: "OC" },
 };
 const codingTool = (id: string): (typeof CODING_TOOLS)[SourceId] | undefined =>
   CODING_TOOLS[id as SourceId];
@@ -131,14 +132,25 @@ export const PROVIDER_LABELS: Record<string, string> = {
   xai: "xAI",
   google: "Google",
 };
-/** Display name of a provider; missing, "unknown" and unrecognised ids are an unknown route. */
-export const providerLabel = (provider: string | null | undefined) =>
-  (provider && PROVIDER_LABELS[provider]) || "Unknown route";
-/** "Amazon Bedrock route" / "Unknown route". */
-export const providerRoute = (provider: string | null | undefined) =>
-  provider && PROVIDER_LABELS[provider]
-    ? `${PROVIDER_LABELS[provider]} route`
-    : "Unknown route";
+/**
+ * A raw provider id as OpenCode records it (a gateway, a vendor plan or a local server such as
+ * `openrouter`, `kimi-for-coding` or `myomlx`): shown as it is, never mapped to a known provider.
+ */
+const RAW_PROVIDER = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+/**
+ * Display name of a provider: a known provider by name, a raw id (from OpenCode) as it is;
+ * missing, "unknown" and unusable ids are an unknown route.
+ */
+export const providerLabel = (provider: string | null | undefined) => {
+  if (!provider || provider === "unknown") return "Unknown route";
+  if (Object.hasOwn(PROVIDER_LABELS, provider)) return PROVIDER_LABELS[provider];
+  return RAW_PROVIDER.test(provider) ? provider : "Unknown route";
+};
+/** "Amazon Bedrock route" / "openrouter route" / "Unknown route". */
+export const providerRoute = (provider: string | null | undefined) => {
+  const label = providerLabel(provider);
+  return label === "Unknown route" ? label : `${label} route`;
+};
 const SUBAGENT_METRIC_VERSION = "claude-observed-subagent-turn-v1";
 export type MeasurementKind = "turn" | "subagent" | "workTurn";
 export const isSubagent = (m: Metric) =>
@@ -172,15 +184,18 @@ export const measurementDefinition = (m: Metric | undefined) =>
   })[m ? measurementKind(m) : "turn"];
 /** Vocabulary name of the measurement ("Turn speed"); precise definitions live in the explanation. */
 export const measurementLabel = measurementTitle;
+const TURN_EXPLANATIONS: Record<string, string> = {
+  antigravity: "Prompt through final answer of one agent run, including tools & waiting.",
+  opencode: "Prompt through final answer, including tools & waiting.",
+};
 /** Precise definition for the ⓘ explanation and group header tooltips. */
 export const measurementExplanation = (m: Metric) =>
   ({
     turn:
       client(m) === "claude-code"
         ? "Human prompt through the terminal response in the primary transcript, including tools and waiting."
-        : client(m) === "antigravity"
-          ? "Prompt through final answer of one agent run, including tools & waiting."
-          : "Completed Codex turn: output tokens divided by the whole turn, including tools, reasoning and waiting.",
+        : (TURN_EXPLANATIONS[client(m)] ??
+          "Completed Codex turn: output tokens divided by the whole turn, including tools, reasoning and waiting."),
     subagent:
       "Subagent task prompt to final answer, including tools and waiting.",
     workTurn:
@@ -424,9 +439,9 @@ export function cohortRows(
         );
       if (providers.size > 1)
         parts.push(
-          row.sample.provider && PROVIDER_LABELS[row.sample.provider]
-            ? PROVIDER_LABELS[row.sample.provider]
-            : "provider unknown",
+          providerLabel(row.sample.provider) === "Unknown route"
+            ? "provider unknown"
+            : providerLabel(row.sample.provider),
         );
       if (!parts.length) parts.push(`parser ${parserVersion(row.sample)}`);
       row.qualifier = parts.join(" · ");

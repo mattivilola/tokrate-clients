@@ -26,6 +26,8 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         var output: UInt64
         var thinking: UInt64 = 0
         var generation: UInt64? = 0
+        var input: UInt64 = 1_000
+        var cacheRead: UInt64 = 10
     }
 
     private func databaseURL(_ id: String? = nil, folder: String = "antigravity") -> URL {
@@ -52,7 +54,7 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         for call in calls {
             try database.addStep(SyntheticStep(
                 execution: execution, created: call.created, completed: call.completed, output: call.output,
-                thinking: call.thinking, generation: call.generation
+                thinking: call.thinking, input: call.input, cacheRead: call.cacheRead, generation: call.generation
             ))
             end = max(end, call.completed)
         }
@@ -612,8 +614,8 @@ final class AntigravityConversationMonitorTests: XCTestCase {
 
     func testReadOnlyURIEncodesEverythingThatCouldChangeItsMeaning() {
         let url = URL(fileURLWithPath: "/tmp/a b/c?d#e%f&g=h/x.db")
-        XCTAssertEqual(AntigravityDatabase.readOnlyURI(for: url), "file:/tmp/a%20b/c%3Fd%23e%25f%26g%3Dh/x.db?mode=ro")
-        XCTAssertEqual(AntigravityDatabase.readOnlyURI(for: URL(fileURLWithPath: "/Users/matti/.gemini/a.db")), "file:/Users/matti/.gemini/a.db?mode=ro")
+        XCTAssertEqual(ReadOnlySQLiteDatabase.readOnlyURI(for: url), "file:/tmp/a%20b/c%3Fd%23e%25f%26g%3Dh/x.db?mode=ro")
+        XCTAssertEqual(ReadOnlySQLiteDatabase.readOnlyURI(for: URL(fileURLWithPath: "/Users/matti/.gemini/a.db")), "file:/Users/matti/.gemini/a.db?mode=ro")
     }
 
     func testDatabaseFilesAreNeverModified() async throws {
@@ -678,6 +680,43 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertTrue(set.contains(100))
         XCTAssertTrue(set.contains(98))
         XCTAssertFalse(set.contains(97))
+    }
+
+    // MARK: Prompt cache
+
+    func testPromptCacheSumsUncachedInputAndCacheReadsAndNeverReportsWrites() async throws {
+        let database = try makeDatabase()
+        try addRun(database, calls: [
+            Call(created: 1, completed: 11, output: 1_000, input: 700, cacheRead: 300),
+            Call(created: 12, completed: 22, output: 500, input: 50, cacheRead: 950)
+        ])
+        let metric = try onlyMetric(await monitor().poll())
+        XCTAssertEqual(metric.inputTokens, 700 + 300 + 50 + 950)
+        XCTAssertEqual(metric.cacheReadInputTokens, 300 + 950)
+        XCTAssertNil(metric.cacheWriteInputTokens, "Antigravity does not record cache writes")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(SharedSample(metric))) as? [String: Any])
+        XCTAssertEqual(json["inputTokens"] as? Int, 2_000)
+        XCTAssertEqual(json["cacheReadInputTokens"] as? Int, 1_250)
+        XCTAssertTrue(json["cacheWriteInputTokens"] is NSNull)
+    }
+
+    func testAbsentProto3InputAndCacheCountsAreZeroNotMissing() async throws {
+        let database = try makeDatabase()
+        // A call that read nothing from the cache and one with no uncached input.
+        try addRun(database, calls: [
+            Call(created: 1, completed: 11, output: 1_000, input: 800, cacheRead: 0),
+            Call(created: 12, completed: 22, output: 500, input: 0, cacheRead: 200)
+        ])
+        let metric = try onlyMetric(await monitor().poll())
+        XCTAssertEqual(metric.inputTokens, 1_000)
+        XCTAssertEqual(metric.cacheReadInputTokens, 200)
+
+        let isolated = root.appendingPathComponent("zero", isDirectory: true)
+        let zero = try SyntheticAntigravityDatabase(url: isolated.appendingPathComponent("antigravity/conversations/z.db"))
+        try addRun(zero, calls: [Call(created: 1, completed: 11, output: 1_000, input: 0, cacheRead: 0)])
+        let none = try onlyMetric(await AntigravityConversationMonitor(root: isolated).poll())
+        XCTAssertEqual(none.inputTokens, 0, "0 is a valid, reported value")
+        XCTAssertEqual(none.cacheReadInputTokens, 0)
     }
 
     // MARK: Surface

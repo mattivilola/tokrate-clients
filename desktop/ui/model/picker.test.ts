@@ -151,9 +151,10 @@ describe("coding tool table", () => {
       "claude-code": "Claude Code",
       "grok-build": "Grok Build",
       antigravity: "Antigravity",
+      opencode: "OpenCode",
     });
     expect(Object.keys(CODING_TOOLS)).toEqual(Object.keys(SOURCE_TITLES));
-    expect(["codex", "claude-code", "grok-build", "antigravity"].map(toolChip)).toEqual(["CX", "CC", "GB", "AG"]);
+    expect(["codex", "claude-code", "grok-build", "antigravity", "opencode"].map(toolChip)).toEqual(["CX", "CC", "GB", "AG", "OC"]);
     expect(toolLabel("claude-code")).toBe("Claude Code");
     expect(toolLabel("other")).toBe("Coding tool");
   });

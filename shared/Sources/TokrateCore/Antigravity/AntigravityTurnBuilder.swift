@@ -9,6 +9,8 @@ struct AntigravityModelCall: Sendable {
     let completedAt: AntigravityInstant
     let outputTokens: Int
     let thinkingTokens: Int
+    let inputTokens: Int
+    let cacheReadTokens: Int
     let generation: AntigravityGeneration?
 
     var durationSeconds: TimeInterval { completedAt.seconds(since: createdAt) }
@@ -75,6 +77,7 @@ struct AntigravityTurnBuilder: Sendable {
         return AntigravityModelCall(
             stepIndex: step.idx, executionID: step.executionID, createdAt: created, completedAt: completed,
             outputTokens: usage.outputTokens, thinkingTokens: usage.thinkingTokens,
+            inputTokens: usage.inputTokens, cacheReadTokens: usage.cacheReadTokens,
             generation: generations[step.generationIndex]
         )
     }
@@ -124,7 +127,12 @@ struct AntigravityTurnBuilder: Sendable {
             // Subagent work started by this run is not part of its tokens and cannot be attributed yet:
             // the turn stays pending (shown locally, never shared) instead of claiming zero.
             delegatedOutputTokens: steps.contains(where: \.hasSubtrajectory) ? nil : 0,
-            surface: surface
+            surface: surface,
+            // 9.2 counts the uncached input, 9.5 the cache reads; the total includes both. Cache
+            // writes are not recorded. TurnMetric drops an inconsistent set.
+            inputTokens: calls.reduce(0) { $0 + $1.inputTokens + $1.cacheReadTokens },
+            cacheReadInputTokens: calls.reduce(0) { $0 + $1.cacheReadTokens },
+            cacheWriteInputTokens: nil
         )
         let hasResponse = metric.responseOutputTokens != nil
         return hasResponse && !metric.hasPlausibleResponseTiming ? metric.withoutResponseTiming() : metric

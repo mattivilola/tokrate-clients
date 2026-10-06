@@ -90,6 +90,8 @@ describe("dashboard model", () => {
   it("lists Antigravity among the coding tools", () => {
     expect(SOURCE_TITLES.antigravity).toBe("Antigravity");
     expect(CLIENT_ORDER).toContain("antigravity");
+    expect(CLIENT_ORDER).toContain("opencode");
+    expect(SOURCE_TITLES.opencode).toBe("OpenCode");
   });
   it("offers every attributable provider in the filter", () => {
     expect(PROVIDER_TITLES).toEqual({

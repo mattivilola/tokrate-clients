@@ -1,15 +1,15 @@
 //! Monitor for Antigravity (Google's agentic coding tool): the desktop app, the IDE and the `agy`
 //! CLI, which keep one SQLite database per conversation under `~/.gemini`.
 
-use crate::antigravity_db::read_database;
+use crate::antigravity_db::{read_database, GenerationCache};
 use crate::antigravity_turns::{finished_turns, live_calls};
 use crate::model::{ResponseMetric, ToolSurface, TurnMetric};
+use crate::sqlite_read::{retry_delay, DatabaseSignature, Remembered};
 use chrono::{DateTime, Duration, Utc};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 /// The data folders under the root that hold `<conversationId>.db` files, with the surface of
 /// the Antigravity product that writes to each: the app, the IDE and the `agy` CLI.
@@ -22,87 +22,14 @@ const CONVERSATION_FOLDERS: [(&str, ToolSurface); 3] = [
 const RETENTION_DAYS: i64 = 7;
 const MAX_DISCOVERED_PATHS: usize = 100_000;
 const MAX_DATABASES: usize = 128;
-/// Executions and live step indexes remembered per database.
-const MAX_REMEMBERED: usize = 4_096;
 const DISCOVERY_SECONDS: i64 = 10;
-
-/// What changed on disk: the size and modification time of the database and its write-ahead log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Signature {
-    database: (u64, Option<SystemTime>),
-    log: Option<(u64, Option<SystemTime>)>,
-}
-
-impl Signature {
-    fn of(path: &Path) -> Option<Self> {
-        let database = fs::metadata(path).ok()?;
-        let log = fs::metadata(wal_path(path))
-            .ok()
-            .map(|metadata| (metadata.len(), metadata.modified().ok()));
-        Some(Self {
-            database: (database.len(), database.modified().ok()),
-            log,
-        })
-    }
-
-    /// Last write to either file: recent activity may live only in the write-ahead log.
-    fn modified(&self) -> Option<DateTime<Utc>> {
-        [self.database.1, self.log.and_then(|log| log.1)]
-            .into_iter()
-            .flatten()
-            .max()
-            .map(DateTime::<Utc>::from)
-    }
-}
-
-fn wal_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push("-wal");
-    PathBuf::from(name)
-}
-
-/// A set that forgets its oldest entries instead of growing without bound.
-struct Remembered<T: std::hash::Hash + Eq + Clone> {
-    order: VecDeque<T>,
-    members: HashSet<T>,
-}
-
-impl<T: std::hash::Hash + Eq + Clone> Remembered<T> {
-    fn new() -> Self {
-        Self {
-            order: VecDeque::new(),
-            members: HashSet::new(),
-        }
-    }
-
-    fn contains(&self, value: &T) -> bool {
-        self.members.contains(value)
-    }
-
-    fn insert(&mut self, value: T) {
-        if self.members.insert(value.clone()) {
-            self.order.push_back(value);
-            while self.order.len() > MAX_REMEMBERED {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.members.remove(&oldest);
-                }
-            }
-        }
-    }
-}
-
-/// Delay before retrying a database after `failures` consecutive failed reads: 10 s, doubling up to
-/// 5 minutes, so a permanently unreadable file is not reopened on every poll.
-pub(crate) fn retry_delay(failures: u32) -> Duration {
-    Duration::seconds((10_i64 << failures.saturating_sub(1).min(5)).min(300))
-}
 
 struct Conversation {
     id: String,
     /// Where the database was found.
     surface: ToolSurface,
     /// The signature the last successful read saw; `None` until one succeeds.
-    read_at: Option<Signature>,
+    read_at: Option<DatabaseSignature>,
     /// Orders re-reads: databases serviced longest ago go first.
     serviced: u64,
     /// Consecutive failed reads; a failing database waits `retry_delay(failures)` before the next try.
@@ -110,6 +37,7 @@ struct Conversation {
     retry_at: Option<DateTime<Utc>>,
     emitted: Remembered<String>,
     published: Remembered<i64>,
+    generations: GenerationCache,
 }
 
 struct Candidate {
@@ -175,11 +103,11 @@ impl AntigravityMonitor {
             self.last_discovery = Some(now);
         }
         let cutoff = now - Duration::days(RETENTION_DAYS);
-        let mut stale: Vec<(PathBuf, Signature)> = self
+        let mut stale: Vec<(PathBuf, DatabaseSignature)> = self
             .conversations
             .iter()
             .filter_map(|(path, conversation)| {
-                let signature = Signature::of(path)?;
+                let signature = DatabaseSignature::of(path)?;
                 (signature.modified()? >= cutoff
                     && conversation.read_at != Some(signature)
                     && conversation.retry_at.is_none_or(|retry_at| retry_at <= now))
@@ -204,7 +132,7 @@ impl AntigravityMonitor {
             self.ticks += 1;
             conversation.serviced = self.ticks;
             // An unreadable database (locked, corrupt, another schema) is retried with a growing delay.
-            let Ok(snapshot) = read_database(&path) else {
+            let Ok(snapshot) = read_database(&path, &mut conversation.generations) else {
                 conversation.failures = conversation.failures.saturating_add(1);
                 conversation.retry_at = Some(now + retry_delay(conversation.failures));
                 continue;
@@ -275,7 +203,7 @@ impl AntigravityMonitor {
                 };
                 let path = entry.path();
                 let Some(modified) =
-                    Signature::of(&path).and_then(|signature| signature.modified())
+                    DatabaseSignature::of(&path).and_then(|signature| signature.modified())
                 else {
                     continue;
                 };
@@ -312,6 +240,7 @@ impl AntigravityMonitor {
                     retry_at: None,
                     emitted: Remembered::new(),
                     published: Remembered::new(),
+                    generations: GenerationCache::default(),
                 });
         }
     }

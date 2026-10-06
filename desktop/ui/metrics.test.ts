@@ -182,6 +182,47 @@ it("describes measurement kinds with the shared vocabulary", async () => {
   expect(measurementDefinition(subagent)).toMatch("task prompt to final answer");
   expect(measurementDefinition(undefined)).toBe("Whole turn, including tools and waiting.");
 });
+it("shows an OpenCode raw provider id as it is, with a neutral badge, and never mislabels it", async () => {
+  const { providerLabel, providerRoute, cohortRows, toolLabel, measurementExplanation } =
+    await import("./metrics");
+  const { badgeFamily, providerName } = await import("./response");
+  for (const raw of ["openrouter", "kimi-for-coding", "myomlx", "bonsai", "a.b_c-1"]) {
+    expect(providerLabel(raw)).toBe(raw);
+    expect(providerName(raw)).toBe(raw);
+    expect(providerRoute(raw)).toBe(`${raw} route`);
+    expect(badgeFamily("moonshotai/kimi-k2.5", raw)).toBe("unknown");
+  }
+  // Names of the Object prototype are never looked up as providers.
+  expect(providerLabel("constructor")).toBe("constructor");
+  expect(providerLabel("__proto__")).toBe("Unknown route");
+  expect(providerLabel("toString")).toBe("Unknown route");
+  // The shared providers keep their names even when a raw id looks similar.
+  expect(providerLabel("google")).toBe("Google");
+  expect(providerLabel("openai")).toBe("OpenAI");
+  expect(toolLabel("opencode")).toBe("OpenCode");
+  const opencode = m({
+    client: "opencode",
+    parserVersion: "opencode-db-v1",
+    metricVersion: "opencode-observed-turn-v1",
+    sourceKind: "primary",
+    provider: "openrouter",
+    model: "moonshotai/kimi-k2.5",
+    codexTTFTSeconds: null,
+  });
+  expect(measurementExplanation(opencode)).toBe("Prompt through final answer, including tools & waiting.");
+  expect(metricDefinition(opencode)).not.toBe(metricDefinition(m()));
+  // The same model through two raw routes stays two cohorts, told apart by the provider id.
+  const now = Date.parse(m().completedAt);
+  const rows = cohortRows(
+    [
+      m({ ...opencode, id: "a", provider: "openrouter" }),
+      m({ ...opencode, id: "b", provider: "kimi-for-coding", completedAt: new Date(now - 1000).toISOString() }),
+    ],
+    now - DAY,
+    now + 1,
+  );
+  expect(rows.map((r) => r.qualifier).sort()).toEqual(["kimi-for-coding", "openrouter"]);
+});
 it("names Antigravity turns like any other tool and keeps their cohort separate", async () => {
   const { toolLabel, clientLabel, measurementKind, measurementChip, measurementTitle } =
     await import("./metrics");
@@ -270,7 +311,7 @@ it("labels providers, including the Claude Code cloud routes", async () => {
   expect(providerLabel("xai")).toBe("xAI");
   expect(providerLabel("google")).toBe("Google");
   expect(providerRoute("google")).toBe("Google route");
-  for (const unknown of ["unknown", null, undefined, "other"]) {
+  for (const unknown of ["unknown", null, undefined, "", "Has Spaces", "<b>x</b>", "a".repeat(41)]) {
     expect(providerLabel(unknown)).toBe("Unknown route");
     expect(providerRoute(unknown)).toBe("Unknown route");
   }

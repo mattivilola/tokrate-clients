@@ -7,19 +7,18 @@
 //! effort suffix and execution ids are decoded from them.
 
 use crate::protobuf::{Malformed, Message};
+use crate::sqlite_read::open_read_only;
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
 
 const MAX_STEPS: usize = 100_000;
 const MAX_EXECUTORS: usize = 10_000;
-const MAX_GENERATIONS: usize = 100_000;
+/// Decoded generations (and unreadable generation rows) remembered per database.
+const MAX_CACHED_GENERATIONS: usize = 4_096;
 /// A blob above this size is treated as unreadable instead of being loaded.
 const MAX_BLOB_BYTES: i64 = 8 * 1_048_576;
-const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Why a database was skipped for this poll.
 #[derive(Debug)]
@@ -29,8 +28,6 @@ pub(crate) enum ReadError {
     TooLarge,
     /// A step's metadata is not a readable message, so the steps cannot be attributed safely.
     Undecodable,
-    /// The path cannot be expressed as a `file:` URI.
-    Path,
 }
 
 impl From<rusqlite::Error> for ReadError {
@@ -44,6 +41,10 @@ impl From<rusqlite::Error> for ReadError {
 pub(crate) struct Usage {
     pub output_tokens: i64,
     pub thinking_tokens: i64,
+    /// 9.2: uncached input tokens.
+    pub input_tokens: i64,
+    /// 9.5: input tokens read from the prompt cache.
+    pub cache_read_tokens: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +75,37 @@ pub(crate) struct Generation {
     pub gemini_only: bool,
 }
 
+/// Generations decoded so far for one database, by `gen_metadata.idx`. A generation row never
+/// changes once written, so each is fetched and decoded once; one that exists but cannot be
+/// decoded is remembered too and not fetched again.
+#[derive(Default)]
+pub(crate) struct GenerationCache {
+    decoded: HashMap<i64, Generation>,
+    unreadable: std::collections::HashSet<i64>,
+}
+
+impl GenerationCache {
+    fn contains(&self, idx: i64) -> bool {
+        self.decoded.contains_key(&idx) || self.unreadable.contains(&idx)
+    }
+
+    fn get(&self, idx: i64) -> Option<&Generation> {
+        self.decoded.get(&idx)
+    }
+
+    fn remember(&mut self, idx: i64, generation: Generation) {
+        if self.decoded.len() < MAX_CACHED_GENERATIONS {
+            self.decoded.insert(idx, generation);
+        }
+    }
+
+    fn remember_unreadable(&mut self, idx: i64) {
+        if self.unreadable.len() < MAX_CACHED_GENERATIONS {
+            self.unreadable.insert(idx);
+        }
+    }
+}
+
 /// Everything Tokrate reads from one database in one consistent snapshot.
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
@@ -86,41 +118,13 @@ pub(crate) struct Snapshot {
     pub bytes_read: usize,
 }
 
-/// The `file:` URI of a database path with `mode=ro`. The path is percent-encoded; Windows drive
-/// paths become `file:///C:/...` and backslashes become slashes.
-pub(crate) fn read_only_uri(path: &Path) -> Option<String> {
-    let text = path.to_str()?.replace('\\', "/");
-    let mut encoded = String::with_capacity(text.len() + 24);
-    encoded.push_str("file://");
-    if !text.starts_with('/') {
-        encoded.push('/');
-    }
-    let bytes = text.as_bytes();
-    for (index, byte) in bytes.iter().enumerate() {
-        let drive_colon =
-            *byte == b':' && index == 1 && bytes[0].is_ascii_alphabetic() && !text.starts_with('/');
-        if byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/')
-            || drive_colon
-        {
-            encoded.push(*byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded.push_str("?mode=ro");
-    Some(encoded)
-}
-
 /// Reads one database. Never writes: the connection is read-only, honours the write-ahead log
 /// (no `immutable`) and waits at most half a second for a lock.
-pub(crate) fn read_database(path: &Path) -> Result<Snapshot, ReadError> {
-    let uri = read_only_uri(path).ok_or(ReadError::Path)?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_URI
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let mut connection = Connection::open_with_flags(uri, flags)?;
-    connection.busy_timeout(BUSY_TIMEOUT)?;
+pub(crate) fn read_database(
+    path: &Path,
+    cache: &mut GenerationCache,
+) -> Result<Snapshot, ReadError> {
+    let mut connection = open_read_only(path)?;
     // One read transaction so steps, executions and generations belong together.
     let transaction = connection.transaction()?;
     let mut snapshot = Snapshot {
@@ -184,29 +188,42 @@ pub(crate) fn read_database(path: &Path) -> Result<Snapshot, ReadError> {
     drop(rows);
     drop(statement);
 
+    // Only the generations the model calls reference, each fetched and decoded once: their rows
+    // can be megabytes. A row that is absent is asked for again on the next read.
+    let mut referenced: Vec<i64> = snapshot
+        .steps
+        .iter()
+        .filter(|step| step.usage.is_some())
+        .map(|step| step.generation)
+        .collect();
+    referenced.sort_unstable();
+    referenced.dedup();
     let mut statement = transaction.prepare(
-        "SELECT idx, CASE WHEN length(data) <= ?1 THEN data END FROM gen_metadata LIMIT ?2",
+        "SELECT CASE WHEN length(data) <= ?1 THEN data END FROM gen_metadata WHERE idx = ?2",
     )?;
-    let mut rows = statement.query(rusqlite::params![
-        MAX_BLOB_BYTES,
-        MAX_GENERATIONS as i64 + 1
-    ])?;
-    let mut seen = 0;
-    while let Some(row) = rows.next()? {
-        seen += 1;
-        if seen > MAX_GENERATIONS {
-            return Err(ReadError::TooLarge);
+    for idx in referenced {
+        if !cache.contains(idx) {
+            let mut rows = statement.query(rusqlite::params![MAX_BLOB_BYTES, idx])?;
+            // `None`: no row (yet). `Some(None)`: a row too large to load.
+            let row = match rows.next()? {
+                Some(row) => Some(row.get::<_, Option<Vec<u8>>>(0)?),
+                None => None,
+            };
+            match row {
+                None => {}
+                Some(None) => cache.remember_unreadable(idx),
+                Some(Some(blob)) => {
+                    snapshot.bytes_read += blob.len();
+                    match decode_generation(&blob) {
+                        Some(generation) => cache.remember(idx, generation),
+                        // An unreadable generation leaves its model calls without a model.
+                        None => cache.remember_unreadable(idx),
+                    }
+                }
+            }
         }
-        let (Some(idx), Some(blob)) = (
-            row.get::<_, Option<i64>>(0)?,
-            row.get::<_, Option<Vec<u8>>>(1)?,
-        ) else {
-            continue;
-        };
-        snapshot.bytes_read += blob.len();
-        // An unreadable generation leaves its model calls without a model.
-        if let Some(generation) = decode_generation(&blob) {
-            snapshot.generations.insert(idx, generation);
+        if let Some(generation) = cache.get(idx) {
+            snapshot.generations.insert(idx, generation.clone());
         }
     }
     Ok(snapshot)
@@ -229,6 +246,8 @@ fn decode_step(idx: i64, has_subtrajectory: bool, blob: &[u8]) -> Option<Step> {
             Some(usage) => Some(Usage {
                 output_tokens: token_count(&usage, 3)?,
                 thinking_tokens: token_count(&usage, 9)?,
+                input_tokens: token_count(&usage, 2)?,
+                cache_read_tokens: token_count(&usage, 5)?,
             }),
             None => None,
         };

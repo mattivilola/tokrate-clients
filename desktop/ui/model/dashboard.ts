@@ -48,7 +48,13 @@ export interface DashboardInput {
   active?: ModelKey | null;
 }
 
-export const CLIENT_ORDER = ["codex", "claude-code", "grok-build", "antigravity"] as const;
+export const CLIENT_ORDER = [
+  "codex",
+  "claude-code",
+  "grok-build",
+  "antigravity",
+  "opencode",
+] as const;
 
 /** Everything the home flyout and the history window render, derived purely from the records. */
 export function buildDashboard(input: DashboardInput) {

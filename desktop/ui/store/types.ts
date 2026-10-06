@@ -1,6 +1,6 @@
 import type { LiveResponse, Metric } from "../metrics";
 
-export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity";
+export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode";
 
 export interface Settings {
   sharing: boolean;
@@ -15,6 +15,7 @@ export interface Settings {
   claudeRoot: string;
   grokRoot: string;
   antigravityRoot: string;
+  opencodeRoot: string;
 }
 
 /** Detected state of one coding-tool log folder (the path stays on the device). */

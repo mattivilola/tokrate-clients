@@ -1,10 +1,10 @@
 import {
   DAY,
-  PROVIDER_LABELS,
   client,
   isSubagent,
   niceScaleMax,
   period,
+  providerLabel,
   responseSpeed,
   stats,
   type LiveResponse,
@@ -31,8 +31,8 @@ export const sameModel = (
 
 // --- selection ---------------------------------------------------------------------------------
 
-export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity";
-const TOOLS: ToolId[] = ["codex", "claude-code", "grok-build", "antigravity"];
+export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode";
+const TOOLS: ToolId[] = ["codex", "claude-code", "grok-build", "antigravity", "opencode"];
 
 /** The persisted `selection` setting; `latest` (before 0.1.14) means `auto`. */
 export type SelectionMode =
@@ -192,7 +192,7 @@ export interface ModelSpeedRow {
   untimed: number;
 }
 
-const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity"];
+const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity", "opencode"];
 
 /**
  * One row per model and provider across coding tools and subagent/primary work. Response speed
@@ -247,8 +247,7 @@ export const response24h = (records: Metric[], now: number): Stats =>
     period(records, now - DAY, now + 1).flatMap((m) => responseSpeed(m) ?? []),
   );
 
-export const providerName = (provider: string | null | undefined) =>
-  (provider && PROVIDER_LABELS[provider]) || "Unknown route";
+export const providerName = providerLabel;
 
 
 /** Shared mini-bar scale of a row list: the nice ceiling of 1.25 x the largest median. */

@@ -35,23 +35,13 @@ public actor AntigravityConversationMonitor {
     private static let maximumRememberedItems = 8_192
     private static let maximumCachedGenerations = 4_096
 
-    /// What changed on disk: the database and its write-ahead log.
-    private struct FileSignature: Equatable {
-        let databaseModifiedAt: Date
-        let databaseSize: Int
-        let walModifiedAt: Date?
-        let walSize: Int?
-
-        var modifiedAt: Date { max(databaseModifiedAt, walModifiedAt ?? .distantPast) }
-    }
-
     private struct WatchedDatabase {
         let url: URL
         let conversationID: String
         let surface: ToolSurface
-        var current: FileSignature
+        var current: DatabaseFileSignature
         /// The signature the last successful read started from.
-        var lastRead: FileSignature?
+        var lastRead: DatabaseFileSignature?
         var nextAttemptAt = Date.distantPast
         var consecutiveFailures = 0
         /// Decoded generations by `gen_metadata.idx`, fetched once: their rows can be megabytes.
@@ -134,7 +124,7 @@ public actor AntigravityConversationMonitor {
             guard folders.contains(url.deletingLastPathComponent().path),
                   let databasePath = Self.databasePath(forEventPath: path) else { continue }
             if databases[databasePath] != nil {
-                if let signature = Self.signature(of: URL(fileURLWithPath: databasePath)) {
+                if let signature = DatabaseFileSignature.of(URL(fileURLWithPath: databasePath)) {
                     databases[databasePath]?.current = signature
                     // A report that changed nothing (the files already read) leaves nothing to poll for.
                     if signature != databases[databasePath]?.lastRead { noted = true }
@@ -142,7 +132,7 @@ public actor AntigravityConversationMonitor {
                     needsDiscovery = true
                     noted = true
                 }
-            } else if Self.attributes(of: databasePath) != nil {
+            } else if DatabaseFileSignature.attributes(of: databasePath) != nil {
                 needsDiscovery = true
                 noted = true
             }
@@ -258,7 +248,7 @@ public actor AntigravityConversationMonitor {
 
     private func discoverDatabases(now: Date) {
         var available = false
-        var candidates: [(url: URL, signature: FileSignature, surface: ToolSurface)] = []
+        var candidates: [(url: URL, signature: DatabaseFileSignature, surface: ToolSurface)] = []
         for (path, surface) in Self.conversationSources {
             let folder = root.appendingPathComponent(path, isDirectory: true)
             guard let urls = try? FileManager.default.contentsOfDirectory(
@@ -267,7 +257,7 @@ public actor AntigravityConversationMonitor {
             available = true
             for url in urls where url.pathExtension == "db" && !url.deletingPathExtension().lastPathComponent.isEmpty {
                 // Files untouched for the retention period are not opened.
-                guard let signature = Self.signature(of: url),
+                guard let signature = DatabaseFileSignature.of(url),
                       signature.modifiedAt >= now.addingTimeInterval(-MetricHistory.retention) else { continue }
                 candidates.append((url, signature, surface))
             }
@@ -293,51 +283,8 @@ public actor AntigravityConversationMonitor {
         databases = databases.filter { seen.contains($0.key) }
     }
 
-    private static func signature(of databaseURL: URL) -> FileSignature? {
-        guard let database = attributes(of: databaseURL.path) else { return nil }
-        let wal = attributes(of: databaseURL.path + "-wal")
-        return FileSignature(
-            databaseModifiedAt: database.modifiedAt, databaseSize: database.size,
-            walModifiedAt: wal?.modifiedAt, walSize: wal?.size
-        )
-    }
-
-    private static func attributes(of path: String) -> (modifiedAt: Date, size: Int)? {
-        guard let values = try? FileManager.default.attributesOfItem(atPath: path),
-              values[.type] as? FileAttributeType == .typeRegular,
-              let modifiedAt = values[.modificationDate] as? Date,
-              let size = (values[.size] as? NSNumber)?.intValue else { return nil }
-        return (modifiedAt, size)
-    }
-
     private static func isDirectory(_ url: URL) -> Bool {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
-    }
-}
-
-/// A set that forgets its oldest members past a limit, so per-database bookkeeping cannot grow forever.
-struct BoundedSet<Element: Hashable> {
-    private let limit: Int
-    private var members: Set<Element> = []
-    private var order: [Element] = []
-    private var oldest = 0
-
-    init(limit: Int) { self.limit = limit }
-
-    func contains(_ element: Element) -> Bool { members.contains(element) }
-
-    /// Adds the element; `false` when it was already a member.
-    @discardableResult
-    mutating func insert(_ element: Element) -> Bool {
-        guard members.insert(element).inserted else { return false }
-        order.append(element)
-        if members.count > limit {
-            members.remove(order[oldest])
-            oldest += 1
-            // Compact the consumed prefix once it dominates the array.
-            if oldest > limit { order.removeFirst(oldest); oldest = 0 }
-        }
-        return true
     }
 }

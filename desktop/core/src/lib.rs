@@ -10,15 +10,21 @@ mod history;
 mod live;
 mod model;
 mod monitor;
+mod opencode;
+mod opencode_db;
+mod opencode_turns;
 mod parser;
 mod protobuf;
 mod reader;
 mod selector;
 mod sharing;
 mod sources;
+mod sqlite_read;
 
 #[cfg(test)]
 mod antigravity_tests;
+#[cfg(test)]
+mod opencode_tests;
 #[cfg(test)]
 mod tests;
 
@@ -33,10 +39,11 @@ pub use model::{
     TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
     CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
     CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION, RESPONSE_MAX_DURATION_SECONDS, RESPONSE_METRIC_VERSION,
-    RESPONSE_MIN_OUTPUT_TOKENS,
+    GROK_PARSER_VERSION, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
+    RESPONSE_MAX_DURATION_SECONDS, RESPONSE_METRIC_VERSION, RESPONSE_MIN_OUTPUT_TOKENS,
 };
 pub use monitor::Monitor;
+pub use opencode::OpenCodeMonitor;
 pub use selector::{
     fallback_model, AutoSelector, ModelKey, SelectionMode, AUTO_LEAD_MINUTES, AUTO_QUIET_MINUTES,
     AUTO_WINDOW_MINUTES,

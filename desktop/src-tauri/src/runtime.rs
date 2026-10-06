@@ -11,8 +11,8 @@ use std::{
 use tauri::Manager;
 use tokrate_core::{
     fallback_model, signed_request, AntigravityMonitor, AutoSelector, History, LiveResponses,
-    LiveScope, ModelKey, ProviderBadge, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor,
-    TurnMetric,
+    LiveScope, ModelKey, OpenCodeMonitor, ProviderBadge, ResponseMetric, SelectionMode,
+    SharingQueue, SourceMonitor, TurnMetric,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
@@ -54,6 +54,7 @@ pub struct Settings {
     pub claude_root: String,
     pub grok_root: String,
     pub antigravity_root: String,
+    pub opencode_root: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -69,6 +70,7 @@ impl Default for Settings {
         let grok_home = std::env::var_os("GROK_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".grok"));
+        let opencode_home = opencode_data_dir(std::env::var_os("XDG_DATA_HOME"), &home);
         Self {
             sharing: false,
             sharing_consent: None,
@@ -82,6 +84,7 @@ impl Default for Settings {
             grok_root: grok_home.join("sessions").to_string_lossy().into(),
             // Antigravity has no home override: its data folder is always `~/.gemini`.
             antigravity_root: home.join(".gemini").to_string_lossy().into(),
+            opencode_root: opencode_home.to_string_lossy().into(),
         }
     }
 }
@@ -205,6 +208,7 @@ impl Runtime {
                 PathBuf::from(&settings.claude_root),
                 PathBuf::from(&settings.grok_root),
                 PathBuf::from(&settings.antigravity_root),
+                PathBuf::from(&settings.opencode_root),
             ),
             settings,
             consent_prompt_required,
@@ -234,11 +238,13 @@ impl Runtime {
         settings.claude_root = dir.join("claude-projects").to_string_lossy().into();
         settings.grok_root = dir.join("grok-sessions").to_string_lossy().into();
         settings.antigravity_root = dir.join("gemini").to_string_lossy().into();
+        settings.opencode_root = dir.join("opencode").to_string_lossy().into();
         for root in [
             &settings.root,
             &settings.claude_root,
             &settings.grok_root,
             &settings.antigravity_root,
+            &settings.opencode_root,
         ] {
             std::fs::create_dir_all(root)?;
         }
@@ -307,17 +313,18 @@ impl Runtime {
                 &self.settings.antigravity_root,
                 &defaults.antigravity_root,
             ),
+            (
+                "opencode",
+                &self.settings.opencode_root,
+                &defaults.opencode_root,
+            ),
         ]
         .into_iter()
         .map(|(id, root, default)| SourceStatus {
             id,
             root: root.clone(),
             is_default: root == default,
-            found: if id == "antigravity" {
-                AntigravityMonitor::has_conversation_folder(std::path::Path::new(root))
-            } else {
-                std::path::Path::new(root).is_dir()
-            },
+            found: source_found(id, root),
         })
         .collect()
     }
@@ -431,6 +438,7 @@ impl Runtime {
             "claude-code" => defaults.claude_root,
             "grok-build" => defaults.grok_root,
             "antigravity" => defaults.antigravity_root,
+            "opencode" => defaults.opencode_root,
             _ => return Err("Choose a supported source".into()),
         };
         self.apply_source_root(source, PathBuf::from(root))
@@ -442,6 +450,7 @@ impl Runtime {
             "claude-code" => next.claude_root = root.to_string_lossy().into(),
             "grok-build" => next.grok_root = root.to_string_lossy().into(),
             "antigravity" => next.antigravity_root = root.to_string_lossy().into(),
+            "opencode" => next.opencode_root = root.to_string_lossy().into(),
             _ => return Err("Choose a supported source".into()),
         }
         self.save_settings(&next)?;
@@ -529,13 +538,18 @@ impl Runtime {
 
     fn source_status(&self) -> String {
         let mut sources = Vec::new();
-        for (name, root) in [
-            ("Codex", &self.settings.root),
-            ("Claude Code", &self.settings.claude_root),
-            ("Grok Build", &self.settings.grok_root),
-            ("Antigravity", &self.settings.antigravity_root),
+        for (id, name, root) in [
+            ("codex", "Codex", &self.settings.root),
+            ("claude-code", "Claude Code", &self.settings.claude_root),
+            ("grok-build", "Grok Build", &self.settings.grok_root),
+            (
+                "antigravity",
+                "Antigravity",
+                &self.settings.antigravity_root,
+            ),
+            ("opencode", "OpenCode", &self.settings.opencode_root),
         ] {
-            if PathBuf::from(root).is_dir() {
+            if source_found(id, root) {
                 sources.push(name);
             }
         }
@@ -544,6 +558,25 @@ impl Runtime {
         } else {
             format!("Monitoring {}", sources.join(", "))
         }
+    }
+}
+/// OpenCode's data folder: `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode`, on every
+/// platform (Windows included), as OpenCode resolves it itself.
+fn opencode_data_dir(xdg_data_home: Option<std::ffi::OsString>, home: &std::path::Path) -> PathBuf {
+    xdg_data_home
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local").join("share"))
+        .join("opencode")
+}
+/// Whether a tool's data is there: its sessions/projects folder, Antigravity's conversation
+/// folders (a bare `~/.gemini` belongs to the Gemini CLI) or OpenCode's `opencode.db`.
+fn source_found(id: &str, root: &str) -> bool {
+    let root = std::path::Path::new(root);
+    match id {
+        "antigravity" => AntigravityMonitor::has_conversation_folder(root),
+        "opencode" => OpenCodeMonitor::has_database(root),
+        _ => root.is_dir(),
     }
 }
 /// What the tray shows: a headline, a longer tooltip/menu line and the provider badge to draw.
@@ -895,7 +928,7 @@ mod tests {
         assert!(!codex.is_default);
         assert!(codex.found);
         assert_eq!(codex.root, custom.to_string_lossy());
-        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.len(), 5);
         runtime.reset_source_root("codex").unwrap();
         let sources = runtime.snapshot(None).sources;
         let codex = sources.iter().find(|s| s.id == "codex").unwrap();
@@ -1087,6 +1120,38 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn opencode_data_folder_follows_xdg_data_home_else_the_home_folder() {
+        let home = std::path::Path::new("/home/user");
+        assert_eq!(
+            opencode_data_dir(None, home),
+            home.join(".local").join("share").join("opencode")
+        );
+        assert_eq!(
+            opencode_data_dir(Some("".into()), home),
+            home.join(".local").join("share").join("opencode")
+        );
+        assert_eq!(
+            opencode_data_dir(Some("/data".into()), home),
+            PathBuf::from("/data").join("opencode")
+        );
+    }
+    #[test]
+    fn a_source_is_found_by_its_own_marker_not_by_a_bare_folder() {
+        let dir = temporary();
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.to_string_lossy().into_owned();
+        assert!(source_found("codex", &root));
+        assert!(!source_found("antigravity", &root));
+        assert!(!source_found("opencode", &root));
+        std::fs::write(std::path::Path::new(&root).join("opencode.db"), b"").unwrap();
+        assert!(source_found("opencode", &root));
+        std::fs::create_dir_all(std::path::Path::new(&root).join("antigravity/conversations"))
+            .unwrap();
+        assert!(source_found("antigravity", &root));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn smoke_mode_uses_only_temporary_source_roots_and_stays_local() {
         let dir = temporary();
         let runtime = Runtime::load_smoke(dir.clone()).unwrap();
@@ -1095,6 +1160,7 @@ mod tests {
             PathBuf::from(&runtime.settings.claude_root),
             PathBuf::from(&runtime.settings.grok_root),
             PathBuf::from(&runtime.settings.antigravity_root),
+            PathBuf::from(&runtime.settings.opencode_root),
         ];
         assert_eq!(
             roots,
@@ -1102,7 +1168,8 @@ mod tests {
                 dir.join("sessions"),
                 dir.join("claude-projects"),
                 dir.join("grok-sessions"),
-                dir.join("gemini")
+                dir.join("gemini"),
+                dir.join("opencode")
             ]
         );
         assert!(roots

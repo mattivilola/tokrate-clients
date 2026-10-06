@@ -142,7 +142,7 @@ struct SettingsSourcesPage: View {
         SettingsPage {
             SettingsGroup(
                 title: "Coding tools",
-                footer: "Tokrate reads these session folders on this Mac, automatically, whenever monitoring is on. Choose a different folder while monitoring is paused, for example if you set CLAUDE_CONFIG_DIR or GROK_HOME in a terminal: apps opened from Finder don't see those variables. Antigravity reads its data folder (~/.gemini by default), where each conversation is a small database."
+                footer: "Tokrate reads these session folders on this Mac, automatically, whenever monitoring is on. Choose a different folder while monitoring is paused, for example if you set CLAUDE_CONFIG_DIR or GROK_HOME in a terminal: apps opened from Finder don't see those variables. Antigravity reads its data folder (~/.gemini by default), where each conversation is a small database. OpenCode reads its data folder ($XDG_DATA_HOME/opencode, or ~/.local/share/opencode), which holds one database."
             ) {
                 SourceStatusList(statuses: store.sourceStatuses) { status in
                     if let kind = SourceFolderKind(rawValue: status.client) {

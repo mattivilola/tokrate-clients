@@ -97,8 +97,17 @@ fn execution_metric(
     let output_tokens = usages
         .clone()
         .fold(0i64, |sum, usage| sum.saturating_add(usage.output_tokens));
-    let reasoning_tokens =
-        usages.fold(0i64, |sum, usage| sum.saturating_add(usage.thinking_tokens));
+    let reasoning_tokens = usages
+        .clone()
+        .fold(0i64, |sum, usage| sum.saturating_add(usage.thinking_tokens));
+    // 9.2 counts the uncached input and 9.5 the cache reads; the turn's input includes both.
+    // Proto3 omits a zero, so an absent count is 0, not missing.
+    let cache_read_tokens = usages.clone().fold(0i64, |sum, usage| {
+        sum.saturating_add(usage.cache_read_tokens)
+    });
+    let input_tokens = usages.fold(cache_read_tokens, |sum, usage| {
+        sum.saturating_add(usage.input_tokens)
+    });
     if duration <= 0.0 || !speed_is_plausible(output_tokens, duration) {
         return None;
     }
@@ -140,6 +149,8 @@ fn execution_metric(
     metric.response_output_tokens = response_output_tokens;
     metric.response_duration_seconds = response_duration_seconds;
     metric.response_count = response_count;
+    // Cache writes are not recorded.
+    metric.set_prompt_cache(Some(input_tokens), Some(cache_read_tokens), None);
     metric.surface = Some(surface);
     // Subagent work started by the execution is not part of its output and cannot be attributed
     // yet: the turn stays local and is never final.

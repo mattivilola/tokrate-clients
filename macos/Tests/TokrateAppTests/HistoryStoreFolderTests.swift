@@ -29,6 +29,7 @@ final class HistoryStoreFolderTests: XCTestCase {
             claudeProjectsFolder: root.appendingPathComponent("default-claude", isDirectory: true),
             grokSessionsFolder: root.appendingPathComponent("default-grok", isDirectory: true),
             antigravityDataFolder: root.appendingPathComponent("default-gemini", isDirectory: true),
+            openCodeDataFolder: root.appendingPathComponent("default-opencode", isDirectory: true),
             sharingPreferences: SharingPreferences(
                 session: SharingSession(identity: StubIdentity(), transport: StubTransport()),
                 store: StubPreferenceStore()
@@ -86,10 +87,12 @@ final class HistoryStoreFolderTests: XCTestCase {
         XCTAssertEqual(store.folder(for: .claudeCode).lastPathComponent, "default-claude")
         XCTAssertEqual(store.folder(for: .grokBuild).lastPathComponent, "default-grok")
         XCTAssertEqual(store.folder(for: .antigravity).lastPathComponent, "default-gemini")
-        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build", "antigravity"])
-        XCTAssertEqual(store.sourceStatuses.last?.title, "Antigravity")
+        XCTAssertEqual(store.folder(for: .openCode).lastPathComponent, "default-opencode")
+        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build", "antigravity", "opencode"])
+        XCTAssertEqual(store.sourceStatuses.last?.title, "OpenCode")
         XCTAssertEqual(store.sourceStatuses.last?.isFound, false)
         XCTAssertEqual(SourceFolderKind.antigravity.folderNoun, "data folder")
+        XCTAssertEqual(SourceFolderKind.openCode.folderNoun, "data folder")
     }
 
     func testChosenFoldersPersistAcrossLaunchesForEveryTool() throws {
@@ -110,12 +113,12 @@ final class HistoryStoreFolderTests: XCTestCase {
         let store = makeStore()
         let chosen = try makeFolder("custom-gemini")
         store.selectFolder(chosen, for: .antigravity)
-        XCTAssertEqual(store.sourceStatuses.last?.isFound, false, "a data folder without Antigravity conversations is not a source")
-        XCTAssertEqual(store.sourceStatuses.last?.detail, "Custom folder")
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "antigravity" }?.isFound, false, "a data folder without Antigravity conversations is not a source")
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "antigravity" }?.detail, "Custom folder")
         try FileManager.default.createDirectory(at: chosen.appendingPathComponent("antigravity-cli/conversations", isDirectory: true), withIntermediateDirectories: true)
         store.resetFolder(for: .antigravity)
         store.selectFolder(chosen, for: .antigravity)
-        XCTAssertEqual(store.sourceStatuses.last?.isFound, true)
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "antigravity" }?.isFound, true)
         XCTAssertEqual(defaults.string(forKey: "sourceFolderPath.antigravity"), chosen.path)
 
         let relaunched = makeStore()
@@ -124,6 +127,53 @@ final class HistoryStoreFolderTests: XCTestCase {
         relaunched.resetFolder(for: .antigravity)
         XCTAssertNil(defaults.string(forKey: "sourceFolderPath.antigravity"))
         XCTAssertEqual(relaunched.folder(for: .antigravity).lastPathComponent, "default-gemini")
+    }
+
+    func testOpenCodeFolderIsFoundOnlyWithTheDatabaseAndIsPersisted() throws {
+        let store = makeStore()
+        let chosen = try makeFolder("custom-opencode")
+        store.selectFolder(chosen, for: .openCode)
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "opencode" }?.isFound, false, "a data folder without opencode.db is not a source")
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "opencode" }?.detail, "Custom folder")
+        try Data("db".utf8).write(to: chosen.appendingPathComponent("opencode.db"))
+        store.resetFolder(for: .openCode)
+        store.selectFolder(chosen, for: .openCode)
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "opencode" }?.isFound, true)
+        XCTAssertEqual(defaults.string(forKey: "sourceFolderPath.opencode"), chosen.path)
+
+        let relaunched = makeStore()
+        XCTAssertTrue(relaunched.hasCustomFolder(for: .openCode))
+        XCTAssertEqual(relaunched.folder(for: .openCode).resolvingSymlinksInPath().path, chosen.path)
+        XCTAssertFalse(relaunched.hasCustomFolder(for: .antigravity), "choosing one tool leaves the others on their defaults")
+        relaunched.resetFolder(for: .openCode)
+        XCTAssertNil(defaults.string(forKey: "sourceFolderPath.opencode"))
+        XCTAssertEqual(relaunched.folder(for: .openCode).lastPathComponent, "default-opencode")
+    }
+
+    func testOpenCodeShowsAnyRawProviderIdWithAGreyBadgeButKeepsMakerFromTheModel() {
+        XCTAssertEqual(ModelCohort.clientTitle("opencode"), "OpenCode")
+        XCTAssertEqual(CodingTool.named("opencode").chip, "OC")
+        for provider in ["openrouter", "kimi-for-coding", "myomlx", "opencode", "amazon-bedrock"] {
+            XCTAssertEqual(ModelMaker(model: "moonshotai/kimi-k2.5", provider: provider), .unknown, provider)
+        }
+        XCTAssertEqual(ModelCohort.providerTitle("kimi-for-coding"), "kimi-for-coding")
+        XCTAssertEqual(ModelCohort.providerTitle("openrouter"), "openrouter")
+        XCTAssertEqual(ModelMaker(model: "claude-sonnet-4-5", provider: "kimi-for-coding"), .anthropic, "the model id decides first")
+        XCTAssertEqual(ModelMaker(model: "gemini-3.8-flash", provider: "openrouter"), .google)
+        XCTAssertNil(ModelMaker.unknown.letter, "no letter: a grey dot")
+        func id(_ provider: String, model: String = "claude-sonnet-4-5") -> String? {
+            ModelCohort(model: model, provider: provider, clientVersion: "1.18.31", reasoningEffort: nil, client: "opencode",
+                        parserVersion: "opencode-db-v1", metricVersion: "opencode-observed-turn-v1").communityBoardID
+        }
+        XCTAssertNotNil(id("anthropic"))
+        XCTAssertNotNil(id("google", model: "gemini-3.8-flash"))
+        XCTAssertNil(id("openrouter"), "gateway providers have no community board")
+        XCTAssertNil(id("anthropic", model: "moonshotai/kimi-k2.5"), "a model id with a path is not shared")
+        let cohort = ModelCohort(model: "moonshotai/kimi-k2.5", provider: "openrouter", clientVersion: "1.14.21", reasoningEffort: nil, client: "opencode",
+                                 parserVersion: "opencode-db-v1", metricVersion: "opencode-observed-turn-v1")
+        XCTAssertEqual(ModelCohort(id: cohort.id), cohort, "cohort ids round-trip a vendor path and a raw provider")
+        XCTAssertEqual(cohort.measurement, .turn)
+        XCTAssertTrue(cohort.detailLabel.contains("provider openrouter"))
     }
 
     func testAntigravityNamesAndBoardIdentity() {

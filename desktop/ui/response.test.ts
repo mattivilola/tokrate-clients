@@ -76,6 +76,8 @@ describe("response speed helpers", () => {
   it("selects Antigravity as a coding tool", () => {
     expect(parseSelection("auto:antigravity")).toEqual({ kind: "auto", tool: "antigravity" });
     expect(autoSelection("antigravity")).toBe("auto:antigravity");
+    expect(parseSelection("auto:opencode")).toEqual({ kind: "auto", tool: "opencode" });
+    expect(autoSelection("opencode")).toBe("auto:opencode");
   });
 
   it("classifies the provider badge like the native tray icon", () => {

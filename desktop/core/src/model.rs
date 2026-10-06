@@ -14,6 +14,9 @@ pub const GROK_METRIC_VERSION: &str = "grok-observed-work-turn-v1";
 pub const ANTIGRAVITY_CLIENT: &str = "antigravity";
 pub const ANTIGRAVITY_PARSER_VERSION: &str = "antigravity-conversation-v1";
 pub const ANTIGRAVITY_METRIC_VERSION: &str = "antigravity-observed-execution-v1";
+pub const OPENCODE_CLIENT: &str = "opencode";
+pub const OPENCODE_PARSER_VERSION: &str = "opencode-db-v1";
+pub const OPENCODE_METRIC_VERSION: &str = "opencode-observed-turn-v1";
 
 /// Contract version of the per-response measurement shared with the Mac client.
 pub const RESPONSE_METRIC_VERSION: &str = "response-v1";

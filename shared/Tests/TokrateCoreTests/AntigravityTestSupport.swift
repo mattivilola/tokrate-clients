@@ -89,6 +89,7 @@ struct SyntheticStep {
     var output: UInt64?
     var thinking: UInt64 = 0
     var input: UInt64 = 1_000
+    var cacheRead: UInt64 = 10
     /// `nil` omits field 20 entirely, as Antigravity does for generation 0.
     var generation: UInt64?
     var hasSubtrajectory = false
@@ -104,7 +105,7 @@ struct SyntheticStep {
             writer.message(9) { usage in
                 usage.proto3Varint(2, input)
                 usage.proto3Varint(3, output)
-                usage.proto3Varint(5, 10)
+                usage.proto3Varint(5, cacheRead)
                 usage.proto3Varint(9, thinking)
             }
         }

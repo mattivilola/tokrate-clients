@@ -37,6 +37,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     claudeRoot: "",
     grokRoot: "",
     antigravityRoot: "",
+    opencodeRoot: "",
   },
   consentPromptRequired: false,
   records: [],

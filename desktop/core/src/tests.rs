@@ -1102,7 +1102,13 @@ fn claude_monitors_measure_subagents_separately_and_primary_selection_excludes_t
     assert_eq!(subagent[0].source_kind.as_deref(), Some("subagent"));
     assert_eq!(subagent[0].output_tokens, 70);
 
-    let mut monitor = SourceMonitor::new(codex, claude, grok, temp.path().join("gemini"));
+    let mut monitor = SourceMonitor::new(
+        codex,
+        claude,
+        grok,
+        temp.path().join("gemini"),
+        temp.path().join("opencode"),
+    );
     let mut found = Vec::new();
     for _ in 0..4 {
         found.extend(monitor.poll(now).unwrap());
@@ -1819,7 +1825,13 @@ fn source_monitor_combines_all_adapters_under_one_poll_budget() {
     );
 
     let now = time("2026-10-03T10:00:06Z");
-    let mut monitor = SourceMonitor::new(codex, claude, grok, temp.path().join("gemini"));
+    let mut monitor = SourceMonitor::new(
+        codex,
+        claude,
+        grok,
+        temp.path().join("gemini"),
+        temp.path().join("opencode"),
+    );
     let mut found = Vec::new();
     for _ in 0..8 {
         found.extend(monitor.poll(now).unwrap());
@@ -5315,7 +5327,13 @@ impl ClaudeDelegation {
             fs::create_dir_all(directory).unwrap();
         }
         Self {
-            monitor: SourceMonitor::new(codex, claude, grok, temp.path().join("gemini")),
+            monitor: SourceMonitor::new(
+                codex,
+                claude,
+                grok,
+                temp.path().join("gemini"),
+                temp.path().join("opencode"),
+            ),
             project,
             latest: Default::default(),
             _temp: temp,

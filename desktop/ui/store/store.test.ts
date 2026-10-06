@@ -14,6 +14,7 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
     claudeRoot: "",
     grokRoot: "",
     antigravityRoot: "",
+    opencodeRoot: "",
   },
   consentPromptRequired: true,
   records: [],

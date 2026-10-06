@@ -3,7 +3,7 @@ use crate::model::{
     TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
     CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
     CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION,
+    GROK_PARSER_VERSION, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -96,8 +96,24 @@ impl SharedSample {
                 ANTIGRAVITY_METRIC_VERSION,
                 false,
             ),
+            (OPENCODE_CLIENT, OPENCODE_PARSER_VERSION, OPENCODE_METRIC_VERSION) => (
+                OPENCODE_CLIENT,
+                OPENCODE_PARSER_VERSION,
+                OPENCODE_METRIC_VERSION,
+                false,
+            ),
             _ => return None,
         };
+        // OpenCode keeps the raw provider id (a gateway, a vendor plan, a local server) locally;
+        // only the providers of the public allowlist, or none, may leave the device.
+        if client == OPENCODE_CLIENT
+            && !matches!(
+                metric.provider.as_deref(),
+                None | Some("anthropic" | "openai" | "google" | "xai" | "unknown")
+            )
+        {
+            return None;
+        }
         let duration_ms = metric.duration_seconds * 1_000.0;
         if !duration_ms.is_finite()
             || !(1.0..=86_400_000.0).contains(&duration_ms)
@@ -197,13 +213,14 @@ fn shared_response_fields(metric: &TurnMetric) -> (Option<i64>, Option<f64>, Opt
 }
 
 /// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for
-/// Claude Code and Google only for Antigravity; any other value or pairing is shared as `unknown`.
+/// Claude Code and Google only for Antigravity and OpenCode; any other value or pairing is shared
+/// as `unknown`.
 fn shared_provider(client: &str, provider: Option<&str>) -> &'static str {
     match (client, provider) {
         (_, Some("openai")) => "openai",
         (_, Some("anthropic")) => "anthropic",
         (_, Some("xai")) => "xai",
-        (ANTIGRAVITY_CLIENT, Some("google")) => "google",
+        (ANTIGRAVITY_CLIENT | OPENCODE_CLIENT, Some("google")) => "google",
         (CLAUDE_CLIENT, Some("amazon-bedrock")) => "amazon-bedrock",
         (CLAUDE_CLIENT, Some("google-vertex")) => "google-vertex",
         _ => "unknown",
