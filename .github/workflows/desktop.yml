@@ -90,7 +90,7 @@ jobs:
         if: always() && (steps.bundle_release.outcome == 'success' || steps.bundle_pr.outcome == 'success')
         uses: actions/upload-artifact@v4
         with:
-          name: tokrate-0.1.18-${{ matrix.artifact }}-${{ steps.bundle_release.outputs.flavor || steps.bundle_pr.outputs.flavor }}
+          name: tokrate-0.1.19-${{ matrix.artifact }}-${{ steps.bundle_release.outputs.flavor || steps.bundle_pr.outputs.flavor }}
           path: |
             desktop/src-tauri/target/release/bundle/nsis/*
             desktop/src-tauri/target/release/bundle/deb/*

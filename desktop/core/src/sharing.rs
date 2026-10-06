@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.18";
+pub const APP_VERSION: &str = "0.1.19";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;

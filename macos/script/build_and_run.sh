@@ -5,7 +5,7 @@ MODE="${1:-run}"
 case "$MODE" in run|--debug|--logs|--telemetry|--verify) ;; *) echo 'usage: build_and_run.sh [--debug|--logs|--telemetry|--verify]' >&2; exit 2;; esac
 pkill -x Tokrate >/dev/null 2>&1 || true
 "$ROOT_DIR/macos/script/package_app.sh" debug
-BUNDLE="${TOKRATE_BUNDLE_PATH:-$ROOT_DIR/macos/dist/0.1.18-debug/Tokrate.app}"
+BUNDLE="${TOKRATE_BUNDLE_PATH:-$ROOT_DIR/macos/dist/0.1.19-debug/Tokrate.app}"
 case "$MODE" in
   --debug) lldb -- "$BUNDLE/Contents/MacOS/Tokrate" ;;
   --logs|--telemetry) /usr/bin/open -n "$BUNDLE"; /usr/bin/log stream --info --style compact --predicate 'process == "Tokrate"' ;;
