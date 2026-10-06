@@ -1740,7 +1740,10 @@ fn monitor_reads_recent_tail_while_historical_replay_is_bounded_and_resets_on_tr
     fs::write(&session, short).unwrap();
     let mut after_truncate = Vec::new();
     for index in 0..10 {
-        after_truncate = monitor.poll(base + Duration::seconds(40 + index)).unwrap();
+        // No watcher event is reported here; wait for the periodic safety discovery pass.
+        after_truncate = monitor
+            .poll(base + Duration::seconds(crate::monitor::DISCOVERY_INTERVAL_SECONDS + 1 + index))
+            .unwrap();
         assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
         if after_truncate
             .iter()
@@ -7490,7 +7493,10 @@ fn a_checkpoint_that_does_not_match_the_file_falls_back_to_a_full_read() {
                 .unwrap(),
             Mismatch::Replaced => {
                 let copy = fixture.root.join("copy.tmp");
-                fs::copy(&fixture.session, &copy).unwrap();
+                // A Windows file copy can preserve the source creation time, which is the
+                // platform's available identity fallback. Write a fresh file with the same bytes
+                // so this test actually replaces it with a different identity.
+                fs::write(&copy, fs::read(&fixture.session).unwrap()).unwrap();
                 fs::rename(&copy, &fixture.session).unwrap();
                 fs::OpenOptions::new()
                     .write(true)

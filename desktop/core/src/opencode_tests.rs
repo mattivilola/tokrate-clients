@@ -1318,7 +1318,11 @@ fn reading_never_changes_the_database_and_sees_write_ahead_log_content() {
 #[test]
 fn a_database_in_a_folder_with_spaces_is_read() {
     let fixture = Fixture::new();
-    let root = fixture.dir.path().join("My Data #1").join("100% opencode?");
+    let root = fixture
+        .dir
+        .path()
+        .join("My Data #1")
+        .join("100% opencode data");
     let db = Database::create(root.join("opencode.db"));
     standard(&db, t0());
     assert!(OpenCodeMonitor::has_database(&root));

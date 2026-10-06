@@ -528,7 +528,7 @@ fn a_database_in_a_folder_with_spaces_is_read() {
             .dir
             .path()
             .join("My Documents #1")
-            .join("100% gemini?")
+            .join("100% gemini data")
             .join(".gemini/antigravity/conversations")
             .join(format!("{CONVERSATION}.db")),
     );
@@ -545,7 +545,7 @@ fn a_database_in_a_folder_with_spaces_is_read() {
             .dir
             .path()
             .join("My Documents #1")
-            .join("100% gemini?")
+            .join("100% gemini data")
             .join(".gemini"),
     );
     assert_eq!(poll(&mut monitor, now()).len(), 1);

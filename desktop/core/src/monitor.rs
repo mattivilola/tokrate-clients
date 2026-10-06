@@ -104,6 +104,39 @@ struct Candidate {
     size: u64,
 }
 
+#[cfg(windows)]
+fn refresh_idle_candidates_from_open_handles(
+    candidates: &mut [Candidate],
+    files: &HashMap<String, WatchedFile>,
+) {
+    for candidate in candidates {
+        let key = candidate.path.to_string_lossy();
+        let Some(_) = files.get(key.as_ref()).filter(|file| {
+            file.live.is_caught_up()
+                && file.live_serviced_modified_at == Some(file.modified_at)
+                && candidate.size == file.last_discovered_size
+                && candidate.modified_at == file.modified_at
+        }) else {
+            continue;
+        };
+
+        // Windows directory-entry metadata can remain stale while another process still has the
+        // transcript open. Probe only unchanged, already-tracked idle files during the existing
+        // five-minute discovery pass; the normal reader then handles any detected change.
+        let Ok(handle) = fs::File::open(&candidate.path) else {
+            continue;
+        };
+        let Ok(metadata) = handle.metadata() else {
+            continue;
+        };
+        candidate.identity = file_identity(&metadata);
+        candidate.size = metadata.len();
+        if let Ok(modified) = metadata.modified() {
+            candidate.modified_at = modified.into();
+        }
+    }
+}
+
 /// What a folder watcher saw below one session root since its previous report.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SourceChange {
@@ -631,7 +664,15 @@ impl Monitor {
 
     fn discover_files(&mut self, now: DateTime<Utc>) -> io::Result<()> {
         let cutoff = now - Duration::days(7);
-        let candidates = discover_candidates(&self.root, cutoff, self.format)?;
+        let mut candidates = discover_candidates(&self.root, cutoff, self.format)?;
+        #[cfg(windows)]
+        refresh_idle_candidates_from_open_handles(&mut candidates, &self.files);
+        candidates.sort_by(|left, right| {
+            right
+                .modified_at
+                .cmp(&left.modified_at)
+                .then_with(|| left.path.cmp(&right.path))
+        });
         let mut seen = HashSet::new();
         for candidate in candidates.into_iter().take(MAX_FILES) {
             let key = candidate.path.to_string_lossy().into_owned();
@@ -796,11 +837,5 @@ fn discover_candidates(
             break;
         }
     }
-    candidates.sort_by(|left, right| {
-        right
-            .modified_at
-            .cmp(&left.modified_at)
-            .then_with(|| left.path.cmp(&right.path))
-    });
     Ok(candidates)
 }
