@@ -71,18 +71,30 @@ enum MenuBarBadge {
     }
 }
 
-/// The menu-bar item: the provider badge (or the gauge glyph) and the live response speed.
+/// The menu-bar item: the provider badge and the coding-tool chip (or the gauge glyph when neither
+/// is shown) and the response speed.
 struct MenuBarLabel: View {
     let readout: MenuBarReadout
     let showsSpeed: Bool
     let showsBadge: Bool
+    let showsToolChip: Bool
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let maker = showsSpeed && showsBadge ? readout.maker : nil
+        let tool = showsSpeed && showsToolChip ? readout.tool : nil
         HStack(spacing: 4) {
-            if showsSpeed, showsBadge, let maker = readout.maker {
-                Image(nsImage: MenuBarBadge.image(for: maker, isDarkMenuBar: colorScheme == .dark))
-                    .renderingMode(.original)
+            if maker != nil || tool != nil {
+                HStack(spacing: 3) {
+                    if let maker {
+                        Image(nsImage: MenuBarBadge.image(for: maker, isDarkMenuBar: colorScheme == .dark))
+                            .renderingMode(.original)
+                    }
+                    if let tool {
+                        Image(nsImage: ToolChip.image(chip: tool.chip))
+                            .renderingMode(.template)
+                    }
+                }
             } else {
                 Image(nsImage: MenuBarIcon.image)
             }

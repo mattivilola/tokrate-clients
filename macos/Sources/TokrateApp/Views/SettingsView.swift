@@ -75,16 +75,20 @@ struct SettingsGeneralPage: View {
     @Bindable var store: HistoryStore
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @AppStorage("showProviderBadge") private var showProviderBadge = true
+    @AppStorage("showToolChip") private var showToolChip = true
 
     var body: some View {
         SettingsPage {
-            SettingsGroup(title: "Menu bar", footer: "Shows the response speed of the model you are using: the median of its last five responses in the past ten minutes, updated as responses finish. It is not a streaming speed. A dash means no recent response, or paused monitoring.") {
+            SettingsGroup(title: "Menu bar", footer: "Shows the response speed of the model you are using: the median of its last five responses in the past ten minutes while responses finish, otherwise the response speed of its latest turn. It is not a streaming speed. A dash means there is no measurement yet, or monitoring is paused.") {
                 Toggle("Show speed in menu bar", isOn: $showMenuBarSpeed)
                     .toggleStyle(.switch)
-                    .help("Shows the live response speed of the followed model. All models shows Compare without a pooled speed.")
+                    .help("Shows the response speed of the followed model. All models shows Compare without a pooled speed.")
                 Toggle("Show provider badge", isOn: $showProviderBadge)
                     .toggleStyle(.switch)
                     .help("Shows a letter badge for the model's maker (A Anthropic, O OpenAI, X xAI) before the speed.")
+                Toggle("Show coding tool chip", isOn: $showToolChip)
+                    .toggleStyle(.switch)
+                    .help("Shows a small chip for the coding tool (CX Codex, CC Claude Code, GB Grok Build) before the speed.")
             }
             SettingsGroup(title: "Monitoring", footer: "Pausing stops reads of your session files. Already-queued sharing stays active; turn sharing off to stop all community requests.") {
                 HStack(spacing: 10) {

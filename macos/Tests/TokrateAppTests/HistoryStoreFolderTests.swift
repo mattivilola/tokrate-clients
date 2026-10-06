@@ -22,7 +22,7 @@ final class HistoryStoreFolderTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func makeStore() -> HistoryStore {
+    private func makeStore(records: [TurnMetric] = []) -> HistoryStore {
         HistoryStore(
             persistenceURL: root.appendingPathComponent("history.json"),
             codexFolder: root.appendingPathComponent("default-codex", isDirectory: true),
@@ -33,8 +33,34 @@ final class HistoryStoreFolderTests: XCTestCase {
                 store: StubPreferenceStore()
             ),
             defaults: defaults,
-            initialRecords: []
+            initialRecords: records
         )
+    }
+
+    private func turn(
+        _ id: String, secondsAgo: Double, model: String = "claude-opus-5-5", provider: String = "anthropic",
+        client: String = "claude-code", parser: String = "claude-transcript-v4", metricVersion: String = "claude-observed-turn-v1",
+        turnSpeed: Double = 20, responseSpeed: Double? = 100
+    ) -> TurnMetric {
+        TurnMetric(
+            id: id, completedAt: Date.now.addingTimeInterval(-secondsAgo), model: model, outputTokens: 1_000, durationSeconds: 1_000 / turnSpeed,
+            codexTTFTSeconds: nil, turnThroughputTPS: turnSpeed, client: client, clientVersion: "1.0", parserVersion: parser,
+            metricVersion: metricVersion, sourceKind: "primary", provider: provider,
+            responseOutputTokens: responseSpeed.map { _ in 800 }, responseDurationSeconds: responseSpeed.map { 800 / $0 },
+            responseCount: responseSpeed == nil ? nil : 2
+        )
+    }
+
+    /// The menu-bar value must equal what the popover gauge shows for the same store state.
+    private func assertReadoutMatchesPopover(_ store: HistoryStore, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        let snapshot = DashboardSnapshot(
+            records: store.records, range: .day, selection: store.dashboardSelection, activeModel: store.activeModel,
+            clientFilter: store.clientFilter, providerFilter: store.providerFilter
+        )
+        let popover = snapshot.heroReading(live: store.liveSpeed, liveGroup: store.liveSpeed == nil ? nil : store.menuBarReadout.group)
+        let expected = store.dashboardSelection.isAllModels ? "Compare" : popover.value.map { String(format: "%.1f tok/s", $0) } ?? "— tok/s"
+        XCTAssertEqual(store.menuBarReadout.speedText, expected, message, file: file, line: line)
+        XCTAssertEqual(store.menuBarReadout.tool, store.dashboardSelection.isAllModels ? nil : popover.client.map(CodingTool.named), message, file: file, line: line)
     }
 
     private func makeFolder(_ name: String) throws -> URL {
@@ -77,6 +103,89 @@ final class HistoryStoreFolderTests: XCTestCase {
         store.stopMonitoring()
         XCTAssertEqual(store.menuBarReadout, .unavailable)
         XCTAssertNil(store.liveSpeed)
+    }
+
+    func testMenuBarShowsTheLatestTurnWithoutLiveResponsesAndMatchesThePopover() throws {
+        let claude = turn("claude", secondsAgo: 900, responseSpeed: 100)
+        let codex = turn("codex", secondsAgo: 600, model: "gpt-5-codex", provider: "openai", client: "codex", parser: "codex-rollout-v2", metricVersion: "turn-v1", responseSpeed: 60)
+        let grok = turn("grok", secondsAgo: 300, model: "grok-4.7", provider: "unknown", client: "grok-build", parser: "grok-session-v2", metricVersion: "grok-observed-work-turn-v1", responseSpeed: 70)
+        let store = makeStore(records: [claude, codex, grok])
+        defer { store.stopMonitoring() }
+        store.startMonitoring()
+
+        // No live response: the latest turn with response data, with its maker and tool.
+        XCTAssertEqual(store.menuBarReadout.speedText, "70.0 tok/s")
+        XCTAssertEqual(store.menuBarReadout.maker, .xAI)
+        XCTAssertEqual(store.menuBarReadout.tool, CodingTool.named("grok-build"))
+        XCTAssertTrue(store.menuBarReadout.accessibilityLabel.contains("response speed of the latest turn: 70.0 tokens per second"))
+        assertReadoutMatchesPopover(store, "auto")
+
+        store.dashboardSelection = .autoTool("codex")
+        XCTAssertEqual(store.menuBarReadout.speedText, "60.0 tok/s")
+        XCTAssertEqual(store.menuBarReadout.tool, CodingTool.named("codex"))
+        assertReadoutMatchesPopover(store, "auto in a tool")
+
+        store.dashboardSelection = .cohort(ModelCohort(claude))
+        XCTAssertEqual(store.menuBarReadout.speedText, "100.0 tok/s")
+        assertReadoutMatchesPopover(store, "pinned")
+
+        store.dashboardSelection = .auto
+        store.clientFilter = "claude-code"
+        XCTAssertEqual(store.menuBarReadout.speedText, "100.0 tok/s", "filters apply to the readout like the popover")
+        assertReadoutMatchesPopover(store, "client filter")
+        store.clientFilter = nil
+        store.providerFilter = "openai"
+        XCTAssertEqual(store.menuBarReadout.speedText, "60.0 tok/s")
+        assertReadoutMatchesPopover(store, "provider filter")
+        store.providerFilter = nil
+
+        // A live response takes over from the latest turn; once it ages out the turn is back.
+        let now = Date.now
+        store.recordLiveResponses([
+            LiveResponse(id: "live", model: "claude-opus-5-5", provider: "anthropic", client: "claude-code", sourceKind: "primary",
+                         metricVersion: "claude-observed-turn-v1", reasoningEffort: nil, completedAt: now.addingTimeInterval(-5), outputTokens: 600, durationSeconds: 4)
+        ], now: now)
+        XCTAssertEqual(store.menuBarReadout.speedText, "150.0 tok/s")
+        XCTAssertEqual(store.menuBarReadout.tool, CodingTool.named("claude-code"))
+        assertReadoutMatchesPopover(store, "live")
+        store.recordLiveResponses([], now: now.addingTimeInterval(700))
+        XCTAssertEqual(store.menuBarReadout.speedText, "70.0 tok/s")
+    }
+
+    func testMenuBarShowsAFallbackAndDashOnlyWithoutAnyMeasurement() {
+        let store = makeStore(records: [turn("turn-only", secondsAgo: 120, model: "grok-code-fast-1", provider: "xai", client: "grok-build", parser: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1", turnSpeed: 33, responseSpeed: nil)])
+        defer { store.stopMonitoring() }
+        XCTAssertEqual(store.menuBarReadout, .unavailable, "paused")
+        store.startMonitoring()
+        XCTAssertEqual(store.menuBarReadout.speedText, "33.0 tok/s")
+        XCTAssertTrue(store.menuBarReadout.accessibilityLabel.contains("turn speed of the latest turn"))
+        assertReadoutMatchesPopover(store, "turn only")
+        store.stopMonitoring()
+        XCTAssertEqual(store.menuBarReadout, .unavailable)
+
+        let empty = makeStore()
+        defer { empty.stopMonitoring() }
+        empty.startMonitoring()
+        XCTAssertEqual(empty.menuBarReadout.speedText, "— tok/s")
+        XCTAssertNil(empty.menuBarReadout.tool)
+    }
+
+    func testGrokTurnsFeedTheLiveStreamAndAutoInGrokBuildShowsAValue() {
+        let store = makeStore(records: [turn("older", secondsAgo: 3_600, model: "grok-4.7", provider: "unknown", client: "grok-build", parser: "grok-session-v2", metricVersion: "grok-observed-work-turn-v1", responseSpeed: 50)])
+        defer { store.stopMonitoring() }
+        store.startMonitoring()
+        store.dashboardSelection = .autoTool("grok-build")
+        XCTAssertEqual(store.menuBarReadout.speedText, "50.0 tok/s")
+
+        let fresh = turn("fresh", secondsAgo: 20, model: "grok-4.7", provider: "unknown", client: "grok-build", parser: "grok-session-v2", metricVersion: "grok-observed-work-turn-v1", responseSpeed: 80)
+        let liveEntry = LiveResponse(turn: fresh)
+        XCTAssertNotNil(liveEntry)
+        store.recordLiveResponses(liveEntry.map { [$0] } ?? [])
+        XCTAssertEqual(store.activeModel, ResponseGroupKey(model: "grok-4.7", provider: "unknown"))
+        XCTAssertEqual(store.liveSpeed?.responseCount, 1)
+        XCTAssertEqual(store.menuBarReadout.speedText, "80.0 tok/s")
+        XCTAssertEqual(store.menuBarReadout.tool, CodingTool.named("grok-build"))
+        assertReadoutMatchesPopover(store, "grok live")
     }
 
     func testDefaultsApplyUntilAFolderIsChosen() {

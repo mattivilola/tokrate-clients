@@ -9,6 +9,10 @@ public struct JSONLFileReader: Sendable {
         case beginning
         /// Seed the first session metadata line, then start at a complete line near EOF.
         case recentTail(maximumBytes: Int)
+        /// Continue after `offset` bytes an earlier run read in full (a checkpoint, always at a line
+        /// boundary). Nothing is read until the file grows, and then the first line is read once so the
+        /// appended records resolve their session as they do after a recent-tail start.
+        case resume(atOffset: UInt64)
     }
 
     public private(set) var bytesReadLastPoll = 0
@@ -17,7 +21,7 @@ public struct JSONLFileReader: Sendable {
     var isSkippedSession: Bool { parser.isSkippedSession }
     /// The session is a spawned child, read in full for its delegated work items only.
     var isDelegatedWork: Bool { parser.isDelegatedWork }
-    private enum TailStartup: Sendable { case header, alignment, unavailable }
+    private enum TailStartup: Sendable { case header, alignment, unavailable, context }
     private let tailByteLimit: Int?
     private var tailStartup: TailStartup?
 
@@ -37,6 +41,11 @@ public struct JSONLFileReader: Sendable {
         case .recentTail(let maximumBytes):
             tailByteLimit = max(1, maximumBytes)
             tailStartup = .header
+        case .resume(let resumeOffset):
+            tailByteLimit = nil
+            tailStartup = .context
+            offset = resumeOffset
+            isCaughtUp = true
         }
         parser = CodexEventParser(sourceIdentity: url.standardizedFileURL.path)
         fileNumber = Self.currentFileNumber(url)
@@ -66,7 +75,7 @@ public struct JSONLFileReader: Sendable {
         if tailStartup == .unavailable { isCaughtUp = true; return [] }
         guard currentSize > offset else {
             // An empty file has no history to wait for, whatever its startup phase.
-            isCaughtUp = tailStartup == nil || currentSize == 0
+            isCaughtUp = tailStartup == nil || tailStartup == .context || currentSize == 0
             return []
         }
         if tailStartup == .header {
@@ -74,11 +83,19 @@ public struct JSONLFileReader: Sendable {
             return []
         }
         var readBudget = maxBytes
+        if tailStartup == .context {
+            isCaughtUp = false
+            let headerBytes = try restoreHeader(currentSize: currentSize)
+            bytesReadLastPoll += headerBytes
+            readBudget -= headerBytes
+            // A header that cannot be used (or a skipped session) leaves nothing to read.
+            if isCaughtUp { return [] }
+        }
         if tailStartup == .alignment {
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
             try handle.seek(toOffset: offset - 1)
-            let previous = try handle.read(upToCount: 1) ?? Data()
+            let previous = try handle.readDraining(upToCount: 1)
             bytesReadLastPoll += previous.count
             readBudget -= previous.count
             droppingOversizedLine = previous.first != 0x0A
@@ -90,7 +107,7 @@ public struct JSONLFileReader: Sendable {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         try handle.seek(toOffset: offset)
-        let bytes = try handle.read(upToCount: count) ?? Data()
+        let bytes = try handle.readDraining(upToCount: count)
         offset += UInt64(bytes.count)
         bytesReadLastPoll += bytes.count
         isCaughtUp = offset >= currentSize
@@ -102,7 +119,7 @@ public struct JSONLFileReader: Sendable {
         while let newline = pending[lineStart...].firstIndex(of: 0x0A) {
             let line = pending[lineStart..<newline]
             if !droppingOversizedLine, line.count <= Self.maximumLineBytes,
-               let record = parser.consume(line: Data(line)) {
+               let record = autoreleasepool(invoking: { parser.consume(line: Data(line)) }) {
                 records.append(record)
             }
             droppingOversizedLine = false
@@ -121,7 +138,7 @@ public struct JSONLFileReader: Sendable {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         try handle.seek(toOffset: offset)
-        let bytes = try handle.read(upToCount: Int(min(UInt64(maxBytes), currentSize - offset))) ?? Data()
+        let bytes = try handle.readDraining(upToCount: Int(min(UInt64(maxBytes), currentSize - offset)))
         offset += UInt64(bytes.count)
         bytesReadLastPoll = bytes.count
         pending.append(bytes)
@@ -136,15 +153,12 @@ public struct JSONLFileReader: Sendable {
         let line = Data(pending[..<newline])
         let headerEnd = offset - UInt64(pending.distance(from: pending.index(after: newline), to: pending.endIndex))
         pending.removeAll(keepingCapacity: false)
-        guard line.count <= Self.maximumLineBytes,
-              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              object["type"] as? String == "session_meta" else {
+        guard consumeHeader(line) else {
             // Fail closed when provenance cannot be read. The archive lane can still parse normally.
             tailStartup = .unavailable
             isCaughtUp = true
             return
         }
-        _ = parser.consume(line: line)
         if parser.isSkippedSession {
             offset = currentSize
             tailStartup = nil
@@ -162,6 +176,50 @@ public struct JSONLFileReader: Sendable {
         offset = max(headerEnd, tailStart)
         tailStartup = offset > headerEnd ? .alignment : nil
         isCaughtUp = tailStartup == nil && offset >= currentSize
+    }
+
+    /// Reads the first line of a file resumed from a checkpoint, which the earlier run already read, so
+    /// the parser knows the session the appended records belong to. The cursor stays where the
+    /// checkpoint put it. Returns the bytes read.
+    private mutating func restoreHeader(currentSize: UInt64) throws -> Int {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let limit = min(offset, UInt64(Self.maximumLineBytes) + 1)
+        var header = Data()
+        while UInt64(header.count) < limit {
+            let chunk = try handle.readDraining(upToCount: Int(min(UInt64(Self.defaultBatchBytes), limit - UInt64(header.count))))
+            if chunk.isEmpty { break }
+            header.append(chunk)
+            if chunk.contains(0x0A) { break }
+        }
+        guard let newline = header.firstIndex(of: 0x0A), consumeHeader(Data(header[..<newline])) else {
+            tailStartup = .unavailable
+            isCaughtUp = true
+            return header.count
+        }
+        tailStartup = nil
+        if parser.isSkippedSession {
+            offset = currentSize
+            isCaughtUp = true
+        }
+        return header.count
+    }
+
+    /// Feeds the session metadata line to the parser; false when the first line is not one.
+    private mutating func consumeHeader(_ line: Data) -> Bool {
+        guard line.count <= Self.maximumLineBytes,
+              autoreleasepool(invoking: { (try? JSONSerialization.jsonObject(with: line) as? [String: Any])?["type"] as? String }) == "session_meta"
+        else { return false }
+        _ = parser.consume(line: line)
+        return true
+    }
+
+    /// The file identity and offset a later run can resume from, once this reader has read the file to
+    /// its end on a line boundary; nil while anything is unread or the first line could not be used.
+    var checkpointPosition: (fileNumber: UInt64, offset: UInt64)? {
+        guard isCaughtUp, offset > 0, pending.isEmpty, !droppingOversizedLine,
+              tailStartup == nil || tailStartup == .context, let fileNumber else { return nil }
+        return (fileNumber, offset)
     }
 
     /// Qualifying responses completed since the last call.
@@ -189,5 +247,22 @@ public struct JSONLFileReader: Sendable {
 
     private static func fileNumber(from attributes: [FileAttributeKey: Any]) -> UInt64? {
         (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+    }
+}
+
+extension Error {
+    /// The file a reader was reading is gone (rotated away or deleted).
+    var isMissingFile: Bool {
+        guard let error = self as? CocoaError else { return false }
+        return error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile
+    }
+}
+
+extension FileHandle {
+    /// `read(upToCount:)` returns an autoreleased buffer that a thread without a draining run loop
+    /// (a command-line replay, a pool-less executor thread) keeps until it exits, so a large file held
+    /// every batch read at once. The pool bounds that to one batch.
+    func readDraining(upToCount count: Int) throws -> Data {
+        try autoreleasepool { try read(upToCount: count) } ?? Data()
     }
 }

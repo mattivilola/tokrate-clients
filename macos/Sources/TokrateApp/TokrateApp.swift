@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         presentOnboardingIfNeeded()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        historyStore.prepareForTermination()
+    }
+
     /// Reopens onboarding while the sharing choice is still pending. Returns false when it is not,
     /// so callers fall through to their normal destination.
     func showInitialConsentDashboard() -> Bool {
@@ -58,6 +62,7 @@ struct TokrateApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @AppStorage("showProviderBadge") private var showProviderBadge = true
+    @AppStorage("showToolChip") private var showToolChip = true
     private var historyStore: HistoryStore { appDelegate.historyStore }
 
     var body: some Scene {
@@ -68,7 +73,7 @@ struct TokrateApp: App {
                 showInitialConsentDashboard: { appDelegate.showInitialConsentDashboard() }
             )
         } label: {
-            MenuBarLabel(readout: historyStore.menuBarReadout, showsSpeed: showMenuBarSpeed, showsBadge: showProviderBadge)
+            MenuBarLabel(readout: historyStore.menuBarReadout, showsSpeed: showMenuBarSpeed, showsBadge: showProviderBadge, showsToolChip: showToolChip)
         }
         .menuBarExtraStyle(.window)
 

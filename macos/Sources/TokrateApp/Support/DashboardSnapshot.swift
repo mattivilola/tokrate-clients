@@ -421,6 +421,12 @@ struct HeroReading: Equatable {
     /// Live readings: how many responses the median covers.
     let responseCount: Int?
     let cohort: ModelCohort?
+    /// The coding tool the value comes from: the newest live response's, the turn's, or the selected
+    /// cohort's when there is no value.
+    let client: String?
+
+    /// The model and provider the value belongs to; nil for an unknown model.
+    var group: ResponseGroupKey? { model.map { ResponseGroupKey(model: $0, provider: provider) } }
 
     var usesResponseSpeed: Bool { kind == .live || kind == .latestTurnResponse }
 
@@ -436,7 +442,7 @@ struct HeroReading: Equatable {
         }
     }
 
-    static let empty = HeroReading(kind: .empty, value: nil, model: nil, provider: nil, effort: nil, chip: nil, completedAt: nil, responseCount: nil, cohort: nil)
+    static let empty = HeroReading(kind: .empty, value: nil, model: nil, provider: nil, effort: nil, chip: nil, completedAt: nil, responseCount: nil, cohort: nil, client: nil)
 }
 
 /// Pure presentation data: safe to construct for previews without any store, monitor, or network.
@@ -480,6 +486,8 @@ struct DashboardSnapshot {
     let selectedCohort: ModelCohort?
     let throughputLabel: String
     let latest: TurnMetric?
+    /// Where the gauge and the menu-bar item take their value from; shared so they cannot drift.
+    let heroSources: HeroSources
     /// The selected model's latest turn with response data (any coding tool), within retention.
     let responseHero: TurnMetric?
     /// The selected cohort's latest eligible turn: the gauge fallback for sources without response data.
@@ -528,21 +536,11 @@ struct DashboardSnapshot {
     ) {
         self.range = range
         self.selection = selection
-        let retentionCutoff = now.addingTimeInterval(-MetricHistory.retention)
-        let inRetention = records.filter { $0.completedAt >= retentionCutoff && $0.completedAt <= now }
-        let retained = inRetention.filter { metric in
-            (clientFilter == nil || metric.client == clientFilter)
-                && (providerFilter == nil || (metric.provider ?? "unknown") == providerFilter)
-        }
-        let resolvedCohort: ModelCohort?
-        switch selection {
-        case .auto, .autoTool:
-            resolvedCohort = AutoSelection.resolve(records: retained, activeModel: activeModel, client: selection.autoClient)
-        case .cohort(let cohort):
-            resolvedCohort = cohort
-        case .all:
-            resolvedCohort = nil
-        }
+        let inRetention = HeroSources.withinRetention(records, now: now)
+        let retained = HeroSources.filtered(inRetention, clientFilter: clientFilter, providerFilter: providerFilter)
+        let hero = HeroSources(retained: retained, selection: selection, activeModel: activeModel)
+        heroSources = hero
+        let resolvedCohort = hero.cohort
         selectedCohort = resolvedCohort
         throughputLabel = resolvedCohort?.throughputLabel ?? "Turn speed"
 
@@ -577,8 +575,8 @@ struct DashboardSnapshot {
             medianRate = nil
             medianTTFT = nil
             latest = nil
-            responseHero = nil
-            turnHero = nil
+            responseHero = hero.responseHero
+            turnHero = hero.turnHero
             responseGaugeMedian = gaugeMedian
             turnGaugeMedian = nil
             points = []
@@ -612,13 +610,13 @@ struct DashboardSnapshot {
         medianRate = throughput.median
         medianTTFT = ttft.median
         latest = eligible.max { $0.completedAt < $1.completedAt }
-        turnHero = selectedRetained.filter(Self.isThroughputEligible).max { $0.completedAt < $1.completedAt }
+        turnHero = hero.turnHero
         turnGaugeMedian = turnHero.flatMap { Self.groupMedianMaximum(for: $0, in: inRetention, now: now) }
 
         let scopedResponses = responseScope.filter { $0.completedAt >= start && $0.responseSpeedTPS != nil }
         response = MetricStats(values: scopedResponses.compactMap(\.responseSpeedTPS))
         responseCount = scopedResponses.reduce(0) { $0 + ($1.responseCount ?? 0) }
-        responseHero = responseScope.filter { $0.responseSpeedTPS != nil }.max { $0.completedAt < $1.completedAt }
+        responseHero = hero.responseHero
         responseGaugeMedian = gaugeMedian
 
         points = Self.buckets(eligible.map { ($0.completedAt, $0.turnThroughputTPS) }, start: start, now: now, range: range)
@@ -635,29 +633,7 @@ struct DashboardSnapshot {
     /// The gauge reading: live median first, then the model's latest turn with response data, then
     /// the cohort's latest turn speed for sources without per-response timing.
     func heroReading(live: LiveSpeed?, liveGroup: ResponseGroupKey?) -> HeroReading {
-        guard let cohort = selectedCohort else { return .empty }
-        let chip = cohort.measurement.chipTitle
-        if let live, let liveGroup {
-            return HeroReading(
-                kind: .live, value: live.medianTPS, model: liveGroup.model, provider: liveGroup.provider,
-                effort: cohort.reasoningEffort, chip: chip, completedAt: live.latestAt, responseCount: live.responseCount, cohort: cohort
-            )
-        }
-        if let turn = responseHero, let speed = turn.responseSpeedTPS {
-            return HeroReading(
-                kind: .latestTurnResponse, value: speed, model: turn.model, provider: turn.provider,
-                effort: turn.reasoningEffort, chip: turn.isSubagentTurn ? "Subagent" : ModelCohort(turn).measurement.chipTitle,
-                completedAt: turn.completedAt, responseCount: turn.responseCount, cohort: ModelCohort(turn)
-            )
-        }
-        if let turn = turnHero {
-            return HeroReading(
-                kind: .turnFallback, value: turn.turnThroughputTPS, model: turn.model, provider: turn.provider,
-                effort: turn.reasoningEffort, chip: turn.isSubagentTurn ? "Subagent" : ModelCohort(turn).measurement.chipTitle,
-                completedAt: turn.completedAt, responseCount: nil, cohort: ModelCohort(turn)
-            )
-        }
-        return HeroReading(kind: .empty, value: nil, model: cohort.model, provider: cohort.provider, effort: cohort.reasoningEffort, chip: chip, completedAt: nil, responseCount: nil, cohort: cohort)
+        heroSources.reading(live: live, liveGroup: liveGroup)
     }
 
     /// The reading compared with the selected model's own 24 h response-speed median (or the turn
@@ -744,7 +720,7 @@ struct DashboardSnapshot {
         }
     }
 
-    private static func isThroughputEligible(_ metric: TurnMetric) -> Bool {
+    static func isThroughputEligible(_ metric: TurnMetric) -> Bool {
         metric.outputTokens >= 20 && metric.turnThroughputTPS.isFinite && metric.turnThroughputTPS >= 0
     }
 

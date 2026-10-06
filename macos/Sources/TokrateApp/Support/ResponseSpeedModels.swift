@@ -34,6 +34,8 @@ struct LiveSpeed: Equatable, Sendable {
     let responseCount: Int
     /// When the newest covered response completed.
     let latestAt: Date
+    /// The coding tool of the newest covered response.
+    let client: String
 
     var caption: String { "last \(responseCount) \(responseCount == 1 ? "response" : "responses")" }
 
@@ -63,14 +65,15 @@ struct LiveResponseBuffer: Sendable {
     mutating func removeAll() { responses.removeAll() }
 
     /// Median speed of the latest `medianSample` responses of `group` that completed in the last
-    /// ten minutes; nil when there are none.
+    /// ten minutes; nil when there are none. A Grok Build entry is one whole turn's response
+    /// average (`LiveResponse(turn:)`), so it counts as one response here.
     func liveSpeed(for group: ResponseGroupKey?, now: Date) -> LiveSpeed? {
         guard let group else { return nil }
         let recent = responses
             .filter { ResponseGroupKey($0) == group && now.timeIntervalSince($0.completedAt) <= Self.window && $0.completedAt <= now }
             .prefix(Self.medianSample)
         guard let newest = recent.first, let median = MetricStats(values: recent.map(\.tokensPerSecond)).median else { return nil }
-        return LiveSpeed(medianTPS: median, responseCount: recent.count, latestAt: newest.completedAt)
+        return LiveSpeed(medianTPS: median, responseCount: recent.count, latestAt: newest.completedAt, client: newest.client)
     }
 }
 
@@ -79,10 +82,12 @@ struct LiveResponseBuffer: Sendable {
 /// Chooses which model the menu bar and popover follow in Auto mode. It reads only the live stream
 /// of qualifying responses, so tiny automated check-ins never count. The clock is injected.
 struct ActiveModelSelector: Sendable {
-    /// The leader is the model with the most response output tokens in this window.
-    static let window: TimeInterval = 600
-    /// A new leader takes over only after leading continuously for this long.
-    static let takeoverDelay: TimeInterval = 120
+    /// The leader is the model with the most response output tokens in this window (the last three
+    /// minutes), so Auto follows what is being worked with now.
+    static let window: TimeInterval = 180
+    /// A new leader takes over only after leading continuously for this long. A quiet active model
+    /// (no response left in the window) is replaced at once.
+    static let takeoverDelay: TimeInterval = 30
 
     private(set) var active: ResponseGroupKey?
     private var leader: ResponseGroupKey?

@@ -49,6 +49,7 @@ final class ResponseSpeedTests: XCTestCase {
         XCTAssertEqual(speed.medianTPS, 110, accuracy: 0.001)
         XCTAssertEqual(speed.responseCount, 5)
         XCTAssertEqual(speed.latestAt, now.addingTimeInterval(-30))
+        XCTAssertEqual(speed.client, "claude-code", "the client of the newest response")
         XCTAssertEqual(speed.relativeCaption(now: now), "last 5 responses · just now")
         XCTAssertNil(buffer.liveSpeed(for: ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic"), now: now.addingTimeInterval(700)))
         XCTAssertNil(buffer.liveSpeed(for: nil, now: now))
@@ -67,18 +68,132 @@ final class ResponseSpeedTests: XCTestCase {
 
     func testMenuBarReadoutFormatsValueAndAccessibilityLabel() {
         let group = ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic")
-        let live = LiveSpeed(medianTPS: 112.4, responseCount: 5, latestAt: now)
-        let readout = MenuBarReadout.make(isMonitoring: true, selection: .auto, group: group, liveSpeed: live)
+        let live = LiveSpeed(medianTPS: 112.4, responseCount: 5, latestAt: now, client: "claude-code")
+        let cohort = ModelCohort(model: "claude-opus-5-5", provider: "anthropic", clientVersion: "1.0", client: "claude-code", parserVersion: "claude-transcript-v4", metricVersion: "claude-observed-turn-v1")
+        let liveReading = HeroSources(retained: [], selection: .cohort(cohort), activeModel: nil).reading(live: live, liveGroup: group)
+        let readout = MenuBarReadout.make(isMonitoring: true, selection: .auto, reading: liveReading)
         XCTAssertEqual(readout.speedText, "112.4 tok/s")
-        XCTAssertEqual(readout.accessibilityLabel, "Tokrate, Anthropic, response speed: 112.4 tokens per second")
+        XCTAssertEqual(readout.accessibilityLabel, "Tokrate, Anthropic, Claude Code, response speed: 112.4 tokens per second")
         XCTAssertEqual(readout.maker, .anthropic)
+        XCTAssertEqual(readout.group, group)
+        XCTAssertEqual(readout.tool, CodingTool.named("claude-code"))
 
-        let none = MenuBarReadout.make(isMonitoring: true, selection: .auto, group: group, liveSpeed: nil)
+        let latest = turn("latest", secondsAgo: 300, responseSpeed: 56.3)
+        let latestReading = HeroSources(retained: [latest], selection: .auto, activeModel: nil).reading(live: nil, liveGroup: nil)
+        let latestReadout = MenuBarReadout.make(isMonitoring: true, selection: .auto, reading: latestReading)
+        XCTAssertEqual(latestReadout.speedText, "56.3 tok/s")
+        XCTAssertEqual(latestReadout.accessibilityLabel, "Tokrate, Anthropic, Claude Code, response speed of the latest turn: 56.3 tokens per second")
+
+        let turnOnly = turn("turn-only", secondsAgo: 300, model: "grok-4.7", provider: "xai", client: "grok-build", parser: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1", turnSpeed: 62.4, responseSpeed: nil)
+        let turnReadout = MenuBarReadout.make(isMonitoring: true, selection: .auto, reading: HeroSources(retained: [turnOnly], selection: .auto, activeModel: nil).reading(live: nil, liveGroup: nil))
+        XCTAssertEqual(turnReadout.speedText, "62.4 tok/s")
+        XCTAssertEqual(turnReadout.accessibilityLabel, "Tokrate, xAI, Grok Build, turn speed of the latest turn: 62.4 tokens per second")
+
+        let none = MenuBarReadout.make(isMonitoring: true, selection: .cohort(cohort), reading: HeroSources(retained: [], selection: .cohort(cohort), activeModel: nil).reading(live: nil, liveGroup: nil))
         XCTAssertEqual(none.speedText, "— tok/s")
         XCTAssertEqual(none.maker, .anthropic, "the badge stays with the followed model")
-        XCTAssertEqual(MenuBarReadout.make(isMonitoring: false, selection: .auto, group: group, liveSpeed: live), .unavailable)
-        XCTAssertEqual(MenuBarReadout.make(isMonitoring: true, selection: .all, group: nil, liveSpeed: nil).speedText, "Compare")
-        XCTAssertEqual(MenuBarReadout.make(isMonitoring: true, selection: .auto, group: nil, liveSpeed: nil).accessibilityLabel, "Tokrate, response speed: unavailable")
+        XCTAssertEqual(none.tool, CodingTool.named("claude-code"))
+        XCTAssertEqual(MenuBarReadout.make(isMonitoring: false, selection: .auto, reading: liveReading), .unavailable)
+        XCTAssertEqual(MenuBarReadout.make(isMonitoring: true, selection: .all, reading: .empty).speedText, "Compare")
+        XCTAssertNil(MenuBarReadout.make(isMonitoring: true, selection: .all, reading: .empty).tool)
+        let nothing = MenuBarReadout.make(isMonitoring: true, selection: .auto, reading: .empty)
+        XCTAssertEqual(nothing.speedText, "— tok/s")
+        XCTAssertEqual(nothing.accessibilityLabel, "Tokrate, response speed: unavailable")
+        XCTAssertNil(nothing.maker)
+        XCTAssertNil(nothing.tool)
+    }
+
+    func testReadoutToolIsTheNewestLiveResponsesToolElseTheTurnsTool() {
+        // Live: the tool of the newest response in the group, whatever tool the history resolves to.
+        var buffer = LiveResponseBuffer()
+        buffer.append(contentsOf: [
+            response("claude", secondsAgo: 60, model: "gpt-5-codex", provider: "openai", client: "claude-code"),
+            response("codex", secondsAgo: 20, model: "gpt-5-codex", provider: "openai", client: "codex")
+        ])
+        let group = ResponseGroupKey(model: "gpt-5-codex", provider: "openai")
+        let live = buffer.liveSpeed(for: group, now: now)
+        let history = [turn("h", secondsAgo: 500, client: "claude-code")]
+        let liveReading = HeroSources(retained: history, selection: .auto, activeModel: group).reading(live: live, liveGroup: group)
+        XCTAssertEqual(liveReading.kind, .live)
+        XCTAssertEqual(MenuBarReadout.make(isMonitoring: true, selection: .auto, reading: liveReading).tool, CodingTool.named("codex"))
+
+        // Fallback: the tool of the latest turn.
+        let codexTurn = turn("c", secondsAgo: 100, model: "gpt-5-codex", provider: "openai", client: "codex", parser: "codex-rollout-v2", metricVersion: "turn-v1")
+        let fallback = HeroSources(retained: history + [codexTurn], selection: .auto, activeModel: nil).reading(live: nil, liveGroup: nil)
+        XCTAssertEqual(MenuBarReadout.make(isMonitoring: true, selection: .auto, reading: fallback).tool, CodingTool.named("codex"))
+    }
+
+    func testReadoutValueMatchesThePopoverHeroForEveryScenario() {
+        let claude = turn("claude", secondsAgo: 900, responseSpeed: 100)
+        let claudeOlder = turn("claude-old", secondsAgo: 1_800, responseSpeed: 80)
+        let codex = turn("codex", secondsAgo: 600, model: "gpt-5-codex", provider: "openai", client: "codex", parser: "codex-rollout-v2", metricVersion: "turn-v1", responseSpeed: 60)
+        let grok = turn("grok", secondsAgo: 300, model: "grok-4.7", provider: "unknown", client: "grok-build", parser: "grok-session-v2", metricVersion: "grok-observed-work-turn-v1", responseSpeed: 70)
+        let turnOnly = turn("turn-only", secondsAgo: 120, model: "grok-code-fast-1", provider: "xai", client: "grok-build", parser: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1", turnSpeed: 33, responseSpeed: nil)
+        let claudeGroup = ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic")
+        let liveClaude = LiveSpeed(medianTPS: 142.5, responseCount: 3, latestAt: now.addingTimeInterval(-20), client: "claude-code")
+        let all = [claude, claudeOlder, codex, grok, turnOnly]
+
+        struct Scenario {
+            let name: String
+            let records: [TurnMetric]
+            var selection: DashboardSelection = .auto
+            var active: ResponseGroupKey?
+            var live: LiveSpeed?
+            var clientFilter: String?
+            var providerFilter: String?
+        }
+        let scenarios = [
+            Scenario(name: "live", records: all, active: claudeGroup, live: liveClaude),
+            Scenario(name: "live without history", records: [], active: claudeGroup, live: liveClaude),
+            Scenario(name: "latest response turn", records: all),
+            Scenario(name: "only turn throughput", records: [turnOnly]),
+            Scenario(name: "nothing", records: []),
+            Scenario(name: "auto in a tool", records: all, selection: .autoTool("codex")),
+            Scenario(name: "auto in a tool with live", records: all, selection: .autoTool("claude-code"), active: claudeGroup, live: liveClaude),
+            Scenario(name: "auto in a tool without records", records: [claude], selection: .autoTool("codex")),
+            Scenario(name: "pinned cohort", records: all, selection: .cohort(ModelCohort(codex))),
+            Scenario(name: "pinned cohort with live", records: all, selection: .cohort(ModelCohort(claude)), active: claudeGroup, live: liveClaude),
+            Scenario(name: "pinned turn-only cohort", records: all, selection: .cohort(ModelCohort(turnOnly))),
+            Scenario(name: "client filter", records: all, clientFilter: "codex"),
+            Scenario(name: "provider filter", records: all, providerFilter: "xai"),
+            Scenario(name: "filters that match nothing", records: all, clientFilter: "codex", providerFilter: "anthropic")
+        ]
+        for scenario in scenarios {
+            let snapshot = DashboardSnapshot(
+                records: scenario.records, range: .day, selection: scenario.selection, activeModel: scenario.active, now: now,
+                clientFilter: scenario.clientFilter, providerFilter: scenario.providerFilter
+            )
+            let popover = snapshot.heroReading(live: scenario.live, liveGroup: scenario.live == nil ? nil : scenario.active)
+            let menuBar = HeroSources(
+                records: scenario.records, selection: scenario.selection, activeModel: scenario.active, now: now,
+                clientFilter: scenario.clientFilter, providerFilter: scenario.providerFilter
+            ).reading(live: scenario.live, liveGroup: scenario.live == nil ? nil : scenario.active)
+            XCTAssertEqual(menuBar, popover, scenario.name)
+            let readout = MenuBarReadout.make(isMonitoring: true, selection: scenario.selection, reading: menuBar)
+            XCTAssertEqual(readout.speedText, popover.value.map { String(format: "%.1f tok/s", $0) } ?? "— tok/s", scenario.name)
+            XCTAssertEqual(readout.tool, popover.client.map(CodingTool.named), scenario.name)
+        }
+
+        // Spot checks of the values behind the scenarios.
+        func text(_ scenario: Scenario) -> String {
+            let reading = HeroSources(
+                records: scenario.records, selection: scenario.selection, activeModel: scenario.active, now: now,
+                clientFilter: scenario.clientFilter, providerFilter: scenario.providerFilter
+            ).reading(live: scenario.live, liveGroup: scenario.live == nil ? nil : scenario.active)
+            return MenuBarReadout.make(isMonitoring: true, selection: scenario.selection, reading: reading).speedText
+        }
+        XCTAssertEqual(text(scenarios[0]), "142.5 tok/s")
+        XCTAssertEqual(text(scenarios[1]), "142.5 tok/s")
+        XCTAssertEqual(text(scenarios[2]), "70.0 tok/s", "the newest turn with response data")
+        XCTAssertEqual(text(scenarios[3]), "33.0 tok/s")
+        XCTAssertEqual(text(scenarios[4]), "— tok/s")
+        XCTAssertEqual(text(scenarios[5]), "60.0 tok/s")
+        XCTAssertEqual(text(scenarios[7]), "— tok/s")
+        XCTAssertEqual(text(scenarios[8]), "60.0 tok/s")
+        XCTAssertEqual(text(scenarios[10]), "33.0 tok/s")
+        XCTAssertEqual(text(scenarios[11]), "60.0 tok/s")
+        XCTAssertEqual(text(scenarios[12]), "33.0 tok/s", "only the xAI turn-only record passes the provider filter")
+        XCTAssertEqual(text(scenarios[13]), "— tok/s")
     }
 
     func testModelMakerFollowsModelIdThenProvider() {
@@ -118,35 +233,54 @@ final class ResponseSpeedTests: XCTestCase {
         XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(40)), claude)
         responses.append(response("x2", secondsAgo: -70, model: "gpt-5-codex", provider: "openai", client: "codex", tokens: 9_000))
         XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(70)), claude)
-        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(150)), claude, "leader only since t+70 s: 80 s is not enough")
-        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(190)), codex, "120 s of continuous leadership")
+        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(90)), claude, "leader only since t+70 s: 20 s is not enough")
+        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(100)), codex, "30 s of continuous leadership")
     }
 
-    func testTakeoverNeedsTwoMinutesOfContinuousLeadership() {
+    func testTakeoverNeedsThirtySecondsOfContinuousLeadership() {
+        XCTAssertEqual(ActiveModelSelector.window, 180)
+        XCTAssertEqual(ActiveModelSelector.takeoverDelay, 30)
         var selector = ActiveModelSelector()
         let claude = ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic")
         let codex = ResponseGroupKey(model: "gpt-5-codex", provider: "openai")
+        // The new model has more output in the last three minutes than the active one.
         let responses = [
             response("c", secondsAgo: 60, tokens: 800),
             response("x", secondsAgo: 30, model: "gpt-5-codex", provider: "openai", client: "codex", tokens: 4_000)
         ]
         XCTAssertEqual(selector.update(responses: [responses[0]], now: now.addingTimeInterval(-60)), claude)
         XCTAssertEqual(selector.update(responses: responses, now: now), claude)
-        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(119)), claude)
-        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(120)), codex)
+        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(29)), claude, "not before 30 s")
+        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(30)), codex)
+    }
+
+    func testLeadershipOnlyCountsTheLastThreeMinutes() {
+        var selector = ActiveModelSelector()
+        let claude = ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic")
+        let codex = ResponseGroupKey(model: "gpt-5-codex", provider: "openai")
+        // Claude produced far more output, but four minutes ago: Codex leads the last three minutes.
+        let responses = [
+            response("c", secondsAgo: 240, tokens: 20_000),
+            response("c2", secondsAgo: 100, tokens: 500),
+            response("x", secondsAgo: 90, model: "gpt-5-codex", provider: "openai", client: "codex", tokens: 900)
+        ]
+        XCTAssertEqual(selector.update(responses: [responses[0]], now: now.addingTimeInterval(-240)), claude)
+        XCTAssertEqual(selector.update(responses: responses, now: now), claude)
+        XCTAssertEqual(selector.update(responses: responses, now: now.addingTimeInterval(30)), codex)
     }
 
     func testQuietActiveModelIsReplacedAtOnceAndNoLiveDataClearsTheSelection() {
         var selector = ActiveModelSelector()
         let claude = ResponseGroupKey(model: "claude-opus-5-5", provider: "anthropic")
         let codex = ResponseGroupKey(model: "gpt-5-codex", provider: "openai")
-        let old = response("c", secondsAgo: 300, tokens: 800)
-        XCTAssertEqual(selector.update(responses: [old], now: now.addingTimeInterval(-300)), claude)
-        let fresh = response("x", secondsAgo: 0, model: "gpt-5-codex", provider: "openai", client: "codex", tokens: 400)
-        // Claude still leads while its response is in the window and Codex has not led for two minutes.
-        XCTAssertEqual(selector.update(responses: [old, fresh], now: now.addingTimeInterval(200)), claude)
-        // Ten minutes after Claude's last response only Codex is left: it takes over at once.
-        XCTAssertEqual(selector.update(responses: [old, fresh], now: now.addingTimeInterval(310)), codex)
+        let old = response("c", secondsAgo: 170, tokens: 800)
+        XCTAssertEqual(selector.update(responses: [old], now: now.addingTimeInterval(-170)), claude)
+        let fresh = response("x", secondsAgo: 0, model: "gpt-5-codex", provider: "openai", client: "codex", tokens: 4_000)
+        // Claude's response is still in the window and Codex has not led for 30 s yet.
+        XCTAssertEqual(selector.update(responses: [old, fresh], now: now), claude)
+        XCTAssertEqual(selector.update(responses: [old, fresh], now: now.addingTimeInterval(10)), claude)
+        // Three minutes after Claude's last response only Codex is left: it takes over at once.
+        XCTAssertEqual(selector.update(responses: [old, fresh], now: now.addingTimeInterval(15)), codex)
         // Everything aged out: no active model, so the dashboard falls back to history.
         XCTAssertNil(selector.update(responses: [old, fresh], now: now.addingTimeInterval(2_000)))
         XCTAssertNil(selector.active)
@@ -247,7 +381,7 @@ final class ResponseSpeedTests: XCTestCase {
         let snapshot = DashboardSnapshot(records: records, range: .day, selection: .cohort(cohort), now: now)
         let group = ResponseGroupKey(cohort)
 
-        let live = snapshot.heroReading(live: LiveSpeed(medianTPS: 140, responseCount: 5, latestAt: now.addingTimeInterval(-120)), liveGroup: group)
+        let live = snapshot.heroReading(live: LiveSpeed(medianTPS: 140, responseCount: 5, latestAt: now.addingTimeInterval(-120), client: "claude-code"), liveGroup: group)
         XCTAssertEqual(live.kind, .live)
         XCTAssertEqual(live.value, 140)
         XCTAssertEqual(live.caption(now: now), "last 5 responses · 2 min ago")

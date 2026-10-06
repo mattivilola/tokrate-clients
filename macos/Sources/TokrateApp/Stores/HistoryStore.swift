@@ -55,9 +55,13 @@ final class HistoryStore {
     /// The longest the app sleeps with nothing pending. A poll also ages the live readout and moves
     /// Auto model selection (`refreshLiveReadout`), which must not stall while the folders are quiet.
     nonisolated static let idlePollInterval: TimeInterval = 30
+    /// `checkpoints` ride in the same file so that records and the files they were read from are written
+    /// atomically together. A file without them (older builds, or a history that failed to load) is
+    /// simply replayed in full; builds that do not know the field ignore it.
     private struct PersistedHistory: Codable {
         let schemaVersion: Int
         let records: [TurnMetric]
+        let checkpoints: SourceCheckpoints?
     }
 
     let sharingPreferences: SharingPreferences
@@ -96,6 +100,11 @@ final class HistoryStore {
     /// What the menu-bar item shows.
     private(set) var menuBarReadout = MenuBarReadout.unavailable
     @ObservationIgnored private var liveResponses = LiveResponseBuffer()
+    /// The session files already read to their end, as the monitors last reported them. The next launch
+    /// skips what it still matches (see `SourceFileCheckpoint`).
+    @ObservationIgnored private(set) var checkpoints = SourceCheckpoints()
+    /// The files `checkpoints` held when the history was last written.
+    @ObservationIgnored private var savedCheckpointPaths: Set<String> = []
     @ObservationIgnored private var selector = ActiveModelSelector()
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -184,6 +193,8 @@ final class HistoryStore {
            let persisted = try? decoder.decode(PersistedHistory.self, from: data),
            persisted.schemaVersion == 1 {
             history = MetricHistory(records: persisted.records)
+            checkpoints = persisted.checkpoints?.retained() ?? SourceCheckpoints()
+            savedCheckpointPaths = checkpoints.pathDigests
         } else {
             history = MetricHistory()
         }
@@ -241,8 +252,11 @@ final class HistoryStore {
         errorMessage = nil
         // Only responses that complete from now on count as live; replayed history is not "now".
         let launchedAt = Date.now
-        monitor = CodexSessionMonitor(root: folder(for: .codex), liveSince: launchedAt)
-        claudeMonitor = ClaudeSessionMonitor(root: folder(for: .claudeCode), liveSince: launchedAt)
+        monitor = CodexSessionMonitor(root: folder(for: .codex), liveSince: launchedAt, checkpoints: checkpoints.codex)
+        claudeMonitor = ClaudeSessionMonitor(
+            root: folder(for: .claudeCode), liveSince: launchedAt,
+            primaryCheckpoints: checkpoints.claudePrimary, subagentCheckpoints: checkpoints.claudeSubagents
+        )
         grokMonitor = GrokSessionMonitor(root: folder(for: .grokBuild))
         isMonitoring = true
         refreshLiveReadout()
@@ -277,7 +291,10 @@ final class HistoryStore {
                     failures.append("Claude Code sessions")
                 }
                 do {
-                    newRecords += try await grokMonitor.poll()
+                    let grokRecords = try await grokMonitor.poll()
+                    newRecords += grokRecords
+                    // Grok Build reports speed per turn only: each turn completed since launch is one live entry.
+                    newResponses += grokRecords.compactMap { $0.completedAt >= launchedAt ? LiveResponse(turn: $0) : nil }
                 } catch {
                     failures.append("Grok Build sessions")
                 }
@@ -293,7 +310,9 @@ final class HistoryStore {
                 self.sharing.enqueue(newRecords.filter { $0.isDelegationFinal && known[$0.id] != true })
                 self.history.prune()
                 for record in newRecords { self.history.upsert(record) }
-                if !newRecords.isEmpty { self.saveHistory() }
+                // After the records are in the history, so a checkpoint never claims a file whose
+                // records are not.
+                await self.refreshCheckpoints(codex: monitor, claude: claudeMonitor)
                 self.recordLiveResponses(newResponses)
                 if newRecords.isEmpty, failures.isEmpty {
                     self.errorMessage = nil
@@ -306,6 +325,10 @@ final class HistoryStore {
                     // A failed poll is retried at the normal cadence.
                     failures.isEmpty ? nil : polledAt
                 ].compactMap { $0 }
+                // A replay that just finished adds files to the checkpoints without a new record, so the
+                // set is also written when the monitors go quiet; during a replay every poll would change it.
+                let isIdle = deadlines.min().map { $0 > polledAt } ?? true
+                if !newRecords.isEmpty || (isIdle && self.checkpoints.pathDigests != self.savedCheckpointPaths) { self.saveHistory() }
                 await Self.waitForNextPoll(lastPoll: polledAt, deadline: deadlines.min(), waker: waker)
             }
         }
@@ -358,7 +381,23 @@ final class HistoryStore {
         }
     }
 
+    /// Writes what the next launch needs when the app quits, so the files read since the last write are
+    /// not replayed.
+    func prepareForTermination() {
+        if isMonitoring { saveHistory() }
+    }
+
+    private func refreshCheckpoints(codex: CodexSessionMonitor, claude: ClaudeSessionMonitor) async {
+        // Nil means "unknown, keep the previous set" (see the monitors' `checkpoints()`).
+        if let fresh = await codex.checkpoints() { checkpoints.codex = fresh }
+        if let fresh = await claude.checkpoints() {
+            checkpoints.claudePrimary = fresh.primary
+            checkpoints.claudeSubagents = fresh.subagents
+        }
+    }
+
     func stopMonitoring() {
+        if isMonitoring { saveHistory() }
         pollingTask?.cancel()
         pollingTask = nil
         for watcher in watchers.values { watcher.stop() }
@@ -373,7 +412,8 @@ final class HistoryStore {
     }
 
     /// Adds completed responses to the live buffer and re-evaluates the active model and readout.
-    /// Called after every poll, so a model that has gone quiet also ages out of the readout.
+    /// Called after every poll, once its turns are in the history, so the readout follows new turns
+    /// and a model that has gone quiet also ages out of the live value.
     func recordLiveResponses(_ responses: [LiveResponse], now: Date = .now) {
         liveResponses.append(contentsOf: responses)
         refreshLiveReadout(now: now)
@@ -391,11 +431,15 @@ final class HistoryStore {
         case .cohort(let cohort): cohort.model == nil ? nil : ResponseGroupKey(cohort)
         case .all: nil
         }
-        let readout = MenuBarReadout.make(
-            isMonitoring: isMonitoring, selection: dashboardSelection, group: group,
-            liveSpeed: liveResponses.liveSpeed(for: group, now: now)
-        )
         let speed = isMonitoring ? liveResponses.liveSpeed(for: group, now: now) : nil
+        // The same reading as the popover gauge: live median, else the latest turn.
+        let reading = isMonitoring && !dashboardSelection.isAllModels
+            ? HeroSources(
+                records: history.records, selection: dashboardSelection, activeModel: active,
+                now: now, clientFilter: clientFilter, providerFilter: providerFilter
+            ).reading(live: speed, liveGroup: speed == nil ? nil : group)
+            : .empty
+        let readout = MenuBarReadout.make(isMonitoring: isMonitoring, selection: dashboardSelection, reading: reading)
         // Assign only changes, so observers re-render when the readout actually moves.
         if active != activeModel { activeModel = active }
         if speed != liveSpeed { liveSpeed = speed }
@@ -408,12 +452,14 @@ final class HistoryStore {
                 at: persistenceURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            let envelope = PersistedHistory(schemaVersion: 1, records: history.records)
+            checkpoints = checkpoints.retained()
+            let envelope = PersistedHistory(schemaVersion: 1, records: history.records, checkpoints: checkpoints)
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(envelope)
             try data.write(to: persistenceURL, options: .atomic)
+            savedCheckpointPaths = checkpoints.pathDigests
         } catch {
             errorMessage = "Local history could not be saved."
         }

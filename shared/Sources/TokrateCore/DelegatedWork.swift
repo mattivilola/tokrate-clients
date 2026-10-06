@@ -23,6 +23,9 @@ struct DelegationSourceFile: Sendable, Equatable {
     let archivePending: Bool
     /// The wall-clock `now` of the poll that positioned the live reader; nil until it is positioned.
     let liveStartedAt: Date?
+    /// The file was resumed from a checkpoint: its content up to this modification time was not read in
+    /// this run, so its work items are not in memory. Nil for a file read from its start.
+    var skippedThrough: Date?
 }
 
 /// Which delegated-source files can still hold work a pending turn needs (contract: "Delegated
@@ -49,6 +52,13 @@ struct DelegationBacklog: Sendable, Equatable {
             // it only when the tail was positioned after `start` (a reader not positioned yet will be).
             return file.archivePending && (file.liveStartedAt ?? .distantFuture) >= earliest
         }
+    }
+
+    /// True when a file resumed from a checkpoint could hold work items started at or after `start`
+    /// that this run never read, so a total for a turn that began then would be incomplete.
+    func hasSkippedWork(affectingWorkStartedAt start: Date) -> Bool {
+        let earliest = start.addingTimeInterval(-Self.timestampTolerance)
+        return files.contains { ($0.skippedThrough ?? .distantPast) >= earliest }
     }
 }
 
@@ -95,6 +105,9 @@ struct DelegationAttributor: Sendable {
     private var workByRoot: [String: Set<String>] = [:]
     private var pending: [String: Pending] = [:]
 
+    /// A primary turn waits for its delegated total.
+    var hasPending: Bool { !pending.isEmpty }
+
     /// Records one poll's events and the primary turns it emitted. `metrics` are the poll's
     /// candidate records; only primary turns without a final total become pending.
     mutating func ingest(events: [DelegationEvent], metrics: [TurnMetric]) {
@@ -126,11 +139,19 @@ struct DelegationAttributor: Sendable {
     /// Returns the pending turns that became final, with their delegated totals, and forgets them.
     /// `backlog` describes the delegated source; each turn is held back only by the files that could
     /// still hold work started inside that turn.
+    ///
+    /// A turn that a file resumed from a checkpoint could have contributed to is forgotten without a
+    /// total: that work was attributed by the run that wrote the checkpoint, whose total is already in
+    /// the history, and a total summed without it would replace that one.
     mutating func finalize(now: Date, backlog: DelegationBacklog) -> [TurnMetric] {
         trim(now: now)
         guard !pending.isEmpty else { return [] }
         var finals: [TurnMetric] = []
         for (id, entry) in pending {
+            if backlog.hasSkippedWork(affectingWorkStartedAt: entry.startedAt) {
+                pending.removeValue(forKey: id)
+                continue
+            }
             let completedAt = entry.metric.completedAt
             guard now >= completedAt.addingTimeInterval(Self.settleSeconds),
                   !backlog.hasBacklog(affectingWorkStartedAt: entry.startedAt) else { continue }

@@ -40,6 +40,12 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
     enum StartPosition: Sendable {
         case beginning
         case recentTail(maximumBytes: Int)
+        /// Continue after `offset` bytes an earlier run read in full (a checkpoint, always at a line
+        /// boundary). Nothing is read until the file grows. The parser stays synchronised, unlike a
+        /// recent tail: no archive read follows to recover the first turn after the checkpoint, and a file
+        /// quiet for minutes is between turns. Claude Code records carry their own context, so there is
+        /// no header to read.
+        case resume(atOffset: UInt64)
     }
 
     static var maximumLineBytes: Int { JSONLFileReader.maximumLineBytes }
@@ -64,6 +70,18 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
         parser = Parser(sourceIdentity: url.standardizedFileURL.path)
         tailInitializationPending = if case .recentTail = startPosition { true } else { false }
         fileNumber = Self.currentFileNumber(url)
+        if case .resume(let resumeOffset) = startPosition {
+            offset = resumeOffset
+            isCaughtUp = true
+        }
+    }
+
+    /// The file identity and offset a later run can resume from, once this reader has read the file to
+    /// its end on a line boundary with no record held open; nil otherwise.
+    var checkpointPosition: (fileNumber: UInt64, offset: UInt64)? {
+        guard isCaughtUp, offset > 0, pending.isEmpty, !droppingLine, !parser.hasPendingWork,
+              let fileNumber else { return nil }
+        return (fileNumber, offset)
     }
 
     mutating func poll(maxBytes: Int, now: Date = .now) throws -> [TurnMetric] {
@@ -97,7 +115,7 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         try handle.seek(toOffset: offset)
-        let bytes = try handle.read(upToCount: count) ?? Data()
+        let bytes = try handle.readDraining(upToCount: count)
         offset += UInt64(bytes.count)
         bytesReadLastPoll = bytes.count
         isCaughtUp = offset >= size
@@ -109,7 +127,7 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
         while let newline = pending[lineStart...].firstIndex(of: 0x0A) {
             let line = pending[lineStart..<newline]
             if !droppingLine, line.count <= Self.maximumLineBytes,
-               let record = parser.consume(line: Data(line)) {
+               let record = autoreleasepool(invoking: { parser.consume(line: Data(line)) }) {
                 records.append(record)
             }
             droppingLine = false
@@ -164,7 +182,7 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
 actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private static var recentTailBytes: Int { CodexSessionMonitor.recentTailBytes }
     private static var maximumPollBytes: Int { CodexSessionMonitor.maximumPollBytes }
-    private static var maximumFiles: Int { 2_000 }
+    private static var maximumFiles: Int { SourceFileCheckpoint.maximumPerSource }
     private static var readerBatchBytes: Int { 65_536 }
     private static var discoveryInterval: TimeInterval { CodexSessionMonitor.discoveryInterval }
 
@@ -176,11 +194,15 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         /// The `now` of the poll that positioned the live reader.
         var liveStartedAt: Date?
         var archiveIDsWhileLiveCatchesUp: Set<String> = []
+        /// The modification time of the checkpoint this file was resumed from.
+        var skippedThrough: Date?
     }
 
     private let root: URL
     private let liveSince: Date
     private let includesFile: @Sendable (URL) -> Bool
+    private let versionKey: String
+    private let resumable: [String: SourceFileCheckpoint]
     private var files: [String: WatchedFile] = [:]
     private var lastDiscovery = Date.distantPast
     private var needsDiscovery = false
@@ -196,18 +218,26 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 modifiedAt: $0.modifiedAt,
                 livePending: !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification,
                 archivePending: $0.archive != nil,
-                liveStartedAt: $0.liveStartedAt
+                liveStartedAt: $0.liveStartedAt,
+                skippedThrough: $0.skippedThrough
             )
         })
     }
 
+    /// `versionKey` is the parser and metric version of the records this monitor reads: a checkpoint
+    /// written under another one is ignored. `checkpoints` are the files an earlier run read to their
+    /// end, whose records are already in the history.
     init(
         root: URL,
         liveSince: Date = .now,
+        versionKey: String,
+        checkpoints: [SourceFileCheckpoint] = [],
         includesFile: @escaping @Sendable (URL) -> Bool = { $0.pathExtension.lowercased() == "jsonl" }
     ) {
         self.root = root
         self.liveSince = liveSince
+        self.versionKey = versionKey
+        resumable = Dictionary(checkpoints.map { ($0.pathDigest, $0) }, uniquingKeysWith: { _, last in last })
         self.includesFile = includesFile
     }
 
@@ -252,6 +282,8 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 }
                 files[key] = file
             } catch {
+                // A vanished file is retried by no one: discovery prunes it.
+                if error.isMissingFile { needsDiscovery = true }
                 files[key] = file
             }
         }
@@ -276,7 +308,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                     byteBudget -= archive.bytesReadLastPoll
                     file.archive = archive.isCaughtUp ? nil : archive
                     files[key] = file
-                } catch { /* Retry this source file next time. */ }
+                } catch { if error.isMissingFile { needsDiscovery = true } /* Retry this source file next time. */ }
                 processed += 1
             }
             nextArchiveIndex = (nextArchiveIndex + processed) % archiveKeys.count
@@ -318,6 +350,21 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         return noted
     }
 
+    /// The files read to their end, whose records are all in the history, for a later run to skip; nil
+    /// before the first discovery, when the previous set stays valid. The caller holds this back while
+    /// a primary turn awaits its delegated total.
+    func checkpoints() -> [SourceFileCheckpoint]? {
+        guard rootIsAvailable else { return nil }
+        return files.compactMap { path, file in
+            guard file.archive == nil, file.live.isCaughtUp, file.liveServicedModification >= file.modifiedAt,
+                  let position = file.live.checkpointPosition else { return nil }
+            return SourceFileCheckpoint(
+                pathDigest: SourceFileCheckpoint.digest(ofPath: path), fileNumber: position.fileNumber, size: position.offset,
+                modifiedAt: file.modifiedAt, versionKey: versionKey
+            )
+        }.sorted { $0.pathDigest < $1.pathDigest }
+    }
+
     /// `now` while any reader has bytes left to read, holds a record sequence open or discovery is due;
     /// nil when only a new write can make a poll useful.
     func nextPollDeadline(now: Date) -> Date? {
@@ -357,6 +404,17 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             if var file = files[key] {
                 file.modifiedAt = candidate.modified
                 files[key] = file
+            } else if let offset = resumable[SourceFileCheckpoint.digest(ofPath: key)]?.resumeOffset(
+                url: candidate.url, size: candidate.size, modifiedAt: candidate.modified, versionKey: versionKey, now: now
+            ) {
+                // Read to its end by an earlier run and unchanged since: caught up, nothing to replay.
+                files[key] = WatchedFile(
+                    live: IncrementalJSONLMetricReader(url: candidate.url, startPosition: .resume(atOffset: offset)),
+                    archive: nil,
+                    modifiedAt: candidate.modified,
+                    liveServicedModification: candidate.modified,
+                    skippedThrough: candidate.modified
+                )
             } else {
                 files[key] = WatchedFile(
                     live: IncrementalJSONLMetricReader(url: candidate.url, startPosition: .recentTail(maximumBytes: Self.recentTailBytes)),
