@@ -39,18 +39,44 @@ public struct SharedSample: Encodable, Sendable {
     public static let maximumDelegatedOutputTokens = 100_000_000
     public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
 
-    public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
+    /// Why a turn is never uploaded. The first failing rule is reported; `init?(_:sampleId:)` accepts a
+    /// turn exactly when there is none, so this is the one definition of upload eligibility.
+    public enum Rejection: String, CaseIterable, Hashable, Sendable {
+        /// The client/parser/metric tuple is not a supported measurement.
+        case unsupportedSourceTuple
+        /// v1 and v2 Claude records may remain in local history but are never shared (since 0.1.13).
+        case legacyClaudeParser
+        /// The provider is not shared for this client (for example an OpenCode gateway).
+        case providerNotShared
+        /// Grok Build records that carry a client version are not shared.
+        case grokClientVersion
+        /// A primary turn whose delegated output total is not final yet.
+        case delegationNotFinal
+        case durationOutOfRange
+        case outputTokensOutOfRange
+        case implausibleThroughput
+        /// A primary turn whose delegated total is outside the accepted bound.
+        case delegatedTokensOutOfRange
+    }
+
+    public static func rejection(of metric: TurnMetric) -> Rejection? {
         let duration = metric.durationSeconds * 1_000
-        // v1 and v2 Claude records may remain in local history but are never shared (since 0.1.13).
-        guard metric.isSupportedSourceTuple,
-              !["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion),
-              Self.isAllowedProvider(metric.provider, client: metric.client),
-              (metric.client != "grok-build" || metric.clientVersion == nil || metric.clientVersion == "unknown"),
-              metric.isDelegationFinal
-        else { return nil }
-        guard duration.isFinite, (1...86_400_000).contains(duration),
-              (0...10_000_000).contains(metric.outputTokens),
-              metric.hasPlausibleTurnThroughput else { return nil }
+        if !metric.isSupportedSourceTuple { return .unsupportedSourceTuple }
+        if ["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion) { return .legacyClaudeParser }
+        if !isAllowedProvider(metric.provider, client: metric.client) { return .providerNotShared }
+        if metric.client == "grok-build", let version = metric.clientVersion, version != "unknown" { return .grokClientVersion }
+        if !metric.isDelegationFinal { return .delegationNotFinal }
+        if !duration.isFinite || !(1...86_400_000).contains(duration) { return .durationOutOfRange }
+        if !(0...10_000_000).contains(metric.outputTokens) { return .outputTokensOutOfRange }
+        if !metric.hasPlausibleTurnThroughput { return .implausibleThroughput }
+        if metric.sourceKind == "primary",
+           !(0...maximumDelegatedOutputTokens).contains(metric.delegatedOutputTokens ?? -1) { return .delegatedTokensOutOfRange }
+        return nil
+    }
+
+    public init?(_ metric: TurnMetric, sampleId: UUID = UUID()) {
+        guard Self.rejection(of: metric) == nil else { return nil }
+        let duration = metric.durationSeconds * 1_000
         self.sampleId = sampleId
         observedAt = Date(timeIntervalSince1970: floor(metric.completedAt.timeIntervalSince1970 / 300) * 300)
         client = metric.client
@@ -59,13 +85,7 @@ public struct SharedSample: Encodable, Sendable {
         metricVersion = metric.metricVersion
         model = Self.safeIdentifier(metric.model, maximum: 80) ?? "unknown"
         sourceKind = ["primary", "subagent"].contains(metric.sourceKind ?? "") ? metric.sourceKind! : "unknown"
-        if sourceKind == "primary" {
-            guard let delegated = metric.delegatedOutputTokens,
-                  (0...Self.maximumDelegatedOutputTokens).contains(delegated) else { return nil }
-            delegatedOutputTokens = delegated
-        } else {
-            delegatedOutputTokens = nil
-        }
+        delegatedOutputTokens = sourceKind == "primary" ? metric.delegatedOutputTokens : nil
         surface = metric.surface?.rawValue
         inputTokens = metric.inputTokens
         cacheReadInputTokens = metric.cacheReadInputTokens
@@ -152,9 +172,14 @@ public struct SampleEnvelope: Encodable, Sendable {
 
     public init(sentAt: Date, samples: [SharedSample]) { self.sentAt = sentAt; self.samples = samples }
     public func encoded() throws -> Data {
+        try Self.makeEncoder().encode(self)
+    }
+
+    /// The encoder of every upload body; one sample encoded with it is exactly its entry in `samples`.
+    public static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(self)
+        return encoder
     }
 }

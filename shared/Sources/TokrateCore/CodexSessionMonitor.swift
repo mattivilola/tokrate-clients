@@ -12,8 +12,6 @@ import Foundation
 public actor CodexSessionMonitor {
     public static let recentTailBytes = 262_144
     public static let maximumPollBytes = 1_048_576
-    private static let maximumFiles = SourceFileCheckpoint.maximumPerSource
-    private static let readerBatchBytes = 65_536
     /// Safety net for a folder watcher that missed a change; `noteChanges` normally triggers discovery.
     static let discoveryInterval: TimeInterval = 300
     private static let versionKey = SourceFileCheckpoint.versionKey(
@@ -37,16 +35,19 @@ public actor CodexSessionMonitor {
     private var lastDiscovery = Date.distantPast
     private var needsDiscovery = false
     private var nextArchiveIndex = 0
-    private var attributor = DelegationAttributor()
+    private var attributor: DelegationAttributor
 
+    private let scope: MonitorScope
     private let liveSince: Date
     private let resumable: [String: SourceFileCheckpoint]
 
     /// `liveSince` is the moment from which completed responses count as live; earlier responses are
     /// history and never reach the live stream. `checkpoints` are the files an earlier run read to
     /// their end, whose records are already in the history.
-    public init(root: URL, liveSince: Date = .now, checkpoints: [SourceFileCheckpoint] = []) {
+    public init(root: URL, liveSince: Date = .now, checkpoints: [SourceFileCheckpoint] = [], scope: MonitorScope = .live) {
         self.root = root
+        self.scope = scope
+        attributor = DelegationAttributor(scope: scope)
         self.liveSince = liveSince
         resumable = Dictionary(checkpoints.map { ($0.pathDigest, $0) }, uniquingKeysWith: { _, last in last })
     }
@@ -65,7 +66,7 @@ public actor CodexSessionMonitor {
             lastDiscovery = now
         }
         var result: [TurnMetric] = []
-        var byteBudget = Self.maximumPollBytes
+        var byteBudget = scope.maximumPollBytes
         // Reserve one quarter for archive progress even when recent files are busy.
         var liveBudget = byteBudget * 3 / 4
         let liveKeys = files.keys.filter { key in
@@ -78,7 +79,7 @@ public actor CodexSessionMonitor {
         for key in liveKeys.prefix(24) {
             guard liveBudget > 0, var file = files[key] else { break }
             do {
-                let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget))
+                let recent = try file.live.poll(maxBytes: min(scope.readerBatchBytes, liveBudget))
                 if file.liveStartedAt == nil { file.liveStartedAt = now }
                 collect(file.live.drainResponses())
                 delegation += file.live.drainDelegation()
@@ -109,7 +110,7 @@ public actor CodexSessionMonitor {
                 let key = archiveKeys[(nextArchiveIndex + step) % archiveKeys.count]
                 guard var file = files[key], var archive = file.archive else { continue }
                 do {
-                    let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget))
+                    let historical = try archive.poll(maxBytes: min(scope.readerBatchBytes, byteBudget))
                     collect(archive.drainResponses())
                     delegation += archive.drainDelegation()
                     result += historical
@@ -133,7 +134,7 @@ public actor CodexSessionMonitor {
         for record in result {
             unique[record.id] = record
         }
-        bytesReadLastPoll = Self.maximumPollBytes - byteBudget
+        bytesReadLastPoll = scope.maximumPollBytes - byteBudget
         let metrics = unique.values.sorted { $0.completedAt > $1.completedAt }
         attributor.ingest(events: delegation, metrics: metrics)
         let finals = attributor.finalize(now: now, backlog: delegationBacklog)
@@ -223,12 +224,12 @@ public actor CodexSessionMonitor {
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey])
             guard values?.isRegularFile == true,
                   let modified = values?.contentModificationDate,
-                  modified >= now.addingTimeInterval(-MetricHistory.retention) else { continue }
+                  modified >= now.addingTimeInterval(-scope.retention) else { continue }
             candidates.append((url, modified, values?.fileSize ?? 0))
         }
         candidates.sort { $0.modified > $1.modified }
         var seen = Set<String>()
-        for candidate in candidates.prefix(Self.maximumFiles) {
+        for candidate in candidates.prefix(scope.maximumFiles) {
             let key = candidate.url.standardizedFileURL.path
             seen.insert(key)
             if var file = files[key] {
@@ -245,6 +246,8 @@ public actor CodexSessionMonitor {
                     liveServicedModification: candidate.modified,
                     skippedThrough: candidate.modified
                 )
+            } else if scope.replaysFromStart {
+                files[key] = WatchedFile(live: JSONLFileReader(url: candidate.url), archive: nil, modifiedAt: candidate.modified)
             } else {
                 files[key] = WatchedFile(
                     live: JSONLFileReader(url: candidate.url, startPosition: .recentTail(maximumBytes: Self.recentTailBytes)),

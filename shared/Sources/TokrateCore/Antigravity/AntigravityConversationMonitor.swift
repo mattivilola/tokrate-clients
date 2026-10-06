@@ -21,7 +21,6 @@ public actor AntigravityConversationMonitor {
     ]
     public static let conversationFolderPaths = conversationSources.map(\.path)
 
-    private static let maximumFiles = 2_000
     private static let maximumReadsPerPoll = 8
     /// Wall-clock cap on the reads of one poll; the rest wait for the next poll.
     private static let maximumReadSeconds: TimeInterval = 1
@@ -53,6 +52,7 @@ public actor AntigravityConversationMonitor {
     }
 
     private let root: URL
+    private let scope: MonitorScope
     private let liveSince: Date
     private var databases: [String: WatchedDatabase] = [:]
     private var lastDiscovery = Date.distantPast
@@ -62,8 +62,9 @@ public actor AntigravityConversationMonitor {
 
     /// `liveSince` is the moment from which completed model calls count as live; earlier calls are
     /// history and never reach the live stream.
-    public init(root: URL, liveSince: Date = .now) {
+    public init(root: URL, liveSince: Date = .now, scope: MonitorScope = .live) {
         self.root = root
+        self.scope = scope
         self.liveSince = liveSince
     }
 
@@ -258,14 +259,14 @@ public actor AntigravityConversationMonitor {
             for url in urls where url.pathExtension == "db" && !url.deletingPathExtension().lastPathComponent.isEmpty {
                 // Files untouched for the retention period are not opened.
                 guard let signature = DatabaseFileSignature.of(url),
-                      signature.modifiedAt >= now.addingTimeInterval(-MetricHistory.retention) else { continue }
+                      signature.modifiedAt >= now.addingTimeInterval(-scope.retention) else { continue }
                 candidates.append((url, signature, surface))
             }
         }
         rootIsAvailable = available
         candidates.sort { $0.signature.modifiedAt > $1.signature.modifiedAt }
         var seen = Set<String>()
-        for candidate in candidates.prefix(Self.maximumFiles) {
+        for candidate in candidates.prefix(scope.maximumFiles) {
             let key = candidate.url.standardizedFileURL.path
             seen.insert(key)
             if var watched = databases[key] {

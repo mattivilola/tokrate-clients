@@ -721,7 +721,7 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
 public actor ClaudeSessionMonitor {
     private let primary: JSONLSourceSessionMonitor<ClaudeTranscriptParser>
     private let subagents: JSONLSourceSessionMonitor<ClaudeSubagentTranscriptParser>
-    private var attributor = DelegationAttributor()
+    private var attributor: DelegationAttributor
 
     /// `liveSince` is the moment from which completed responses count as live; earlier responses are
     /// history and never reach the live stream.
@@ -729,14 +729,17 @@ public actor ClaudeSessionMonitor {
     /// whose records are already in the history.
     public init(
         root: URL, liveSince: Date = .now,
-        primaryCheckpoints: [SourceFileCheckpoint] = [], subagentCheckpoints: [SourceFileCheckpoint] = []
+        primaryCheckpoints: [SourceFileCheckpoint] = [], subagentCheckpoints: [SourceFileCheckpoint] = [],
+        scope: MonitorScope = .live
     ) {
+        attributor = DelegationAttributor(scope: scope)
         primary = JSONLSourceSessionMonitor(
             root: root, liveSince: liveSince,
             versionKey: SourceFileCheckpoint.versionKey(
                 parser: ClaudeTranscriptParser.parserVersion, metric: ClaudeTranscriptParser.primaryMetricVersion
             ),
-            checkpoints: primaryCheckpoints
+            checkpoints: primaryCheckpoints,
+            scope: scope
         ) { url in
             url.pathExtension.lowercased() == "jsonl"
                 && !url.lastPathComponent.hasPrefix("agent-")
@@ -747,7 +750,8 @@ public actor ClaudeSessionMonitor {
             versionKey: SourceFileCheckpoint.versionKey(
                 parser: ClaudeTranscriptParser.parserVersion, metric: ClaudeTranscriptParser.subagentMetricVersion
             ),
-            checkpoints: subagentCheckpoints
+            checkpoints: subagentCheckpoints,
+            scope: scope
         ) { url in
             url.pathExtension.lowercased() == "jsonl" && Self.isSubagentTranscript(url)
         }

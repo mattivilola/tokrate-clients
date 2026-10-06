@@ -40,17 +40,29 @@ struct DelegationBacklog: Sendable, Equatable {
 
     let files: [DelegationSourceFile]
     var isUnknown = false
+    /// What the questions below need of `files`, summarized once so that a poll asking about many
+    /// pending turns does not scan every file for each of them.
+    private let latestLivePendingModification: Date?
+    private let archivePendingFiles: [DelegationSourceFile]
+    private let latestSkippedThrough: Date?
+
+    init(files: [DelegationSourceFile], isUnknown: Bool = false) {
+        self.files = files
+        self.isUnknown = isUnknown
+        latestLivePendingModification = files.filter(\.livePending).map(\.modifiedAt).max()
+        archivePendingFiles = files.filter { $0.archivePending && !$0.livePending }
+        latestSkippedThrough = files.compactMap(\.skippedThrough).max()
+    }
 
     /// True when a file could still hold unread work items started at or after `start`.
     func hasBacklog(affectingWorkStartedAt start: Date) -> Bool {
         if isUnknown { return true }
         let earliest = start.addingTimeInterval(-Self.timestampTolerance)
-        return files.contains { file in
-            guard file.modifiedAt >= earliest else { return false }
-            if file.livePending { return true }
-            // The archive holds only content before the live tail: records at or after `start` can be in
-            // it only when the tail was positioned after `start` (a reader not positioned yet will be).
-            return file.archivePending && (file.liveStartedAt ?? .distantFuture) >= earliest
+        if let latest = latestLivePendingModification, latest >= earliest { return true }
+        // The archive holds only content before the live tail: records at or after `start` can be in
+        // it only when the tail was positioned after `start` (a reader not positioned yet will be).
+        return archivePendingFiles.contains { file in
+            file.modifiedAt >= earliest && (file.liveStartedAt ?? .distantFuture) >= earliest
         }
     }
 
@@ -58,7 +70,7 @@ struct DelegationBacklog: Sendable, Equatable {
     /// that this run never read, so a total for a turn that began then would be incomplete.
     func hasSkippedWork(affectingWorkStartedAt start: Date) -> Bool {
         let earliest = start.addingTimeInterval(-Self.timestampTolerance)
-        return files.contains { ($0.skippedThrough ?? .distantPast) >= earliest }
+        return (latestSkippedThrough ?? .distantPast) >= earliest
     }
 }
 
@@ -101,9 +113,12 @@ struct DelegationAttributor: Sendable {
         let startedAt: Date
     }
 
+    private let scope: MonitorScope
     private var work: [String: Work] = [:]
     private var workByRoot: [String: Set<String>] = [:]
     private var pending: [String: Pending] = [:]
+
+    init(scope: MonitorScope = .live) { self.scope = scope }
 
     /// A primary turn waits for its delegated total.
     var hasPending: Bool { !pending.isEmpty }
@@ -213,16 +228,16 @@ struct DelegationAttributor: Sendable {
 
     /// Bounds memory: nothing older than the history retention, and hard caps that drop the oldest.
     private mutating func trim(now: Date) {
-        let cutoff = now.addingTimeInterval(-MetricHistory.retention)
+        let cutoff = now.addingTimeInterval(-scope.retention)
         for (id, item) in work where item.startedAt < cutoff { removeWork(id) }
         pending = pending.filter { $0.value.metric.completedAt >= cutoff }
-        if work.count > Self.maximumWorkItems {
-            let oldest = work.sorted { $0.value.startedAt < $1.value.startedAt }.prefix(work.count - Self.maximumWorkItems)
+        if work.count > scope.maximumWorkItems {
+            let oldest = work.sorted { $0.value.startedAt < $1.value.startedAt }.prefix(work.count - scope.maximumWorkItems)
             for (id, _) in oldest { removeWork(id) }
         }
-        if pending.count > Self.maximumPendingTurns {
+        if pending.count > scope.maximumPendingTurns {
             let oldest = pending.sorted { $0.value.metric.completedAt < $1.value.metric.completedAt }
-                .prefix(pending.count - Self.maximumPendingTurns)
+                .prefix(pending.count - scope.maximumPendingTurns)
             for (id, _) in oldest { pending.removeValue(forKey: id) }
         }
     }

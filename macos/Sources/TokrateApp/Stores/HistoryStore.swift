@@ -179,29 +179,13 @@ final class HistoryStore {
         let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tokrate", isDirectory: true)
         self.persistenceURL = persistenceURL ?? supportDirectory.appendingPathComponent("history-v1.json")
-        let codexDefault = codexFolder ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/sessions", isDirectory: true)
-        let environment = ProcessInfo.processInfo.environment
-        let claudeConfig = Self.configuredDirectory(
-            override: environment["CLAUDE_CONFIG_DIR"],
-            fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
-        )
-        let claudeDefault = claudeProjectsFolder ?? claudeConfig.appendingPathComponent("projects", isDirectory: true)
-        let grokHome = Self.configuredDirectory(
-            override: environment["GROK_HOME"],
-            fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok", isDirectory: true)
-        )
-        let grokDefault = grokSessionsFolder ?? grokHome.appendingPathComponent("sessions", isDirectory: true)
-        let antigravityDefault = antigravityDataFolder ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".gemini", isDirectory: true)
-        // OpenCode resolves its data folder from XDG_DATA_HOME on every platform.
-        let openCodeDefault = openCodeDataFolder ?? Self.configuredDirectory(
-            override: environment["XDG_DATA_HOME"],
-            fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share", isDirectory: true)
-        ).appendingPathComponent("opencode", isDirectory: true)
+        let sourceDefaults = SourceFolders.defaults()
         defaultFolders = [
-            .codex: codexDefault, .claudeCode: claudeDefault, .grokBuild: grokDefault,
-            .antigravity: antigravityDefault, .openCode: openCodeDefault
+            .codex: codexFolder ?? sourceDefaults.codex,
+            .claudeCode: claudeProjectsFolder ?? sourceDefaults.claudeCode,
+            .grokBuild: grokSessionsFolder ?? sourceDefaults.grokBuild,
+            .antigravity: antigravityDataFolder ?? sourceDefaults.antigravity,
+            .openCode: openCodeDataFolder ?? sourceDefaults.openCode
         ]
 
         let decoder = JSONDecoder()
@@ -605,12 +589,6 @@ final class HistoryStore {
 
     private static func displayPath(_ url: URL) -> String {
         (url.path as NSString).abbreviatingWithTildeInPath
-    }
-
-    private static func configuredDirectory(override: String?, fallback: URL) -> URL {
-        guard let override, !override.isEmpty else { return fallback }
-        let url = URL(fileURLWithPath: override, isDirectory: true)
-        return url.standardizedFileURL
     }
 
     private static func persistFilter(_ value: String?, key: String, defaults: UserDefaults) {

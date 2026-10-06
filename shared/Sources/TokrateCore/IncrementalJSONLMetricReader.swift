@@ -181,9 +181,6 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
 /// Applies the same live-tail/archive fairness and byte limits as Codex monitoring.
 actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private static var recentTailBytes: Int { CodexSessionMonitor.recentTailBytes }
-    private static var maximumPollBytes: Int { CodexSessionMonitor.maximumPollBytes }
-    private static var maximumFiles: Int { SourceFileCheckpoint.maximumPerSource }
-    private static var readerBatchBytes: Int { 65_536 }
     private static var discoveryInterval: TimeInterval { CodexSessionMonitor.discoveryInterval }
 
     private struct WatchedFile {
@@ -199,6 +196,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     }
 
     private let root: URL
+    private let scope: MonitorScope
     private let liveSince: Date
     private let includesFile: @Sendable (URL) -> Bool
     private let versionKey: String
@@ -232,9 +230,11 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         liveSince: Date = .now,
         versionKey: String,
         checkpoints: [SourceFileCheckpoint] = [],
+        scope: MonitorScope = .live,
         includesFile: @escaping @Sendable (URL) -> Bool = { $0.pathExtension.lowercased() == "jsonl" }
     ) {
         self.root = root
+        self.scope = scope
         self.liveSince = liveSince
         self.versionKey = versionKey
         resumable = Dictionary(checkpoints.map { ($0.pathDigest, $0) }, uniquingKeysWith: { _, last in last })
@@ -256,7 +256,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         func collect(_ completed: [LiveResponse]) {
             for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
         }
-        var byteBudget = Self.maximumPollBytes
+        var byteBudget = scope.maximumPollBytes
         var liveBudget = byteBudget * 3 / 4
         let liveKeys = files.keys.filter { key in
             guard let file = files[key] else { return false }
@@ -268,7 +268,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         for key in liveKeys.prefix(24) {
             guard liveBudget > 0, var file = files[key] else { break }
             do {
-                let recent = try file.live.poll(maxBytes: min(Self.readerBatchBytes, liveBudget), now: now)
+                let recent = try file.live.poll(maxBytes: min(scope.readerBatchBytes, liveBudget), now: now)
                 if file.liveStartedAt == nil { file.liveStartedAt = now }
                 collect(file.live.drainResponses())
                 delegation += file.live.drainDelegation()
@@ -296,7 +296,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 let key = archiveKeys[(nextArchiveIndex + step) % archiveKeys.count]
                 guard var file = files[key], var archive = file.archive else { continue }
                 do {
-                    let historical = try archive.poll(maxBytes: min(Self.readerBatchBytes, byteBudget), now: now)
+                    let historical = try archive.poll(maxBytes: min(scope.readerBatchBytes, byteBudget), now: now)
                     collect(archive.drainResponses())
                     delegation += archive.drainDelegation()
                     result += historical
@@ -393,12 +393,12 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             guard includesFile(url) else { continue }
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey])
             guard values?.isRegularFile == true, let modified = values?.contentModificationDate,
-                  modified >= now.addingTimeInterval(-MetricHistory.retention) else { continue }
+                  modified >= now.addingTimeInterval(-scope.retention) else { continue }
             candidates.append((url, modified, values?.fileSize ?? 0))
         }
         candidates.sort { $0.modified > $1.modified }
         var seen = Set<String>()
-        for candidate in candidates.prefix(Self.maximumFiles) {
+        for candidate in candidates.prefix(scope.maximumFiles) {
             let key = candidate.url.standardizedFileURL.path
             seen.insert(key)
             if var file = files[key] {
@@ -414,6 +414,15 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                     modifiedAt: candidate.modified,
                     liveServicedModification: candidate.modified,
                     skippedThrough: candidate.modified
+                )
+            } else if scope.replaysFromStart {
+                // One reader over the whole file. A file quiet long enough is finished, so its open record
+                // sequence closes at the end like an archive read; a file still being written stays open.
+                let isQuiet = now.timeIntervalSince(candidate.modified) >= SourceFileCheckpoint.minimumQuietSeconds
+                files[key] = WatchedFile(
+                    live: IncrementalJSONLMetricReader(url: candidate.url, isFinalRead: isQuiet),
+                    archive: nil,
+                    modifiedAt: candidate.modified
                 )
             } else {
                 files[key] = WatchedFile(

@@ -17,12 +17,13 @@ public actor OpenCodeMonitor {
     static let fullReadInterval: TimeInterval = 300
     /// Later reads start this far before the watermark, as the contract specifies, in milliseconds.
     static let watermarkOverlapMilliseconds: Int64 = 2_000
-    private static let maximumIndexedMessages = 200_000
+    static let maximumIndexedMessages = 200_000
     private static let maximumRememberedItems = 16_384
     private static let initialRetryDelay: TimeInterval = 10
     private static let maximumRetryDelay: TimeInterval = 300
 
     private let root: URL
+    private let scope: MonitorScope
     private let liveSinceMilliseconds: Int64
     private var signature: DatabaseFileSignature?
     /// The signature the last successful read started from.
@@ -44,8 +45,9 @@ public actor OpenCodeMonitor {
 
     /// `liveSince` is the moment from which completed model calls count as live; earlier calls are
     /// history and never reach the live stream.
-    public init(root: URL, liveSince: Date = .now) {
+    public init(root: URL, liveSince: Date = .now, scope: MonitorScope = .live) {
         self.root = root
+        self.scope = scope
         liveSinceMilliseconds = Int64(liveSince.timeIntervalSince1970 * 1_000)
     }
 
@@ -120,7 +122,7 @@ public actor OpenCodeMonitor {
         databaseReadCount += 1
         let fullReadDue = lastFullRead.map { now.timeIntervalSince($0) >= Self.fullReadInterval } ?? true
         let full = watermark == nil || fullReadDue
-        let cutoff = Int64((now.timeIntervalSince1970 - MetricHistory.retention) * 1_000)
+        let cutoff = Int64((now.timeIntervalSince1970 - scope.retention) * 1_000)
         let known = full ? [] : Set(sessions.keys)
         let from = (watermark ?? 0) - Self.watermarkOverlapMilliseconds
         let snapshot: Snapshot
@@ -166,8 +168,8 @@ public actor OpenCodeMonitor {
     /// whose user message left it.
     private func prune(cutoff: Int64) {
         messages = messages.filter { $0.value.rowCreatedMs >= cutoff }
-        if messages.count > Self.maximumIndexedMessages {
-            let keep = messages.values.sorted { $0.rowCreatedMs > $1.rowCreatedMs }.prefix(Self.maximumIndexedMessages)
+        if messages.count > scope.maximumIndexedMessages {
+            let keep = messages.values.sorted { $0.rowCreatedMs > $1.rowCreatedMs }.prefix(scope.maximumIndexedMessages)
             messages = Dictionary(uniqueKeysWithValues: keep.map { ($0.id, $0) })
         }
         settled = settled.filter { messages[$0] != nil }

@@ -403,9 +403,6 @@ struct GrokSessionParser: JSONLMetricParser {
 }
 
 public actor GrokSessionMonitor {
-    private static let maximumFiles = 2_000
-    private static let maximumPollBytes = 1_048_576
-    private static let eventBatchBytes = 65_536
     private static let maximumUsageBytes = 262_144
     private static let maximumSummaryBytes = 65_536
     private static let snapshotStabilitySeconds: TimeInterval = 4
@@ -428,6 +425,7 @@ public actor GrokSessionMonitor {
     }
 
     private let root: URL
+    private let scope: MonitorScope
     private var sessions: [String: WatchedSession] = [:]
     private var lastDiscovery = Date.distantPast
     private var needsDiscovery = false
@@ -440,7 +438,10 @@ public actor GrokSessionMonitor {
     private(set) var rootIsAvailable = false
     private(set) var watchedSessionCount = 0
 
-    public init(root: URL) { self.root = root }
+    public init(root: URL, scope: MonitorScope = .live) {
+        self.root = root
+        self.scope = scope
+    }
 
     /// Marks what a folder watcher reported so the next poll reads it: a change to a known session's
     /// event log, usage or summary file services that session first, and a new session or a lost event
@@ -505,7 +506,7 @@ public actor GrokSessionMonitor {
             return a == b ? left < right : a > b
         }
         guard !keys.isEmpty else { return [] }
-        var budget = Self.maximumPollBytes
+        var budget = scope.maximumPollBytes
         var processed = 0
         var records: [TurnMetric] = []
         let rotation = (0..<keys.count).map { keys[(nextSessionIndex + $0) % keys.count] }
@@ -531,7 +532,7 @@ public actor GrokSessionMonitor {
                 }
                 refreshSummaryEffort(of: &session, sessionURL: URL(fileURLWithPath: key).deletingLastPathComponent(), budget: &budget)
                 session.events.observeSessionEffort(session.summaryEffort)
-                let newEvents = try session.events.poll(maxBytes: min(Self.eventBatchBytes, budget))
+                let newEvents = try session.events.poll(maxBytes: min(scope.readerBatchBytes, budget))
                 records += newEvents
                 let eventBytesRead = session.events.bytesReadLastPoll
                 budget -= eventBytesRead
@@ -606,12 +607,12 @@ public actor GrokSessionMonitor {
         for case let url as URL in enumerator where url.lastPathComponent == "events.jsonl" {
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
             guard values?.isRegularFile == true, let modified = values?.contentModificationDate,
-                  modified >= now.addingTimeInterval(-MetricHistory.retention) else { continue }
+                  modified >= now.addingTimeInterval(-scope.retention) else { continue }
             candidates.append((url, modified))
         }
         candidates.sort { $0.modified > $1.modified }
         var seen = Set<String>()
-        for candidate in candidates.prefix(Self.maximumFiles) {
+        for candidate in candidates.prefix(scope.maximumFiles) {
             let key = candidate.url.standardizedFileURL.path
             seen.insert(key)
             if var session = sessions[key] {
