@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { responseSpeed, summarize, type LiveResponse, type Metric } from "./metrics";
 import {
   autoSelection,
+  BADGE_LABEL,
+  BADGE_LETTER,
   badgeFamily,
   fallbackModel,
   liveValue,
@@ -71,6 +73,11 @@ describe("response speed helpers", () => {
     expect(autoSelection(null)).toBe("auto");
   });
 
+  it("selects Antigravity as a coding tool", () => {
+    expect(parseSelection("auto:antigravity")).toEqual({ kind: "auto", tool: "antigravity" });
+    expect(autoSelection("antigravity")).toBe("auto:antigravity");
+  });
+
   it("classifies the provider badge like the native tray icon", () => {
     expect(badgeFamily("claude-opus-5-5", null)).toBe("anthropic");
     expect(badgeFamily("claude-sonnet-4-5", "amazon-bedrock")).toBe("anthropic");
@@ -81,6 +88,12 @@ describe("response speed helpers", () => {
     expect(badgeFamily("x", "openai")).toBe("openai");
     expect(badgeFamily("grok-4", null)).toBe("xai");
     expect(badgeFamily("anything", "xai")).toBe("xai");
+    expect(badgeFamily("gemini-3.8-flash", null)).toBe("google");
+    expect(badgeFamily("Gemini-3.8-pro", "unknown")).toBe("google");
+    expect(badgeFamily("anything", "google")).toBe("google");
+    expect(badgeFamily("claude-opus-4-6-thinking", "unknown")).toBe("anthropic");
+    expect(BADGE_LETTER.google).toBe("G");
+    expect(BADGE_LABEL.google).toBe("Google");
     expect(badgeFamily("mystery", "amazon-bedrock")).toBe("unknown");
     expect(badgeFamily(null, null)).toBe("unknown");
   });

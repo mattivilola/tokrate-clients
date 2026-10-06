@@ -13,7 +13,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// A SHA-256 pseudonym derived locally from the session and turn identifiers.
     public let id: String
     public let completedAt: Date
-    /// Stable client identifier, such as `codex`, `claude-code`, or `grok-build`.
+    /// Stable client identifier, such as `codex`, `claude-code`, `grok-build`, or `antigravity`.
     public let client: String
     public let model: String?
     public let clientVersion: String?
@@ -108,7 +108,8 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
              ("claude-code", "claude-transcript-v4", "claude-observed-turn-v1"),
              ("claude-code", "claude-transcript-v4", "claude-observed-subagent-turn-v1"),
              ("grok-build", "grok-session-v1", "grok-observed-work-turn-v1"),
-             ("grok-build", "grok-session-v2", "grok-observed-work-turn-v1"):
+             ("grok-build", "grok-session-v2", "grok-observed-work-turn-v1"),
+             ("antigravity", "antigravity-conversation-v1", "antigravity-observed-execution-v1"):
             true
         default:
             false
@@ -133,6 +134,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         return switch metricVersion {
         case "grok-observed-work-turn-v1": "Includes nested subagent output, tools & waiting"
         case "claude-observed-subagent-turn-v1": "Subagent task prompt to final answer, including tools and waiting."
+        case "antigravity-observed-execution-v1": "Prompt through final answer of one agent run, including tools & waiting"
         default: "Includes tools, waiting & reasoning"
         }
     }

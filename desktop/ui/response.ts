@@ -31,8 +31,8 @@ export const sameModel = (
 
 // --- selection ---------------------------------------------------------------------------------
 
-export type ToolId = "codex" | "claude-code" | "grok-build";
-const TOOLS: ToolId[] = ["codex", "claude-code", "grok-build"];
+export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity";
+const TOOLS: ToolId[] = ["codex", "claude-code", "grok-build", "antigravity"];
 
 /** The persisted `selection` setting; `latest` (before 0.1.14) means `auto`. */
 export type SelectionMode =
@@ -138,7 +138,7 @@ export function liveValue(
 
 // --- provider badge ----------------------------------------------------------------------------
 
-export type BadgeFamily = "anthropic" | "openai" | "xai" | "unknown";
+export type BadgeFamily = "anthropic" | "openai" | "xai" | "google" | "unknown";
 
 /** Explicit provider evidence wins; otherwise the model family decides (letters only, no logos). */
 export function badgeFamily(
@@ -147,12 +147,14 @@ export function badgeFamily(
 ): BadgeFamily {
   if (provider === "openai") return "openai";
   if (provider === "xai") return "xai";
+  if (provider === "google") return "google";
   if (provider === "anthropic") return "anthropic";
   const name = (model ?? "").toLowerCase();
   if (name.startsWith("claude-")) return "anthropic";
   if (name.startsWith("gpt-") || name.includes("codex") || /^o\d/.test(name))
     return "openai";
   if (name.startsWith("grok-")) return "xai";
+  if (name.startsWith("gemini-")) return "google";
   return "unknown";
 }
 
@@ -160,12 +162,14 @@ export const BADGE_LETTER: Record<BadgeFamily, string> = {
   anthropic: "A",
   openai: "O",
   xai: "X",
+  google: "G",
   unknown: "",
 };
 export const BADGE_LABEL: Record<BadgeFamily, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   xai: "xAI",
+  google: "Google",
   unknown: "Unknown provider",
 };
 
@@ -188,7 +192,7 @@ export interface ModelSpeedRow {
   untimed: number;
 }
 
-const TOOL_ORDER = ["codex", "claude-code", "grok-build"];
+const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity"];
 
 /**
  * One row per model and provider across coding tools and subagent/primary work. Response speed

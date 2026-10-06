@@ -94,11 +94,13 @@ public struct SharedSample: Encodable, Sendable {
             : nil
     }
 
-    /// Bedrock and Vertex are explicit-evidence providers only Claude Code reports.
+    /// Bedrock and Vertex are explicit-evidence providers only Claude Code reports; `google` is the
+    /// routing Antigravity's Gemini models have by construction.
     public static func isAllowedProvider(_ provider: String?, client: String) -> Bool {
         switch provider ?? "unknown" {
         case "openai", "anthropic", "xai", "unknown": true
         case "amazon-bedrock", "google-vertex": client == "claude-code"
+        case "google": client == "antigravity"
         default: false
         }
     }

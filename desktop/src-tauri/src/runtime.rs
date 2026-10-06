@@ -10,8 +10,9 @@ use std::{
 };
 use tauri::Manager;
 use tokrate_core::{
-    fallback_model, signed_request, AutoSelector, History, LiveResponses, LiveScope, ModelKey,
-    ProviderBadge, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TurnMetric,
+    fallback_model, signed_request, AntigravityMonitor, AutoSelector, History, LiveResponses,
+    LiveScope, ModelKey, ProviderBadge, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor,
+    TurnMetric,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
@@ -52,6 +53,7 @@ pub struct Settings {
     pub root: String,
     pub claude_root: String,
     pub grok_root: String,
+    pub antigravity_root: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -78,6 +80,8 @@ impl Default for Settings {
             root: codex_home.join("sessions").to_string_lossy().into(),
             claude_root: claude_home.join("projects").to_string_lossy().into(),
             grok_root: grok_home.join("sessions").to_string_lossy().into(),
+            // Antigravity has no home override: its data folder is always `~/.gemini`.
+            antigravity_root: home.join(".gemini").to_string_lossy().into(),
         }
     }
 }
@@ -200,6 +204,7 @@ impl Runtime {
                 PathBuf::from(&settings.root),
                 PathBuf::from(&settings.claude_root),
                 PathBuf::from(&settings.grok_root),
+                PathBuf::from(&settings.antigravity_root),
             ),
             settings,
             consent_prompt_required,
@@ -228,7 +233,13 @@ impl Runtime {
         settings.root = dir.join("sessions").to_string_lossy().into();
         settings.claude_root = dir.join("claude-projects").to_string_lossy().into();
         settings.grok_root = dir.join("grok-sessions").to_string_lossy().into();
-        for root in [&settings.root, &settings.claude_root, &settings.grok_root] {
+        settings.antigravity_root = dir.join("gemini").to_string_lossy().into();
+        for root in [
+            &settings.root,
+            &settings.claude_root,
+            &settings.grok_root,
+            &settings.antigravity_root,
+        ] {
             std::fs::create_dir_all(root)?;
         }
         std::fs::write(dir.join("settings.json"), serde_json::to_vec(&settings)?)?;
@@ -291,13 +302,22 @@ impl Runtime {
                 &defaults.claude_root,
             ),
             ("grok-build", &self.settings.grok_root, &defaults.grok_root),
+            (
+                "antigravity",
+                &self.settings.antigravity_root,
+                &defaults.antigravity_root,
+            ),
         ]
         .into_iter()
         .map(|(id, root, default)| SourceStatus {
             id,
             root: root.clone(),
             is_default: root == default,
-            found: std::path::Path::new(root).is_dir(),
+            found: if id == "antigravity" {
+                AntigravityMonitor::has_conversation_folder(std::path::Path::new(root))
+            } else {
+                std::path::Path::new(root).is_dir()
+            },
         })
         .collect()
     }
@@ -410,6 +430,7 @@ impl Runtime {
             "codex" => defaults.root,
             "claude-code" => defaults.claude_root,
             "grok-build" => defaults.grok_root,
+            "antigravity" => defaults.antigravity_root,
             _ => return Err("Choose a supported source".into()),
         };
         self.apply_source_root(source, PathBuf::from(root))
@@ -420,6 +441,7 @@ impl Runtime {
             "codex" => next.root = root.to_string_lossy().into(),
             "claude-code" => next.claude_root = root.to_string_lossy().into(),
             "grok-build" => next.grok_root = root.to_string_lossy().into(),
+            "antigravity" => next.antigravity_root = root.to_string_lossy().into(),
             _ => return Err("Choose a supported source".into()),
         }
         self.save_settings(&next)?;
@@ -511,6 +533,7 @@ impl Runtime {
             ("Codex", &self.settings.root),
             ("Claude Code", &self.settings.claude_root),
             ("Grok Build", &self.settings.grok_root),
+            ("Antigravity", &self.settings.antigravity_root),
         ] {
             if PathBuf::from(root).is_dir() {
                 sources.push(name);
@@ -872,7 +895,7 @@ mod tests {
         assert!(!codex.is_default);
         assert!(codex.found);
         assert_eq!(codex.root, custom.to_string_lossy());
-        assert_eq!(sources.len(), 3);
+        assert_eq!(sources.len(), 4);
         runtime.reset_source_root("codex").unwrap();
         let sources = runtime.snapshot(None).sources;
         let codex = sources.iter().find(|s| s.id == "codex").unwrap();
@@ -1071,13 +1094,15 @@ mod tests {
             PathBuf::from(&runtime.settings.root),
             PathBuf::from(&runtime.settings.claude_root),
             PathBuf::from(&runtime.settings.grok_root),
+            PathBuf::from(&runtime.settings.antigravity_root),
         ];
         assert_eq!(
             roots,
             [
                 dir.join("sessions"),
                 dir.join("claude-projects"),
-                dir.join("grok-sessions")
+                dir.join("grok-sessions"),
+                dir.join("gemini")
             ]
         );
         assert!(roots

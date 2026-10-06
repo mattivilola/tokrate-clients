@@ -1,5 +1,5 @@
 use crate::delegation::DelegationTracker;
-use crate::{GrokMonitor, Monitor, ResponseMetric, TurnMetric};
+use crate::{AntigravityMonitor, GrokMonitor, Monitor, ResponseMetric, TurnMetric};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::io;
@@ -12,13 +12,18 @@ const CLAUDE_TOTAL_BUDGET: usize = 360_448;
 // subagents each keep service while the other is catching up.
 const CLAUDE_SUBAGENT_BUDGET: usize = CLAUDE_TOTAL_BUDGET / 4;
 const CLAUDE_BUDGET: usize = CLAUDE_TOTAL_BUDGET - CLAUDE_SUBAGENT_BUDGET;
-const GROK_BUDGET: usize = TOTAL_POLL_BUDGET - CODEX_BUDGET - CLAUDE_TOTAL_BUDGET;
+// Antigravity reads whole SQLite databases, so its share limits how many are read per poll; a
+// database larger than the share is read alone and charged the share.
+const ANTIGRAVITY_BUDGET: usize = 131_072;
+const GROK_BUDGET: usize =
+    TOTAL_POLL_BUDGET - CODEX_BUDGET - CLAUDE_TOTAL_BUDGET - ANTIGRAVITY_BUDGET;
 
-/// Polls the three supported local data roots under one aggregate content-read limit.
+/// Polls the four supported local data roots under one aggregate content-read limit.
 pub struct SourceMonitor {
     codex_root: PathBuf,
     claude_root: PathBuf,
     grok_root: PathBuf,
+    antigravity_root: PathBuf,
     codex: Monitor,
     claude: Monitor,
     claude_subagents: Monitor,
@@ -26,6 +31,7 @@ pub struct SourceMonitor {
     /// of the same session that started it.
     claude_delegation: DelegationTracker,
     grok: GrokMonitor,
+    antigravity: AntigravityMonitor,
     bytes_read_last_poll: usize,
     had_source_error: bool,
 }
@@ -33,16 +39,23 @@ pub struct SourceMonitor {
 impl SourceMonitor {
     pub const MAX_POLL_BYTES: usize = TOTAL_POLL_BUDGET;
 
-    pub fn new(codex_root: PathBuf, claude_root: PathBuf, grok_root: PathBuf) -> Self {
+    pub fn new(
+        codex_root: PathBuf,
+        claude_root: PathBuf,
+        grok_root: PathBuf,
+        antigravity_root: PathBuf,
+    ) -> Self {
         Self {
             codex: Monitor::new(codex_root.clone()),
             claude: Monitor::new_claude(claude_root.clone()),
             claude_subagents: Monitor::new_claude_subagents(claude_root.clone()),
             claude_delegation: DelegationTracker::new(),
             grok: GrokMonitor::new(grok_root.clone()),
+            antigravity: AntigravityMonitor::new(antigravity_root.clone()),
             codex_root,
             claude_root,
             grok_root,
+            antigravity_root,
             bytes_read_last_poll: 0,
             had_source_error: false,
         }
@@ -64,6 +77,10 @@ impl SourceMonitor {
                 self.grok_root = root.clone();
                 self.grok = GrokMonitor::new(root);
             }
+            "antigravity" => {
+                self.antigravity_root = root.clone();
+                self.antigravity = AntigravityMonitor::new(root);
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -79,6 +96,7 @@ impl SourceMonitor {
             "codex" => Some(&self.codex_root),
             "claude-code" => Some(&self.claude_root),
             "grok-build" => Some(&self.grok_root),
+            "antigravity" => Some(&self.antigravity_root),
             _ => None,
         }
     }
@@ -138,6 +156,17 @@ impl SourceMonitor {
             }
             self.bytes_read_last_poll += self.grok.bytes_read_last_poll();
         }
+        if self.antigravity_root.is_dir() {
+            match self.antigravity.poll_with_budget(now, ANTIGRAVITY_BUDGET) {
+                Ok(found) => records.extend(found),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => self.had_source_error = true,
+            }
+            self.bytes_read_last_poll += self
+                .antigravity
+                .bytes_read_last_poll()
+                .min(ANTIGRAVITY_BUDGET);
+        }
         if self.bytes_read_last_poll > TOTAL_POLL_BUDGET {
             return Err(io::Error::other("source monitor exceeded its read budget"));
         }
@@ -165,6 +194,7 @@ impl SourceMonitor {
         let mut responses = self.codex.take_live_responses();
         responses.extend(self.claude.take_live_responses());
         responses.extend(self.claude_subagents.take_live_responses());
+        responses.extend(self.antigravity.take_live_responses());
         responses.sort_by(|left, right| {
             left.completed_at
                 .cmp(&right.completed_at)

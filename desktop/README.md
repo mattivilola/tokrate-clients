@@ -28,12 +28,12 @@ On Windows use the `.exe` suffix; on headless Linux wrap this in `xvfb-run -a db
 
 ## Boundaries
 
-- `core`: Codex rollout JSONL, Claude Code transcript JSONL and Grok Build session event/usage logs; normalized history, bounded monitors and signed samples/queue; independent of Tauri.
+- `core`: Codex rollout JSONL, Claude Code transcript JSONL, Grok Build session event/usage logs and Antigravity conversation SQLite databases (read-only, bundled SQLite, a small protobuf wire reader); normalized history, bounded monitors and signed samples/queue; independent of Tauri.
 - `src-tauri`: credential manager, filesystem root, fixed HTTPS endpoints, network cancellation, native lifecycle and tray. Only normalized metrics reach the UI.
 - `ui`: React 19 function components (see Interface below). Exact source/parser/metric/model/provider/version/effort cohorts, coding-tool and provider filters, independent turn-speed/first-token coverage, charts with gaps and local baselines. Claude and Grok do not report first-token time; their turn-speed definitions stay separate. No chart library, remote font, analytics SDK or browser-fetch transport (icons are bundled lucide SVGs).
 - Sharing OFF clears the queue and community results, cancels the network task and prevents further identity/network work. Requests already transmitted cannot be recalled.
 - Windows Credential Manager / Linux Secret Service hold signing keys. No plaintext-key fallback. Locked/unavailable credentials leave local monitoring operational; Retry starts a new future-only reporting period.
-- Public API schema remains v1. Codex reports parser `codex-rollout-v1` / metric `turn-v1`; Claude Code reports `claude-transcript-v1` / `claude-observed-turn-v1`; Grok Build reports `grok-session-v1` / `grok-observed-work-turn-v1`. New adapters only share samples completed after consent and report no TTFT. The backend must accept 0.1.11 before upload testing with real observations.
+- Public API schema remains v1. Codex reports parser `codex-rollout-v1` / metric `turn-v1`; Claude Code reports `claude-transcript-v1` / `claude-observed-turn-v1`; Grok Build reports `grok-session-v1` / `grok-observed-work-turn-v1`. Antigravity reports `antigravity-conversation-v1` / `antigravity-observed-execution-v1` (data folder `~/.gemini`). New adapters only share samples completed after consent and report no TTFT. The backend must accept 0.1.11 before upload testing with real observations.
 
 ## Interface
 

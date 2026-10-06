@@ -11,6 +11,9 @@ pub const CLAUDE_SUBAGENT_METRIC_VERSION: &str = "claude-observed-subagent-turn-
 pub const GROK_CLIENT: &str = "grok-build";
 pub const GROK_PARSER_VERSION: &str = "grok-session-v2";
 pub const GROK_METRIC_VERSION: &str = "grok-observed-work-turn-v1";
+pub const ANTIGRAVITY_CLIENT: &str = "antigravity";
+pub const ANTIGRAVITY_PARSER_VERSION: &str = "antigravity-conversation-v1";
+pub const ANTIGRAVITY_METRIC_VERSION: &str = "antigravity-observed-execution-v1";
 
 /// Contract version of the per-response measurement shared with the Mac client.
 pub const RESPONSE_METRIC_VERSION: &str = "response-v1";
@@ -418,6 +421,7 @@ pub enum ProviderBadge {
     Anthropic,
     OpenAi,
     Xai,
+    Google,
     Unknown,
 }
 
@@ -430,6 +434,7 @@ impl ProviderBadge {
         match provider {
             Some("openai") => return Self::OpenAi,
             Some("xai") => return Self::Xai,
+            Some("google") => return Self::Google,
             Some("anthropic") => return Self::Anthropic,
             _ => {}
         }
@@ -442,6 +447,8 @@ impl ProviderBadge {
             Self::OpenAi
         } else if model.starts_with("grok-") {
             Self::Xai
+        } else if model.starts_with("gemini-") {
+            Self::Google
         } else {
             Self::Unknown
         }
@@ -452,6 +459,7 @@ impl ProviderBadge {
             Self::Anthropic => Some('A'),
             Self::OpenAi => Some('O'),
             Self::Xai => Some('X'),
+            Self::Google => Some('G'),
             Self::Unknown => None,
         }
     }
@@ -461,6 +469,7 @@ impl ProviderBadge {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
             Self::Xai => "xAI",
+            Self::Google => "Google",
             Self::Unknown => "Unknown provider",
         }
     }

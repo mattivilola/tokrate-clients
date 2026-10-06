@@ -33,7 +33,7 @@ struct SourceFolderResetButton: View {
     }
 }
 
-/// Detected-sources list: Codex, Claude Code and Grok Build, found or not.
+/// Detected-sources list: Codex, Claude Code, Grok Build and Antigravity, found or not.
 struct SourceStatusList<Accessory: View>: View {
     let statuses: [SourceStatus]
     var showsPaths = true

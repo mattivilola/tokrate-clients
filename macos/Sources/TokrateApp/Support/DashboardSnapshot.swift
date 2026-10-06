@@ -144,6 +144,7 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         case "openai": "OpenAI"
         case "anthropic": "Anthropic"
         case "xai": "xAI"
+        case "google": "Google"
         case "amazon-bedrock": "Amazon Bedrock"
         case "google-vertex": "Google Vertex AI"
         case let other?: other
@@ -159,7 +160,7 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     /// Matches the public board's stable seven-dimension JSON identity.
     var communityBoardID: String? {
         guard let model, isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
-              ["codex", "claude-code", "grok-build"].contains(client),
+              ["codex", "claude-code", "grok-build", "antigravity"].contains(client),
               SharedSample.isAllowedProvider(provider, client: client),
               isSupportedTuple else { return nil }
         let version = clientVersion.flatMap { isSafe($0, pattern: "^[a-zA-Z0-9.+_-]{1,40}$") ? $0 : nil } ?? "unknown"

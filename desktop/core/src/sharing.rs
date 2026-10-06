@@ -1,8 +1,9 @@
 use crate::model::{
     bedrock_region_or_unknown, consistent_prompt_cache, ReportedReasoningEffort, ToolSurface,
-    TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
-    CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION,
-    GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
+    TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
+    CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
+    CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
+    GROK_PARSER_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -89,6 +90,12 @@ impl SharedSample {
             (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION) => {
                 (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION, false)
             }
+            (ANTIGRAVITY_CLIENT, ANTIGRAVITY_PARSER_VERSION, ANTIGRAVITY_METRIC_VERSION) => (
+                ANTIGRAVITY_CLIENT,
+                ANTIGRAVITY_PARSER_VERSION,
+                ANTIGRAVITY_METRIC_VERSION,
+                false,
+            ),
             _ => return None,
         };
         let duration_ms = metric.duration_seconds * 1_000.0;
@@ -190,12 +197,13 @@ fn shared_response_fields(metric: &TurnMetric) -> (Option<i64>, Option<f64>, Opt
 }
 
 /// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for
-/// Claude Code; any other value or pairing is shared as `unknown`.
+/// Claude Code and Google only for Antigravity; any other value or pairing is shared as `unknown`.
 fn shared_provider(client: &str, provider: Option<&str>) -> &'static str {
     match (client, provider) {
         (_, Some("openai")) => "openai",
         (_, Some("anthropic")) => "anthropic",
         (_, Some("xai")) => "xai",
+        (ANTIGRAVITY_CLIENT, Some("google")) => "google",
         (CLAUDE_CLIENT, Some("amazon-bedrock")) => "amazon-bedrock",
         (CLAUDE_CLIENT, Some("google-vertex")) => "google-vertex",
         _ => "unknown",

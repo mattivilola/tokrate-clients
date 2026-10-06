@@ -28,6 +28,7 @@ final class HistoryStoreFolderTests: XCTestCase {
             codexFolder: root.appendingPathComponent("default-codex", isDirectory: true),
             claudeProjectsFolder: root.appendingPathComponent("default-claude", isDirectory: true),
             grokSessionsFolder: root.appendingPathComponent("default-grok", isDirectory: true),
+            antigravityDataFolder: root.appendingPathComponent("default-gemini", isDirectory: true),
             sharingPreferences: SharingPreferences(
                 session: SharingSession(identity: StubIdentity(), transport: StubTransport()),
                 store: StubPreferenceStore()
@@ -84,7 +85,11 @@ final class HistoryStoreFolderTests: XCTestCase {
         for kind in SourceFolderKind.allCases { XCTAssertFalse(store.hasCustomFolder(for: kind)) }
         XCTAssertEqual(store.folder(for: .claudeCode).lastPathComponent, "default-claude")
         XCTAssertEqual(store.folder(for: .grokBuild).lastPathComponent, "default-grok")
-        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build"])
+        XCTAssertEqual(store.folder(for: .antigravity).lastPathComponent, "default-gemini")
+        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build", "antigravity"])
+        XCTAssertEqual(store.sourceStatuses.last?.title, "Antigravity")
+        XCTAssertEqual(store.sourceStatuses.last?.isFound, false)
+        XCTAssertEqual(SourceFolderKind.antigravity.folderNoun, "data folder")
     }
 
     func testChosenFoldersPersistAcrossLaunchesForEveryTool() throws {
@@ -99,6 +104,38 @@ final class HistoryStoreFolderTests: XCTestCase {
         }
         XCTAssertEqual(relaunched.sourceStatuses.first { $0.client == "claude-code" }?.detail, "Custom folder")
         XCTAssertEqual(relaunched.sourceStatuses.first { $0.client == "claude-code" }?.isFound, true)
+    }
+
+    func testAntigravityFolderIsFoundOnlyWithAConversationsFolderAndIsPersisted() throws {
+        let store = makeStore()
+        let chosen = try makeFolder("custom-gemini")
+        store.selectFolder(chosen, for: .antigravity)
+        XCTAssertEqual(store.sourceStatuses.last?.isFound, false, "a data folder without Antigravity conversations is not a source")
+        XCTAssertEqual(store.sourceStatuses.last?.detail, "Custom folder")
+        try FileManager.default.createDirectory(at: chosen.appendingPathComponent("antigravity-cli/conversations", isDirectory: true), withIntermediateDirectories: true)
+        store.resetFolder(for: .antigravity)
+        store.selectFolder(chosen, for: .antigravity)
+        XCTAssertEqual(store.sourceStatuses.last?.isFound, true)
+        XCTAssertEqual(defaults.string(forKey: "sourceFolderPath.antigravity"), chosen.path)
+
+        let relaunched = makeStore()
+        XCTAssertTrue(relaunched.hasCustomFolder(for: .antigravity))
+        XCTAssertEqual(relaunched.folder(for: .antigravity).resolvingSymlinksInPath().path, chosen.path)
+        relaunched.resetFolder(for: .antigravity)
+        XCTAssertNil(defaults.string(forKey: "sourceFolderPath.antigravity"))
+        XCTAssertEqual(relaunched.folder(for: .antigravity).lastPathComponent, "default-gemini")
+    }
+
+    func testAntigravityNamesAndBoardIdentity() {
+        XCTAssertEqual(ModelCohort.clientTitle("antigravity"), "Antigravity")
+        XCTAssertEqual(ModelCohort.providerTitle("google"), "Google")
+        func id(_ provider: String, client: String) -> String? {
+            ModelCohort(model: "gemini-3.8-flash", provider: provider, clientVersion: nil, reasoningEffort: "medium", client: client,
+                        parserVersion: "antigravity-conversation-v1", metricVersion: "antigravity-observed-execution-v1").communityBoardID
+        }
+        XCTAssertEqual(id("google", client: "antigravity"), #"["gemini-3.8-flash","google","unknown","antigravity-conversation-v1","antigravity-observed-execution-v1","medium","antigravity"]"#)
+        XCTAssertNotNil(id("unknown", client: "antigravity"))
+        XCTAssertNil(id("google", client: "codex"))
     }
 
     func testChoosingOneToolLeavesTheOthersOnTheirDefaults() throws {

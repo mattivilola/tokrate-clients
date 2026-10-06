@@ -1,6 +1,6 @@
 import type { LiveResponse, Metric } from "../metrics";
 
-export type SourceId = "codex" | "claude-code" | "grok-build";
+export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity";
 
 export interface Settings {
   sharing: boolean;
@@ -14,6 +14,7 @@ export interface Settings {
   root: string;
   claudeRoot: string;
   grokRoot: string;
+  antigravityRoot: string;
 }
 
 /** Detected state of one coding-tool log folder (the path stays on the device). */
@@ -134,6 +135,7 @@ export type ProviderFilter =
   | "amazon-bedrock"
   | "google-vertex"
   | "xai"
+  | "google"
   | "unknown";
 export type ChartMetric = "response" | "throughput" | "ttft" | "efficiency";
 /** Model lists rank by response speed, keep the per-measurement turn groups, or rank efficiency. */

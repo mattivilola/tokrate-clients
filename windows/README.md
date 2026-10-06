@@ -11,7 +11,7 @@ Click the tray icon or **Open dashboard** to see the gauge, model/effort selecto
 The signing key is stored in Windows Credential Manager. Sharing requires affirmative first-launch consent from 0.1.11 and remembers OFF; while OFF the app performs no community requests. Read the root README/privacy information and desktop test/release gates before distributing.
 
 
-The 0.1.9 source also monitors Claude Code (`CLAUDE_CONFIG_DIR/projects`, default `.claude/projects` in your home directory) and Grok Build (`GROK_HOME/sessions`, default `.grok/sessions`). The dashboard distinguishes coding tool from inference provider and labels each measurement definition. Source-specific folder settings support nonstandard installations. See [the shared contract](../docs/metrics-contract.md); native CI evidence does not establish interactive acceptance on every desktop configuration.
+The 0.1.9 source also monitors Claude Code (`CLAUDE_CONFIG_DIR/projects`, default `.claude/projects` in your home directory) and Grok Build (`GROK_HOME/sessions`, default `.grok/sessions`). The 0.1.18 source also monitors Antigravity (the desktop app, IDE and `agy` CLI): it reads the per-conversation SQLite databases under `.gemini` in your home directory (`antigravity`, `antigravity-ide` and `antigravity-cli` `conversations` folders) read-only, and bundles SQLite so no extra system library is needed. The dashboard distinguishes coding tool from inference provider and labels each measurement definition. Source-specific folder settings support nonstandard installations. See [the shared contract](../docs/metrics-contract.md); native CI evidence does not establish interactive acceptance on every desktop configuration.
 
 ## Software updates
 

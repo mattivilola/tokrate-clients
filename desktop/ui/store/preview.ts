@@ -149,6 +149,23 @@ const SERIES: Series[] = [
     tokenFactor: 0.5,
     delegates: 0.0,
   },
+  {
+    model: "Example Gemini model",
+    client: "antigravity",
+    effort: "medium",
+    provider: "google",
+    parser: "antigravity-conversation-v1",
+    metricVersion: "antigravity-observed-execution-v1",
+    sourceKind: "primary",
+    everyMinutes: 97,
+    base: 52,
+    spread: 18,
+    ttft: false,
+    offset: 41,
+    responseFactor: 2.0,
+    tokenFactor: 1.2,
+    delegates: 0.0,
+  },
 ];
 
 export function previewRecords(now: number): Metric[] {
@@ -262,6 +279,7 @@ const DEFAULT_ROOTS: Record<SourceId, string> = {
   codex: "~/.codex/sessions",
   "claude-code": "~/.claude/projects",
   "grok-build": "~/.grok/sessions",
+  antigravity: "~/.gemini",
 };
 
 function previewBoard(records: Metric[]): Board {
@@ -304,6 +322,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     root: "",
     claudeRoot: "",
     grokRoot: "",
+    antigravityRoot: "",
   };
   const custom: Partial<Record<SourceId, string>> = {};
   const sources = (): SourceStatus[] =>

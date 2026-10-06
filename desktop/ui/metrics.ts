@@ -98,6 +98,7 @@ export const CODING_TOOLS: Record<SourceId, { title: string; chip: string }> = {
   codex: { title: "Codex", chip: "CX" },
   "claude-code": { title: "Claude Code", chip: "CC" },
   "grok-build": { title: "Grok Build", chip: "GB" },
+  antigravity: { title: "Antigravity", chip: "AG" },
 };
 const codingTool = (id: string): (typeof CODING_TOOLS)[SourceId] | undefined =>
   CODING_TOOLS[id as SourceId];
@@ -128,6 +129,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   "amazon-bedrock": "Amazon Bedrock",
   "google-vertex": "Google Vertex AI",
   xai: "xAI",
+  google: "Google",
 };
 /** Display name of a provider; missing, "unknown" and unrecognised ids are an unknown route. */
 export const providerLabel = (provider: string | null | undefined) =>
@@ -176,7 +178,9 @@ export const measurementExplanation = (m: Metric) =>
     turn:
       client(m) === "claude-code"
         ? "Human prompt through the terminal response in the primary transcript, including tools and waiting."
-        : "Completed Codex turn: output tokens divided by the whole turn, including tools, reasoning and waiting.",
+        : client(m) === "antigravity"
+          ? "Prompt through final answer of one agent run, including tools & waiting."
+          : "Completed Codex turn: output tokens divided by the whole turn, including tools, reasoning and waiting.",
     subagent:
       "Subagent task prompt to final answer, including tools and waiting.",
     workTurn:

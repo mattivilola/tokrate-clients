@@ -49,7 +49,7 @@ pub enum SelectionMode {
 }
 
 const COHORT_PARTS: usize = 9;
-const TOOLS: [&str; 3] = ["codex", "claude-code", "grok-build"];
+const TOOLS: [&str; 4] = ["codex", "claude-code", "grok-build", "antigravity"];
 
 impl SelectionMode {
     /// Parses a stored selection. `latest` (the pre-0.1.14 default) means `auto`.

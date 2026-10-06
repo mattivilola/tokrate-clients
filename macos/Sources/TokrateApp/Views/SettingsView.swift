@@ -84,7 +84,7 @@ struct SettingsGeneralPage: View {
                     .help("Shows the live response speed of the followed model. All models shows Compare without a pooled speed.")
                 Toggle("Show provider badge", isOn: $showProviderBadge)
                     .toggleStyle(.switch)
-                    .help("Shows a letter badge for the model's maker (A Anthropic, O OpenAI, X xAI) before the speed.")
+                    .help("Shows a letter badge for the model's maker (A Anthropic, O OpenAI, X xAI, G Google) before the speed.")
             }
             SettingsGroup(title: "Monitoring", footer: "Pausing stops reads of your session files. Already-queued sharing stays active; turn sharing off to stop all community requests.") {
                 HStack(spacing: 10) {
@@ -142,7 +142,7 @@ struct SettingsSourcesPage: View {
         SettingsPage {
             SettingsGroup(
                 title: "Coding tools",
-                footer: "Tokrate reads these session folders on this Mac, automatically, whenever monitoring is on. Choose a different folder while monitoring is paused, for example if you set CLAUDE_CONFIG_DIR or GROK_HOME in a terminal: apps opened from Finder don't see those variables."
+                footer: "Tokrate reads these session folders on this Mac, automatically, whenever monitoring is on. Choose a different folder while monitoring is paused, for example if you set CLAUDE_CONFIG_DIR or GROK_HOME in a terminal: apps opened from Finder don't see those variables. Antigravity reads its data folder (~/.gemini by default), where each conversation is a small database."
             ) {
                 SourceStatusList(statuses: store.sourceStatuses) { status in
                     if let kind = SourceFolderKind(rawValue: status.client) {

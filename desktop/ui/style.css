@@ -21,6 +21,7 @@
   --danger-tint: #fbe9e7;
   --badge-anthropic: #d97757;
   --badge-openai: #10a37f;
+  --badge-google: #4285f4;
   --badge-xai: #000000;
   --badge-xai-letter: #ffffff;
   --badge-unknown: #8a9ba3;
@@ -569,6 +570,9 @@ time,
 }
 .badge-openai .badge-disc {
   fill: var(--badge-openai);
+}
+.badge-google .badge-disc {
+  fill: var(--badge-google);
 }
 .badge-xai .badge-disc {
   fill: var(--badge-xai);

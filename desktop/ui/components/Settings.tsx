@@ -158,7 +158,7 @@ export function SettingsView() {
           <SwitchRow
             id="show-provider-badge"
             label="Show provider badge"
-            hint="A filled circle with the provider's letter (A Anthropic, O OpenAI, X xAI) next to the model: in the tray icon where the desktop allows icon updates, and in this window."
+            hint="A filled circle with the provider's letter (A Anthropic, O OpenAI, X xAI, G Google) next to the model: in the tray icon where the desktop allows icon updates, and in this window."
             checked={settings.showProviderBadge}
             onChange={(showProviderBadge) => void store.patch({ showProviderBadge })}
           />

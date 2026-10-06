@@ -122,6 +122,10 @@ final class PresentationTests: XCTestCase {
         XCTAssertNil(SpeedMeasurement.turn.chipTitle)
         XCTAssertEqual(SpeedMeasurement.subagent.chipTitle, "Subagent")
         XCTAssertEqual(ModelCohort(metric("g", rate: 1, client: "grok-build", parser: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1")).measurement, .workTurn)
+        let antigravity = metric("ag", rate: 1, client: "antigravity", parser: "antigravity-conversation-v1", metricVersion: "antigravity-observed-execution-v1")
+        XCTAssertEqual(ModelCohort(antigravity).measurement, .turn)
+        XCTAssertEqual(ModelCohort(antigravity).throughputLabel, "Turn speed")
+        XCTAssertEqual(ModelCohort(antigravity).throughputExplanation, "Prompt through final answer of one agent run, including tools & waiting")
         XCTAssertFalse(metric("p", rate: 1, sourceKind: "primary").isSubagentTurn)
         // Unsupported tuples never claim a special measurement.
         XCTAssertEqual(ModelCohort(metric("u", rate: 1, client: "codex", metricVersion: "claude-observed-subagent-turn-v1")).measurement, .turn)

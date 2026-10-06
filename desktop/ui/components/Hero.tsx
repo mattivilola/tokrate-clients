@@ -108,7 +108,7 @@ export function Hero({ dashboard }: { dashboard: Dashboard }) {
         <div className="hero-meta">
           <p className="hero-empty">
             {dashboard.hasRecords
-              ? "No response speed for this selection yet. Complete a response of at least 200 output tokens in Claude Code or Codex."
+              ? "No response speed for this selection yet. Complete a response of at least 200 output tokens in Claude Code, Codex or Antigravity."
               : "Complete a response of at least 200 output tokens in a supported coding tool."}
           </p>
         </div>

@@ -11,7 +11,7 @@ import {
 import { pickerAccessibleLabel, pickerLabel } from "../components/Header";
 import { heroCaption } from "../components/Hero";
 import { chartCopy } from "../components/Trend";
-import { buildDashboard, communityLine } from "./dashboard";
+import { CLIENT_ORDER, buildDashboard, communityLine } from "./dashboard";
 import {
   DELEGATED_NOTICE,
   PROMPT_CACHE_NOTICE,
@@ -19,7 +19,7 @@ import {
   buildSentExample,
 } from "../components/SharingChoice";
 import { EFFICIENCY_EXPLANATION, EFFICIENCY_INSUFFICIENT } from "../metrics";
-import { PROVIDER_TITLES, folderName, readout, signedPercent } from "./format";
+import { PROVIDER_TITLES, SOURCE_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
 import { niceCeil } from "../components/TrendChart";
 import { GAUGE } from "../components/Gauge";
@@ -87,6 +87,10 @@ describe("dashboard model", () => {
       expect(buildDashboard(input(records, { provider })).filtered.map((m) => m.id)).toEqual([id]);
     }
   });
+  it("lists Antigravity among the coding tools", () => {
+    expect(SOURCE_TITLES.antigravity).toBe("Antigravity");
+    expect(CLIENT_ORDER).toContain("antigravity");
+  });
   it("offers every attributable provider in the filter", () => {
     expect(PROVIDER_TITLES).toEqual({
       openai: "OpenAI",
@@ -94,6 +98,7 @@ describe("dashboard model", () => {
       "amazon-bedrock": "Amazon Bedrock",
       "google-vertex": "Google Vertex AI",
       xai: "xAI",
+      google: "Google",
       unknown: "Unknown route",
     });
   });

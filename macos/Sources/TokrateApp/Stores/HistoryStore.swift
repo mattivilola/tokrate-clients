@@ -28,6 +28,7 @@ enum SourceFolderKind: String, CaseIterable, Sendable {
     case codex
     case claudeCode = "claude-code"
     case grokBuild = "grok-build"
+    case antigravity
 
     var title: String { ModelCohort.clientTitle(rawValue) }
 
@@ -37,6 +38,7 @@ enum SourceFolderKind: String, CaseIterable, Sendable {
         case .codex: "session folder"
         case .claudeCode: "projects folder"
         case .grokBuild: "sessions folder"
+        case .antigravity: "data folder"
         }
     }
 
@@ -103,6 +105,7 @@ final class HistoryStore {
     @ObservationIgnored private var monitor: CodexSessionMonitor?
     @ObservationIgnored private var claudeMonitor: ClaudeSessionMonitor?
     @ObservationIgnored private var grokMonitor: GrokSessionMonitor?
+    @ObservationIgnored private var antigravityMonitor: AntigravityConversationMonitor?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     /// One watcher per existing source folder; a change wakes the polling task early.
     @ObservationIgnored private var watchers: [SourceFolderKind: SessionFolderWatcher] = [:]
@@ -148,6 +151,7 @@ final class HistoryStore {
         codexFolder: URL? = nil,
         claudeProjectsFolder: URL? = nil,
         grokSessionsFolder: URL? = nil,
+        antigravityDataFolder: URL? = nil,
         sharingPreferences: SharingPreferences? = nil,
         defaults: UserDefaults = .standard,
         initialRecords: [TurnMetric]? = nil
@@ -174,7 +178,9 @@ final class HistoryStore {
             fallback: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok", isDirectory: true)
         )
         let grokDefault = grokSessionsFolder ?? grokHome.appendingPathComponent("sessions", isDirectory: true)
-        defaultFolders = [.codex: codexDefault, .claudeCode: claudeDefault, .grokBuild: grokDefault]
+        let antigravityDefault = antigravityDataFolder ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini", isDirectory: true)
+        defaultFolders = [.codex: codexDefault, .claudeCode: claudeDefault, .grokBuild: grokDefault, .antigravity: antigravityDefault]
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -244,12 +250,13 @@ final class HistoryStore {
         monitor = CodexSessionMonitor(root: folder(for: .codex), liveSince: launchedAt)
         claudeMonitor = ClaudeSessionMonitor(root: folder(for: .claudeCode), liveSince: launchedAt)
         grokMonitor = GrokSessionMonitor(root: folder(for: .grokBuild))
+        antigravityMonitor = AntigravityConversationMonitor(root: folder(for: .antigravity), liveSince: launchedAt)
         isMonitoring = true
         refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
         saveHistory()
         let codexFolder = folder(for: .codex)
-        guard let monitor, let claudeMonitor, let grokMonitor else { return }
+        guard let monitor, let claudeMonitor, let grokMonitor, let antigravityMonitor else { return }
         let waker = PollWaker()
         self.waker = waker
         pollingTask = Task { [weak self] in
@@ -281,11 +288,15 @@ final class HistoryStore {
                 } catch {
                     failures.append("Grok Build sessions")
                 }
+                let antigravityUpdate = await antigravityMonitor.poll()
+                newRecords += antigravityUpdate.metrics
+                newResponses += antigravityUpdate.responses
                 guard let self else { return }
                 guard !Task.isCancelled, self.isMonitoring else { return }
                 let claudeStatus = await claudeMonitor.status()
                 let grokStatus = await grokMonitor.status()
-                self.updateSourceStatus(claude: claudeStatus, grok: grokStatus)
+                let antigravityStatus = await antigravityMonitor.status()
+                self.updateSourceStatus(claude: claudeStatus, grok: grokStatus, antigravity: antigravityStatus)
                 self.errorMessage = failures.isEmpty ? nil : "Could not read \(failures.joined(separator: ", ")). Check folder access and try again."
                 // A record is shared at most once, when it is both new to history and final: a primary
                 // turn arrives first without its delegated total, and its settled re-emission shares it.
@@ -367,6 +378,7 @@ final class HistoryStore {
         monitor = nil
         claudeMonitor = nil
         grokMonitor = nil
+        antigravityMonitor = nil
         isMonitoring = false
         refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
@@ -444,19 +456,25 @@ final class HistoryStore {
 
     private func updateSourceStatus(
         claude: (rootAvailable: Bool, files: Int)?,
-        grok: (rootAvailable: Bool, sessions: Int)?
+        grok: (rootAvailable: Bool, sessions: Int)?,
+        antigravity: (rootAvailable: Bool, conversations: Int)? = nil
     ) {
         let codexFolder = folder(for: .codex), claudeFolder = folder(for: .claudeCode), grokFolder = folder(for: .grokBuild)
+        let antigravityFolder = folder(for: .antigravity)
+        let antigravityOnDisk = AntigravityConversationMonitor.hasConversationFolder(root: antigravityFolder)
         let codexAvailable = FileManager.default.fileExists(atPath: codexFolder.path)
         let codex = hasCustomFolder(for: .codex) ? "Custom Codex folder" : "Codex sessions"
         let claudeText = claude.map { $0.rootAvailable ? "Claude Code \($0.files) files" : "Claude Code folder not found" }
             ?? (FileManager.default.fileExists(atPath: claudeFolder.path) ? "Claude Code available" : "Claude Code folder not found")
         let grokText = grok.map { $0.rootAvailable ? "Grok Build \($0.sessions) sessions" : "Grok Build folder not found" }
             ?? (FileManager.default.fileExists(atPath: grokFolder.path) ? "Grok Build available" : "Grok Build folder not found")
-        sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText)"
+        let antigravityText = antigravity.map { $0.rootAvailable ? "Antigravity \($0.conversations) conversations" : "Antigravity folder not found" }
+            ?? (antigravityOnDisk ? "Antigravity available" : "Antigravity folder not found")
+        sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText) · \(antigravityText)"
 
         let claudeFound = claude?.rootAvailable ?? FileManager.default.fileExists(atPath: claudeFolder.path)
         let grokFound = grok?.rootAvailable ?? FileManager.default.fileExists(atPath: grokFolder.path)
+        let antigravityFound = antigravity?.rootAvailable ?? antigravityOnDisk
         sourceStatuses = [
             SourceStatus(
                 client: TurnMetric.codexClient,
@@ -475,6 +493,12 @@ final class HistoryStore {
                 availability: grokFound ? .found : .notFound,
                 detail: Self.detail(custom: hasCustomFolder(for: .grokBuild), grok.flatMap { $0.rootAvailable ? "\($0.sessions) sessions" : nil }),
                 path: Self.displayPath(grokFolder)
+            ),
+            SourceStatus(
+                client: "antigravity",
+                availability: antigravityFound ? .found : .notFound,
+                detail: Self.detail(custom: hasCustomFolder(for: .antigravity), antigravity.flatMap { $0.rootAvailable ? "\($0.conversations) conversations" : nil }),
+                path: Self.displayPath(antigravityFolder)
             )
         ]
     }

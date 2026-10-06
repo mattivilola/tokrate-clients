@@ -75,6 +75,7 @@ Optional public cohort fields `recent`, `comparison`, and `signals` keep older c
 | Claude Code | claude-transcript-v4 (v3 before 0.1.14) | claude-observed-turn-v1 | Human prompt through terminal response in the primary transcript; unique API message usage, plus response speed |
 | Claude Code subagent | claude-transcript-v4 (v3 before 0.1.14) | claude-observed-subagent-turn-v1 | Subagent task prompt through its terminal response; sourceKind `subagent` |
 | Grok Build | grok-session-v2 (v1 before 0.1.15) | grok-observed-work-turn-v1 | Matched completed work-turn events and usage; includes nested agent output, plus whole-turn response speed (see "Grok Build response speed (0.1.15)") |
+| Antigravity | antigravity-conversation-v1 | antigravity-observed-execution-v1 | One finished agent execution (prompt through final answer, including tools and waiting) from the local conversation database, plus per-model-call response speed (see "Antigravity (0.1.18)") |
 
 Claude/Grok TTFT and streaming rate are null. Reasoning token details are not added to output tokens. Exclude ambiguous/incomplete windows rather than fabricate timing. Claude tool-result records are not human turn starts; deduplicate repeated content blocks by API message ID. Primary turns exclude sidechains; subagent transcripts are measured separately (0.1.12, below). Grok usage timestamps record persistence after completion: require exact session/unique turn-number joins (Grok events `turn_number` is 0-based while the usage ledger `turnNumber` is 1-based, so event turn N joins ledger turn N+1), usage time from one second before to 60 seconds after completion, and no later than the next known primary start. The 60-second cap is a conservative Tokrate bound; incomplete/colliding/ambiguous joins are excluded, repeated snapshots are deduplicated, and child sessions are not separately counted. Grok model attribution requires exactly one modelUsage entry: older missing breakdowns stay Unknown even if a selected/primary model is recorded. Grok reasoning effort comes only from the session folder's `summary.json` `reasoning_effort` (64 KiB cap; nothing else is retained, and `chat_history.jsonl` is never read). Because the user can change it between turns, a turn gets an effort only when it started while Tokrate was already watching the session and the value read at start equals the value at emission; turns read during initial catch-up or after a change stay Unknown.
 
@@ -329,6 +330,9 @@ One of `cli`, `desktop`, `ide`, `sdk`, `other`, or `nil`/`null` when the source 
 | | | `sdk` | starts with `sdk` (for example `sdk-ts`, `sdk-py`, `sdk-cli`) |
 | | | `other` | anything else (for example `mcp`) |
 | Grok Build | none | `nil` | Grok Build's files carry no such signal. |
+| Antigravity | the folder the conversation database was found in | `desktop` | `antigravity` (the Antigravity app) |
+| | | `ide` | `antigravity-ide` |
+| | | `cli` | `antigravity-cli` (`agy`) |
 
 - **Codex.** `session_meta.payload.source` is deliberately not used: real logs show it is unreliable (Codex Desktop sessions report `vscode`). The originator read from the session's `session_meta` applies to every turn of that file.
 - **Claude Code.** `entrypoint` is read the same way and at the same points as the top-level `version` is read for `clientVersion`: the user-turn start record, falling back to the turn's assistant records. The first non-empty value of the turn wins.
@@ -387,3 +391,63 @@ The three fields are stored with each history record. Records saved before 0.1.1
 
 - `SharedSample` gains `inputTokens`, `cacheReadInputTokens` and `cacheWriteInputTokens`, always encoded (explicit `null` when not reported) for every client and source kind, like `surface`. `appVersion` stays `0.1.18`.
 - The consent notice stays at version 4 and adds: "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache." The consent example payload includes the three keys.
+## Antigravity (0.1.18)
+
+Antigravity is Google's agentic coding tool (the Antigravity desktop app, Antigravity IDE and the `agy` CLI). Client id `antigravity`, parser `antigravity-conversation-v1`, metric `antigravity-observed-execution-v1` (label "Turn speed"; short explanation "Prompt through final answer of one agent run, including tools & waiting"), sourceKind `primary`. Gemini models get the new inference provider `google`.
+
+### Source
+
+Antigravity keeps one SQLite database per conversation. The layout below was observed in Antigravity 2.15.1 and `agy` 1.2.17; it is not a public API, so every field is optional and anything malformed or missing makes Tokrate skip the record instead of guessing.
+
+- **Root.** The Antigravity data folder `~/.gemini` (Mac: overridable in Settings > Sources like the other roots; Rust: `~/.gemini` from the home directory). Tokrate scans exactly `<root>/antigravity/conversations`, `<root>/antigravity-ide/conversations` and `<root>/antigravity-cli/conversations`, non-recursively, for files named `<conversationId>.db`. Legacy `.pb` conversation files are encrypted and are ignored. Files last modified more than 7 days ago (the history retention) are not opened.
+- **Opening.** Read-only through a `file:` URI with `mode=ro` (never `immutable=1`, which would ignore the write-ahead log), a busy timeout of at most 1 s and no writes or schema changes. A locked, busy, corrupt or schema-mismatched database is skipped for this poll and retried on the next one. A database is re-read when the modification time or size of `<id>.db` or `<id>.db-wal` changes.
+- **Columns read.** Only `steps(idx, has_subtrajectory, metadata)`, `executor_metadata(idx, data)`, `gen_metadata(idx, data)` and the row count of `parent_references`. `step_payload`, `trajectory_metadata_blob`, `render_info`, `task_details`, `permissions`, `error_details` and `battle_mode_infos` are never read. Blobs are protobuf messages without a published schema; Tokrate decodes the wire format (varint, 64-bit, length-delimited, 32-bit; anything else, or a truncated value, makes the blob unreadable) and reads only the field numbers below. Only numeric usage, timestamps, model ids and the effort suffix are kept; prompts, responses, paths, repository URLs and conversation ids are never retained, logged or uploaded.
+- **Subagent trajectories.** A database with any `parent_references` row is a subagent trajectory and is not measured.
+
+Field map (field numbers; `a.b` is field `b` inside the message in field `a`). A *timestamp* is a message with seconds in field 1 and nanoseconds in field 2. Antigravity writes proto3, which omits zero values: an absent varint field means 0 (a missing 20.3 is generation 0, a missing execution state is 0, a missing 9.9 is 0 thinking tokens), while an absent message field (a timestamp, the usage message 9) means absent.
+
+| Blob | Field | Meaning |
+| --- | --- | --- |
+| `steps.metadata` | 1 | Step created (for a model call: the request start) |
+| | 7 | Step completed |
+| | 9 | Usage of a model call: 9.2 input tokens, 9.3 output tokens (thinking included), 9.5 cache-read input tokens, 9.9 thinking tokens |
+| | 12 | Execution id (string) |
+| | 20.3 | Generation index (joins `gen_metadata.idx`) |
+| `executor_metadata.data` | 1 | Execution state; `4` is finished, the only value accepted |
+| | 9 | Execution id (string) |
+| | 10.1.28 | Selected model variant id, such as `gemini-3.8-flash-medium` |
+| `gen_metadata.data` | 1.19 | Model id of the generation, such as `gemini-3.8-flash` |
+| | 1.20 | Repeated key/value pairs (1 = key, 2 = value); key `used_non_gemini_model` |
+
+A **model call** is a step whose metadata has the usage message (field 9). Its generation is the `gen_metadata` row whose `idx` equals the step's 20.3.
+
+### Turns (executions)
+
+One turn is one finished execution: the agent run from the user's prompt to its final answer, including tool runs, permission waits and any follow-up message the user sends while it runs. An execution is emitted once, when all of these hold:
+
+1. its `executor_metadata` row has state 4;
+2. it has at least one model call, and every model call has created and completed timestamps with completed ≥ created;
+3. `durationSeconds > 0` and the turn throughput is at most 2,000 tok/s (the measurement bound).
+
+Values:
+
+- **Steps of the execution**: the steps whose metadata field 12 equals the execution id.
+- `startedAt` = the earliest created timestamp of its steps; `completedAt` = the latest completed timestamp of its steps (a step without one contributes its created timestamp); `durationSeconds = completedAt − startedAt`.
+- `outputTokens` = Σ 9.3 over its model calls; `reasoningOutputTokens` = Σ 9.9 over its model calls.
+- **Model**: the 1.19 value of each model call's generation. When every model call has a generation and all of them agree, that is the model; otherwise the model is nil (unknown), as with other tools.
+- **Reasoning effort**: let V be the executor's variant id (10.1.28) and M the model. When V is exactly `M + "-" + e` and `e` is one of `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, the effort is `e`; otherwise `unknown`. Examples: `gemini-3.8-flash-medium` with model `gemini-3.8-flash` gives `medium`; `claude-opus-4-6-thinking` gives `unknown`.
+- **Provider**: `google` when the model starts with `gemini-` and every model call's generation has `used_non_gemini_model` = `false`; otherwise `unknown`. Antigravity serves Gemini models through Google's own API, so the client is the routing evidence; other models it offers stay `unknown`.
+- `surface` from the folder the database was found in: `antigravity` → `desktop`, `antigravity-ide` → `ide`, `antigravity-cli` → `cli`.
+- `clientVersion` nil, `codexTTFTSeconds` nil (Antigravity records first-token times, but 0.1.18 does not report them), `providerRegion` nil.
+- **Delegated output**: `0` at emission. When any step of the execution has `has_subtrajectory` true, the execution started subagent work that is not part of `outputTokens` and cannot be attributed yet, so `delegatedOutputTokens` stays nil: the turn is shown locally but is never final, so it is not shared and not used by the efficiency indicator.
+- **id**: SHA-256 hex of `antigravity|<conversationId>|<executionId>`, where the conversation id is the database file name without `.db`.
+
+### Response speed
+
+Each model call is one response: start = its created timestamp, end = its completed timestamp. The standard response rules apply unchanged: it qualifies with at least 200 output tokens (9.3), `0 < duration ≤ 600 s` and at most 2,000 tok/s. The turn's `responseOutputTokens`, `responseDurationSeconds` and `responseCount` sum its qualifying model calls; all three are absent when none qualified.
+
+**Live responses.** A qualifying model call that completed after the monitor started is published to the live response stream the first time it is seen completed, without waiting for its execution to finish: model from its generation, provider by the rule above applied to that generation, effort from the executor row when one exists (else `unknown`), client `antigravity`, sourceKind `primary`, metric `antigravity-observed-execution-v1`. Each model call is published at most once (tracked per database by step index).
+
+### Presentation
+
+Tool name "Antigravity". Provider "Google", provider badge a filled circle in Google blue `#4285F4` with a white "G" (model prefix `gemini-` or provider `google`), letters only and no logo, like the other badges. In Settings > Sources the Mac app shows "Antigravity data folder" (default `~/.gemini`).

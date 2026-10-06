@@ -182,6 +182,31 @@ it("describes measurement kinds with the shared vocabulary", async () => {
   expect(measurementDefinition(subagent)).toMatch("task prompt to final answer");
   expect(measurementDefinition(undefined)).toBe("Whole turn, including tools and waiting.");
 });
+it("names Antigravity turns like any other tool and keeps their cohort separate", async () => {
+  const { toolLabel, clientLabel, measurementKind, measurementChip, measurementTitle } =
+    await import("./metrics");
+  const antigravity = m({
+    client: "antigravity",
+    parserVersion: "antigravity-conversation-v1",
+    metricVersion: "antigravity-observed-execution-v1",
+    sourceKind: "primary",
+    provider: "google",
+    model: "gemini-3.8-flash",
+    reasoningEffort: "medium",
+    codexTTFTSeconds: null,
+  });
+  expect(toolLabel("antigravity")).toBe("Antigravity");
+  expect(clientLabel(antigravity)).toBe("Antigravity");
+  expect(measurementKind(antigravity)).toBe("turn");
+  expect(measurementChip(antigravity)).toBeNull();
+  expect(measurementTitle(antigravity)).toBe("Turn speed");
+  expect(measurementLabel(antigravity)).toBe("Turn speed");
+  expect(measurementExplanation(antigravity)).toBe(
+    "Prompt through final answer of one agent run, including tools & waiting.",
+  );
+  expect(metricDefinition(antigravity)).not.toBe(metricDefinition(m()));
+  expect(cohort(antigravity)).not.toBe(cohort(m()));
+});
 it("compares the latest turn with the cohort's own median only with enough turns", async () => {
   const { deltaVsMedian } = await import("./metrics");
   expect(deltaVsMedian(60, stats([50, 50]))).toBeNull();
@@ -243,6 +268,8 @@ it("labels providers, including the Claude Code cloud routes", async () => {
   expect(providerLabel("google-vertex")).toBe("Google Vertex AI");
   expect(providerLabel("openai")).toBe("OpenAI");
   expect(providerLabel("xai")).toBe("xAI");
+  expect(providerLabel("google")).toBe("Google");
+  expect(providerRoute("google")).toBe("Google route");
   for (const unknown of ["unknown", null, undefined, "other"]) {
     expect(providerLabel(unknown)).toBe("Unknown route");
     expect(providerRoute(unknown)).toBe("Unknown route");
