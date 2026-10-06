@@ -7493,11 +7493,35 @@ fn a_checkpoint_that_does_not_match_the_file_falls_back_to_a_full_read() {
                 .unwrap(),
             Mismatch::Replaced => {
                 let copy = fixture.root.join("copy.tmp");
-                // A Windows file copy can preserve the source creation time, which is the
-                // platform's available identity fallback. Write a fresh file with the same bytes
-                // so this test actually replaces it with a different identity.
+                #[cfg(windows)]
+                let (original_created, original_identity) = {
+                    let metadata = fs::metadata(&fixture.session).unwrap();
+                    (
+                        metadata.created().unwrap(),
+                        crate::reader::file_identity(&metadata).unwrap(),
+                    )
+                };
                 fs::write(&copy, fs::read(&fixture.session).unwrap()).unwrap();
                 fs::rename(&copy, &fixture.session).unwrap();
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::FileTimesExt;
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&fixture.session)
+                        .unwrap()
+                        .set_times(
+                            FileTimes::new()
+                                .set_created(original_created + StdDuration::from_secs(2)),
+                        )
+                        .unwrap();
+                    let replacement_metadata = fs::metadata(&fixture.session).unwrap();
+                    assert_ne!(
+                        crate::reader::file_identity(&replacement_metadata),
+                        Some(original_identity),
+                        "replacement fixture must have a different file identity"
+                    );
+                }
                 fs::OpenOptions::new()
                     .write(true)
                     .open(&fixture.session)
