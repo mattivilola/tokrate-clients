@@ -116,7 +116,7 @@ public struct JSONLFileReader: Sendable {
 
         var records: [TurnMetric] = []
         var lineStart = pending.startIndex
-        while let newline = pending[lineStart...].firstIndex(of: 0x0A) {
+        while let newline = pending.indexOfLineFeed(from: lineStart) {
             let line = pending[lineStart..<newline]
             if !droppingOversizedLine, line.count <= Self.maximumLineBytes,
                let record = autoreleasepool(invoking: { parser.consume(line: Data(line)) }) {
@@ -264,5 +264,21 @@ extension FileHandle {
     /// every batch read at once. The pool bounds that to one batch.
     func readDraining(upToCount count: Int) throws -> Data {
         try autoreleasepool { try read(upToCount: count) } ?? Data()
+    }
+}
+
+extension Data {
+    /// The index of the first line feed at or after `start`. `memchr` instead of
+    /// `self[start...].firstIndex(of:)`, which walks a replay's multi-megabyte batches one `Data`
+    /// subscript at a time and was half of the reader's time.
+    func indexOfLineFeed(from start: Index) -> Index? {
+        let firstOffset = start - startIndex
+        let foundOffset: Int? = withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress, firstOffset < buffer.count,
+                  let found = memchr(base + firstOffset, 0x0A, buffer.count - firstOffset)
+            else { return nil }
+            return base.distance(to: UnsafeRawPointer(found))
+        }
+        return foundOffset.map { startIndex + $0 }
     }
 }

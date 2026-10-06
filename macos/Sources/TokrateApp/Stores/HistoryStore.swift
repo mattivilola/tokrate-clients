@@ -105,6 +105,8 @@ final class HistoryStore {
     @ObservationIgnored private(set) var checkpoints = SourceCheckpoints()
     /// The files `checkpoints` held when the history was last written.
     @ObservationIgnored private var savedCheckpointPaths: Set<String> = []
+    /// Spaces out the history writes while records keep arriving.
+    @ObservationIgnored private var saveThrottle = HistorySaveThrottle()
     @ObservationIgnored private var selector = ActiveModelSelector()
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -262,6 +264,8 @@ final class HistoryStore {
         refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
         saveHistory()
+        // That write only creates the file: the first records of the replay must not wait out its interval.
+        saveThrottle.reset()
         let codexFolder = folder(for: .codex)
         guard let monitor, let claudeMonitor, let grokMonitor else { return }
         let waker = PollWaker()
@@ -318,7 +322,7 @@ final class HistoryStore {
                     self.errorMessage = nil
                 }
                 let polledAt = Date.now
-                let deadlines = [
+                let monitorDeadlines = [
                     await monitor.nextPollDeadline(now: polledAt),
                     await claudeMonitor.nextPollDeadline(now: polledAt),
                     await grokMonitor.nextPollDeadline(now: polledAt),
@@ -327,9 +331,15 @@ final class HistoryStore {
                 ].compactMap { $0 }
                 // A replay that just finished adds files to the checkpoints without a new record, so the
                 // set is also written when the monitors go quiet; during a replay every poll would change it.
-                let isIdle = deadlines.min().map { $0 > polledAt } ?? true
-                if !newRecords.isEmpty || (isIdle && self.checkpoints.pathDigests != self.savedCheckpointPaths) { self.saveHistory() }
-                await Self.waitForNextPoll(lastPoll: polledAt, deadline: deadlines.min(), waker: waker)
+                let isIdle = monitorDeadlines.min().map { $0 > polledAt } ?? true
+                if !newRecords.isEmpty { self.saveThrottle.noteNewRecords() }
+                if self.saveThrottle.isDue(now: polledAt)
+                    || (isIdle && self.checkpoints.pathDigests != self.savedCheckpointPaths) {
+                    self.saveHistory(now: polledAt)
+                }
+                // A throttled write is not left to the next watcher event: it falls due at its own deadline.
+                let deadline = (monitorDeadlines + [self.saveThrottle.dueAt(now: polledAt)].compactMap { $0 }).min()
+                await Self.waitForNextPoll(lastPoll: polledAt, deadline: deadline, waker: waker)
             }
         }
     }
@@ -446,7 +456,7 @@ final class HistoryStore {
         if readout != menuBarReadout { menuBarReadout = readout }
     }
 
-    private func saveHistory() {
+    private func saveHistory(now: Date = .now) {
         do {
             try FileManager.default.createDirectory(
                 at: persistenceURL.deletingLastPathComponent(),
@@ -460,7 +470,9 @@ final class HistoryStore {
             let data = try encoder.encode(envelope)
             try data.write(to: persistenceURL, options: .atomic)
             savedCheckpointPaths = checkpoints.pathDigests
+            saveThrottle.didSave(at: now, succeeded: true)
         } catch {
+            saveThrottle.didSave(at: now, succeeded: false)
             errorMessage = "Local history could not be saved."
         }
     }

@@ -124,7 +124,7 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
 
         var records: [TurnMetric] = []
         var lineStart = pending.startIndex
-        while let newline = pending[lineStart...].firstIndex(of: 0x0A) {
+        while let newline = pending.indexOfLineFeed(from: lineStart) {
             let line = pending[lineStart..<newline]
             if !droppingLine, line.count <= Self.maximumLineBytes,
                let record = autoreleasepool(invoking: { parser.consume(line: Data(line)) }) {

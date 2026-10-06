@@ -124,10 +124,51 @@ final class HistoryStoreCheckpointTests: XCTestCase {
         replaying.stopMonitoring()
     }
 
+    func testRecordsArrivingSoonAfterTheFirstWriteWaitForTheThrottleAndTerminationWritesThem() async throws {
+        try writeSession("first", turn: "a", tokens: 111)
+        let store = makeStore()
+        store.startMonitoring()
+        try await waitUntil { savedOutputTokens() == [111] }
+
+        // A turn appended to the same file is read by a later poll, well inside the ten-second write
+        // interval. The set of files read is unchanged, so the write at the end of a replay does not apply
+        // and only the throttle decides.
+        try writeSession("first", turn: "b", tokens: 222, appending: true)
+        try await waitUntil { store.records.count == 2 }
+        XCTAssertEqual(savedOutputTokens(), [111], "the new record is not written yet")
+
+        store.prepareForTermination()
+        XCTAssertEqual(savedOutputTokens(), [111, 222])
+        store.stopMonitoring()
+    }
+
+    func testRecordsWaitingForTheThrottleAreWrittenAtItsDeadlineEvenThoughNothingElseWakesThePoll() async throws {
+        try writeSession("first", turn: "a", tokens: 111)
+        let store = makeStore()
+        store.startMonitoring()
+        try await waitUntil { savedOutputTokens() == [111] }
+        let firstWrite = Date.now
+        try writeSession("first", turn: "b", tokens: 222, appending: true)
+        // The monitors are idle after the append is read; an idle poll alone would come 30 s later.
+        try await waitUntil(timeout: 25) { savedOutputTokens() == [111, 222] }
+        XCTAssertGreaterThanOrEqual(Date.now.timeIntervalSince(firstWrite), HistorySaveThrottle.interval - 1)
+        store.stopMonitoring()
+    }
+
+    private func savedOutputTokens() -> [Int] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: historyURL),
+              let saved = try? decoder.decode(CurrentPersistedHistory.self, from: data)
+        else { return [] }
+        return saved.records.map(\.outputTokens).sorted()
+    }
+
     // MARK: Fixtures
 
-    /// A finished Codex turn from an hour ago, so it is final at once.
-    private func writeSession(_ name: String, turn: String, tokens: Int) throws {
+    /// A finished Codex turn from an hour ago, so it is final at once. With `appending` the turn is
+    /// added to the session file written before, which keeps its modification date of now.
+    private func writeSession(_ name: String, turn: String, tokens: Int, appending: Bool = false) throws {
         try FileManager.default.createDirectory(at: codexFolder, withIntermediateDirectories: true)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -136,14 +177,22 @@ final class HistoryStoreCheckpointTests: XCTestCase {
             let object: [String: Any] = ["timestamp": formatter.string(from: start.addingTimeInterval(seconds)), "type": type, "payload": payload]
             return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self) + "\n"
         }
-        let lines = [
-            line(-1, "session_meta", ["id": name, "session_id": name, "source": "vscode", "model_provider": "openai"]),
+        let lines = (appending ? [] : [
+            line(-1, "session_meta", ["id": name, "session_id": name, "source": "vscode", "model_provider": "openai"])
+        ]) + [
             line(0, "event_msg", ["type": "task_started", "turn_id": turn]),
             line(0, "turn_context", ["turn_id": turn, "model": "gpt-test"]),
             line(2, "token_usage_record", ["turn_id": turn, "response_id": "r-\(turn)", "usage": ["output_tokens": tokens], "turn_token_usage": ["output_tokens": tokens]]),
             line(60, "event_msg", ["type": "task_complete", "turn_id": turn, "duration_ms": 60_000])
         ]
         let file = codexFolder.appendingPathComponent("\(name).jsonl")
+        if appending {
+            let handle = try FileHandle(forWritingTo: file)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(lines.joined().utf8))
+            return
+        }
         try Data(lines.joined().utf8).write(to: file)
         // Quiet for long enough that a checkpoint applies to it.
         try FileManager.default.setAttributes([.modificationDate: start], ofItemAtPath: file.path)
