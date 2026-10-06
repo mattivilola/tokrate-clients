@@ -7,7 +7,8 @@ final class SharedSampleTests: XCTestCase {
 
     private func claude(
         provider: String? = "anthropic", region: String? = nil, outputTokens: Int = 1_000, durationSeconds: Double = 100,
-        tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil, sourceKind: String = "primary", delegated: Int? = 0
+        tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil, sourceKind: String = "primary", delegated: Int? = 0,
+        surface: ToolSurface? = nil
     ) -> TurnMetric {
         TurnMetric(
             id: "LOCAL_PRIVATE_DIGEST", completedAt: now, model: "claude-sonnet-4-5", outputTokens: outputTokens,
@@ -15,7 +16,7 @@ final class SharedSampleTests: XCTestCase {
             client: "claude-code", clientVersion: "2.1.37", parserVersion: "claude-transcript-v4",
             metricVersion: "claude-observed-turn-v1", sourceKind: sourceKind, provider: provider,
             responseOutputTokens: tokens, responseDurationSeconds: seconds, responseCount: count, providerRegion: region,
-            delegatedOutputTokens: delegated
+            delegatedOutputTokens: delegated, surface: surface
         )
     }
 
@@ -29,14 +30,27 @@ final class SharedSampleTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), [
             "sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider",
             "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs",
-            "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens"
+            "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface"
         ])
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.17")
-        XCTAssertEqual(sample.appVersion, "0.1.17")
-        for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens"] {
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.18")
+        XCTAssertEqual(sample.appVersion, "0.1.18")
+        for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens", "surface"] {
             XCTAssertTrue(object[key] is NSNull, "\(key) is encoded as null when absent")
         }
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(sample), as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
+    }
+
+    func testSurfaceIsSharedAsACategoryOrAnExplicitNull() throws {
+        for surface in ToolSurface.allCases {
+            let sample = try XCTUnwrap(SharedSample(claude(surface: surface)))
+            XCTAssertEqual(sample.surface, surface.rawValue)
+            XCTAssertEqual(try json(sample)["surface"] as? String, surface.rawValue)
+        }
+        let unknown = try XCTUnwrap(SharedSample(claude(surface: nil)))
+        XCTAssertNil(unknown.surface)
+        XCTAssertTrue(try json(unknown)["surface"] is NSNull)
+        // Subagent records carry their own session's surface like any other turn.
+        XCTAssertEqual(try XCTUnwrap(SharedSample(claude(sourceKind: "subagent", delegated: nil, surface: .sdk))).surface, "sdk")
     }
 
     func testDelegatedOutputTokensAreSharedForFinalPrimaryTurnsAndNullForSubagents() throws {

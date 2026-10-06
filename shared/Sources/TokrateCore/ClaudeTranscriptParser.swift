@@ -77,6 +77,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         var hasRecordWithoutProviderEvidence = false
         var clientVersion: String?
         var versionIsAmbiguous = false
+        /// First non-empty `entrypoint` of the turn's records, as its category.
+        var surface: ToolSurface?
         var reasoningEffort: String?
         var effortIsAmbiguous = false
     }
@@ -309,6 +311,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             lastActivityAt: timestamp
         )
         if let version = validatedVersion(root["version"]) { state.clientVersion = version }
+        state.surface = ToolSurface.claude(entrypoint: root["entrypoint"] as? String)
         updateEffort(root, message: nil, in: &state)
         turn = state
         if scope == .subagent, let rootKey = rootKey(of: state) {
@@ -355,6 +358,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             if let old = state.clientVersion, old != version { state.versionIsAmbiguous = true }
             else if state.clientVersion == nil { state.clientVersion = version }
         }
+        if state.surface == nil { state.surface = ToolSurface.claude(entrypoint: root["entrypoint"] as? String) }
         updateEffort(root, message: message, in: &state)
 
         guard let messageID else {
@@ -513,7 +517,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             responseOutputTokens: hasResponse ? state.responseTokens : nil,
             responseDurationSeconds: hasResponse ? state.responseSeconds : nil,
             responseCount: hasResponse ? state.responseCount : nil,
-            providerRegion: provider == "amazon-bedrock" ? (state.regions.count == 1 ? state.regions.first : "unknown") : nil
+            providerRegion: provider == "amazon-bedrock" ? (state.regions.count == 1 ? state.regions.first : "unknown") : nil,
+            surface: state.surface
         )
     }
 

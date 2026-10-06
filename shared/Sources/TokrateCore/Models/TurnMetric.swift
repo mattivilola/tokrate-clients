@@ -39,6 +39,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// part of `outputTokens` (contract "Delegated output"). Nil while the attribution is not final
     /// and for records it does not apply to (subagent records, history saved before 0.1.16).
     public let delegatedOutputTokens: Int?
+    /// Where the coding tool ran (contract "Surface"). Nil when the source gives no signal; only the
+    /// category is kept, never the originator or entrypoint it came from.
+    public let surface: ToolSurface?
     /// Generic name for the source-reported TTFT observation. The stored Codex name remains
     /// for backward compatibility with existing history files.
     /// Output tokens per second while the model was responding: tools and waiting excluded.
@@ -149,7 +152,8 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         responseDurationSeconds: Double? = nil,
         responseCount: Int? = nil,
         providerRegion: String? = nil,
-        delegatedOutputTokens: Int? = nil
+        delegatedOutputTokens: Int? = nil,
+        surface: ToolSurface? = nil
     ) {
         // The three response fields travel together: a partial set carries no usable measurement.
         let hasResponse = responseOutputTokens.map { $0 > 0 } == true
@@ -160,6 +164,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         self.responseCount = hasResponse ? responseCount : nil
         self.providerRegion = providerRegion
         self.delegatedOutputTokens = delegatedOutputTokens
+        self.surface = surface
         self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         self.client = client
         self.clientVersion = clientVersion
@@ -182,7 +187,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         case reasoningEffort, id, completedAt, client, model, clientVersion, parserVersion, metricVersion
         case reasoningOutputTokens, sourceKind, provider, outputTokens, durationSeconds, codexTTFTSeconds
         case turnThroughputTPS, streamingTPS
-        case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion, delegatedOutputTokens
+        case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion, delegatedOutputTokens, surface
     }
 
     public init(from decoder: any Decoder) throws {
@@ -212,6 +217,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         providerRegion = try values.decodeIfPresent(String.self, forKey: .providerRegion)
         // Records saved before 0.1.16 carry no delegated total: the attribution was never made.
         delegatedOutputTokens = try values.decodeIfPresent(Int.self, forKey: .delegatedOutputTokens)
+        // Records saved before 0.1.18 carry no surface. A value this build does not know (written by a
+        // newer one) reads as unknown instead of failing the record.
+        surface = (try? values.decodeIfPresent(String.self, forKey: .surface)).flatMap(ToolSurface.init(rawValue:))
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -237,6 +245,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encodeIfPresent(responseCount, forKey: .responseCount)
         try values.encodeIfPresent(providerRegion, forKey: .providerRegion)
         try values.encodeIfPresent(delegatedOutputTokens, forKey: .delegatedOutputTokens)
+        try values.encodeIfPresent(surface, forKey: .surface)
     }
 
     /// This record without response timing, for a measurement that failed `hasPlausibleResponseTiming`.
@@ -248,7 +257,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
             clientVersion: clientVersion, parserVersion: parserVersion, metricVersion: metricVersion,
             reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
             reasoningEffort: reasoningEffort, providerRegion: providerRegion,
-            delegatedOutputTokens: delegatedOutputTokens
+            delegatedOutputTokens: delegatedOutputTokens, surface: surface
         )
     }
 
@@ -262,7 +271,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
             reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
             reasoningEffort: reasoningEffort, responseOutputTokens: responseOutputTokens,
             responseDurationSeconds: responseDurationSeconds, responseCount: responseCount,
-            providerRegion: providerRegion, delegatedOutputTokens: tokens
+            providerRegion: providerRegion, delegatedOutputTokens: tokens, surface: surface
         )
     }
 }

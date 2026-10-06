@@ -71,9 +71,10 @@ public final class UserDefaultsSharingPreferenceStore: SharingPreferenceStore {
 public final class SharingPreferences {
     /// Notice version 2 (0.1.14) adds response-speed totals, the Bedrock inference-profile region,
     /// and the server-derived continent. Version 3 (0.1.16) adds the output tokens of delegated
-    /// subagent work. A saved contribution consent for an older notice is paused until the user
-    /// chooses again, exactly like a legacy default-on setting; a saved opt-out stays off.
-    public static let currentNoticeVersion = 3
+    /// subagent work. Version 4 (0.1.18) adds the surface category (where the coding tool ran). A
+    /// saved contribution consent for an older notice is paused until the user chooses again, exactly
+    /// like a legacy default-on setting; a saved opt-out stays off.
+    public static let currentNoticeVersion = 4
 
     public let session: SharingSession
     public private(set) var isSharingRequested: Bool

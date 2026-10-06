@@ -265,11 +265,11 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let metric = try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "s1", output: 200, stop: "end_turn", sidechain: true)))
         let sample = try XCTUnwrap(SharedSample(metric))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens"])
+        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface"])
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.17")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.18")
         XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         // The only response (200 tokens in 10 s from the task prompt) qualifies.
@@ -748,7 +748,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             XCTAssertNil(sample(client: "grok-build", provider: provider))
         }
         XCTAssertNil(sample(client: "claude-code", provider: "azure"))
-        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.17")
+        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.18")
     }
 
     // MARK: Response speed (response-v1)
@@ -1254,6 +1254,56 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let sample = try XCTUnwrap(SharedSample(result.withDelegatedOutputTokens(0)))
         XCTAssertEqual(sample.providerRegion, "eu")
         XCTAssertEqual(sample.provider, "amazon-bedrock")
+    }
+
+    // MARK: Surface (0.1.18)
+
+    private func withEntrypoint(_ line: Data, _ entrypoint: String?) throws -> Data {
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: line) as? [String: Any])
+        if let entrypoint { value["entrypoint"] = entrypoint }
+        return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    }
+
+    private func surface(
+        scope: ClaudeTranscriptParser.Scope = .primary, userEntrypoint: String?, assistantEntrypoints: [String?] = [nil]
+    ) throws -> TurnMetric {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic", scope: scope)
+        let sidechain = scope == .subagent
+        _ = parser.consume(line: try withEntrypoint(try user(at: 0, id: "prompt", sidechain: sidechain), userEntrypoint))
+        var result: TurnMetric?
+        for (index, entrypoint) in assistantEntrypoints.enumerated() {
+            let last = index == assistantEntrypoints.count - 1
+            let line = try withEntrypoint(try assistant(
+                at: Double(index + 1) * 5, id: "msg-\(index)", output: 10, stop: last ? "end_turn" : "tool_use", sidechain: sidechain
+            ), entrypoint)
+            result = parser.consume(line: line)
+        }
+        return try XCTUnwrap(result ?? parser.pollEnded(now: base, isFinal: false))
+    }
+
+    func testSurfaceComesFromTheUserTurnEntrypointInBothScopes() throws {
+        for scope in [ClaudeTranscriptParser.Scope.primary, .subagent] {
+            XCTAssertEqual(try surface(scope: scope, userEntrypoint: "cli").surface, .cli)
+            XCTAssertEqual(try surface(scope: scope, userEntrypoint: "claude-desktop").surface, .desktop)
+            XCTAssertEqual(try surface(scope: scope, userEntrypoint: "claude-vscode").surface, .ide)
+            XCTAssertEqual(try surface(scope: scope, userEntrypoint: "sdk-ts").surface, .sdk)
+            XCTAssertEqual(try surface(scope: scope, userEntrypoint: "mcp").surface, .other)
+            XCTAssertNil(try surface(scope: scope, userEntrypoint: nil).surface)
+            XCTAssertNil(try surface(scope: scope, userEntrypoint: "").surface)
+        }
+    }
+
+    func testSurfaceFallsBackToAssistantRecordsAndTheFirstValueWins() throws {
+        XCTAssertEqual(try surface(userEntrypoint: nil, assistantEntrypoints: [nil, "sdk-py", "cli"]).surface, .sdk)
+        XCTAssertEqual(try surface(userEntrypoint: "cli", assistantEntrypoints: ["claude-desktop"]).surface, .cli)
+        XCTAssertNil(try surface(userEntrypoint: nil, assistantEntrypoints: [nil, nil]).surface)
+    }
+
+    func testTheRawEntrypointIsNeverPersisted() throws {
+        let metric = try surface(userEntrypoint: "some-third-party-app")
+        XCTAssertEqual(metric.surface, .other)
+        let stored = String(decoding: try JSONEncoder().encode(metric), as: UTF8.self)
+        XCTAssertFalse(stored.contains("some-third-party-app"))
     }
 
     // MARK: Synthetic fixtures

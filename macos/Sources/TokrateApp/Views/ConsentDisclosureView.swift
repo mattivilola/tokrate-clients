@@ -32,6 +32,8 @@ struct ConsentDisclosureView: View {
                 .font(primaryFont).foregroundStyle(DashboardStyle.ink).fixedSize(horizontal: false, vertical: true)
             Text("From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator.")
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
+            Text("From 0.1.18 each turn also includes where the coding tool ran, as a category (command line, desktop app, editor extension, SDK or automation, other), never the app's own name.")
+                .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("From 0.1.14 the server derives your continent from the connection's country when a sample arrives (via Cloudflare). Only the continent is stored, never the country or your IP address, and a region is shown publicly only when at least 3 contributors report from it.")
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("Uploads contain no names, prompts, responses, code, or local session IDs. Each sample has a random ID and uploads use a stable public-key pseudonym, so records can be linked over time.")

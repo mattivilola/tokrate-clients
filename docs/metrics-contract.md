@@ -201,7 +201,7 @@ For the live stream responses are timed file-wide: also responses outside a huma
 
 ### Sharing
 
-`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; from 0.1.16 also `responseOutputTokens ≥ 200 × responseCount` and `responseDurationMs ≤ 600,000 × responseCount` (see "Measurement sanity (0.1.16)"); otherwise all three are null. `appVersion` is `0.1.17` (0.1.16 before).
+`SharedSample` adds `responseOutputTokens` (Int), `responseDurationMs` (Double) and `responseCount` (Int), always encoded (null when absent) from 0.1.14. They are shared only when `1 ≤ responseOutputTokens ≤ outputTokens`, `0 < responseCount ≤ responseOutputTokens`, `responseDurationMs ≤ durationMs` and the implied speed is at most 2,000 tok/s; from 0.1.16 also `responseOutputTokens ≥ 200 × responseCount` and `responseDurationMs ≤ 600,000 × responseCount` (see "Measurement sanity (0.1.16)"); otherwise all three are null. `appVersion` is `0.1.18` (0.1.17 before).
 
 ## Grok Build response speed (0.1.15)
 
@@ -280,7 +280,7 @@ On finalization the monitor re-emits the same record id with `delegatedOutputTok
 
 ### Sharing and consent notice 3
 
-- `SharedSample` gains `delegatedOutputTokens`, always encoded (explicit `null` when nil). It is shared only when `0 ≤ delegatedOutputTokens ≤ 100,000,000`; a primary turn outside that range, or without a total, builds no sample. Subagent records always share `null`. `appVersion` is `0.1.17` (0.1.16 before).
+- `SharedSample` gains `delegatedOutputTokens`, always encoded (explicit `null` when nil). It is shared only when `0 ≤ delegatedOutputTokens ≤ 100,000,000`; a primary turn outside that range, or without a total, builds no sample. Subagent records always share `null`. `appVersion` is `0.1.18` (0.1.17 before).
 - **Primary turns are enqueued for sharing only once final** (`delegatedOutputTokens != nil`). Subagent records are enqueued as before. The existing rules still apply: future-only `completedAt ≥ consentStartedAt`, the seen-id dedupe and the queue caps. The old "only ids not yet in history" pre-filter is replaced by this readiness rule so the settled re-emission is shared, and each record is shared at most once.
 - **Consent notice version 3.** `SharingPreferences.currentNoticeVersion` is 3 (desktop: `SHARING_NOTICE_VERSION = "2026-10-05-v3"`). Re-consent behaves as for version 2: a saved OFF stays OFF. The notice adds: "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator." The consent example payload includes the new key.
 - **Server rule.** Before 0.1.16 the key is forbidden; from 0.1.16 it is required. For `sourceKind` `primary` it is a non-negative integer ≤ 100,000,000; for `subagent` it is `null`.
@@ -304,3 +304,42 @@ Copy. Definition: "Fewer output tokens per request scores higher. 100 = a typica
 - Background subagents still running 30 minutes after the request ends are not counted.
 - Codex approval-review ("guardian") sessions are not counted.
 - Requires Tokrate 0.1.16 or newer.
+
+## Surface (0.1.18)
+
+A new nullable per-turn field, `surface`, records where the coding tool ran. It is gated by app version 0.1.18 and changes no parser or metric version; turn speed, response speed and the efficiency indicator are unchanged. It is analysed server-side first: it is not part of any cohort identity (`ModelCohort`, the public board's cohort ID) and no local UI shows it.
+
+### `surface`
+
+One of `cli`, `desktop`, `ide`, `sdk`, `other`, or `nil`/`null` when the source gives no signal. It is derived in the parser from one source string, compared case-insensitively after trimming whitespace; an empty string is the same as absent. Rules are evaluated top to bottom.
+
+| Client | Source field | Value | Matches |
+| --- | --- | --- | --- |
+| Codex | `session_meta.payload.originator` | `nil` | absent or empty |
+| | | `desktop` | `codex desktop`, `codex_work_desktop` |
+| | | `cli` | `codex_cli_rs`, `codex-tui`, `codex_tui` |
+| | | `sdk` | `codex_exec` |
+| | | `ide` | contains `vscode`, `jetbrains`, `cursor` or `windsurf` (for example `codex_vscode`) |
+| | | `sdk` | starts with `codex_sdk` (for example `codex_sdk_ts`) |
+| | | `other` | anything else (third-party integrations such as `vibe-codex-executor`, `buzz-acp`, `t3code_desktop`) |
+| Claude Code | top-level `entrypoint` of a transcript record | `nil` | absent or empty |
+| | | `cli` | `cli` |
+| | | `desktop` | `claude-desktop` |
+| | | `ide` | contains `vscode`, `jetbrains`, `cursor`, `windsurf` or `ide` (for example `claude-vscode`) |
+| | | `sdk` | starts with `sdk` (for example `sdk-ts`, `sdk-py`, `sdk-cli`) |
+| | | `other` | anything else (for example `mcp`) |
+| Grok Build | none | `nil` | Grok Build's files carry no such signal. |
+
+- **Codex.** `session_meta.payload.source` is deliberately not used: real logs show it is unreliable (Codex Desktop sessions report `vscode`). The originator read from the session's `session_meta` applies to every turn of that file.
+- **Claude Code.** `entrypoint` is read the same way and at the same points as the top-level `version` is read for `clientVersion`: the user-turn start record, falling back to the turn's assistant records. The first non-empty value of the turn wins.
+- **Subagent turns** (Codex child sessions, Claude sidechain transcripts) take the surface of their own session's metadata by the same rules; there is no special casing.
+- **Test vectors.** Codex: `Codex Desktop`→`desktop`, `codex_work_desktop`→`desktop`, `codex_cli_rs`→`cli`, `codex-tui`→`cli`, `codex_vscode`→`ide`, `codex_exec`→`sdk`, `codex_sdk_ts`→`sdk`, `vibe-codex-executor`→`other`, `buzz-acp`→`other`, `t3code_desktop`→`other`, empty and absent→`nil`. Claude Code: `cli`→`cli`, `claude-desktop`→`desktop`, `claude-vscode`→`ide`, `sdk-ts`→`sdk`, `sdk-py`→`sdk`, `mcp`→`other`, absent→`nil`.
+
+### Privacy
+
+Only the category is stored and shared. The raw originator or entrypoint string, which can name a third-party tool, is never persisted in history, never part of the UI snapshot and never uploaded; it is dropped as the parser maps it. A stored record whose `surface` is not one of the five categories (for example written by a newer version) decodes with `surface` `nil` instead of failing; records saved before 0.1.18 have none.
+
+### Sharing and consent notice 4
+
+- `SharedSample` gains `surface` (the category string, or an explicit `null`), always encoded like the other nullable fields. `appVersion` is `0.1.18` (0.1.17 before). The server accepts the key only from 0.1.18, where it is required (a category or `null`).
+- **Consent notice version 4.** `SharingPreferences.currentNoticeVersion` is 4. Re-consent behaves as for versions 2 and 3: a saved OFF stays OFF. The notice adds: "From 0.1.18 each turn also includes where the coding tool ran, as a category (command line, desktop app, editor extension, SDK or automation, other), never the app's own name." The consent example payload includes the new key.

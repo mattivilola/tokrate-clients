@@ -6,7 +6,7 @@ public struct SharedSample: Encodable, Sendable {
     public let observedAt: Date
     public let client: String
     public let clientVersion: String
-    public let appVersion = "0.1.17"
+    public let appVersion = "0.1.18"
     public let parserVersion: String
     public let metricVersion: String
     public let model: String
@@ -27,6 +27,8 @@ public struct SharedSample: Encodable, Sendable {
     /// Output tokens of subagent work a primary turn started, beyond `outputTokens`. Always sent, null
     /// for subagent records. A primary turn is shared only once this total is final.
     public let delegatedOutputTokens: Int?
+    /// Where the coding tool ran, as a category (contract "Surface"); null when unknown. Always sent.
+    public let surface: String?
     /// Largest accepted delegated total (the same bound the server enforces).
     public static let maximumDelegatedOutputTokens = 100_000_000
     public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
@@ -58,6 +60,7 @@ public struct SharedSample: Encodable, Sendable {
         } else {
             delegatedOutputTokens = nil
         }
+        surface = metric.surface?.rawValue
         provider = metric.provider ?? "unknown"
         reasoningEffort = metric.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown"
         outputTokens = metric.outputTokens
@@ -93,7 +96,7 @@ public struct SharedSample: Encodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, reasoningEffort, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
-        case responseOutputTokens, responseDurationMs, responseCount, providerRegion, delegatedOutputTokens
+        case responseOutputTokens, responseDurationMs, responseCount, providerRegion, delegatedOutputTokens, surface
     }
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -117,6 +120,7 @@ public struct SharedSample: Encodable, Sendable {
         try container.encode(responseCount, forKey: .responseCount)
         try container.encode(providerRegion, forKey: .providerRegion)
         try container.encode(delegatedOutputTokens, forKey: .delegatedOutputTokens)
+        try container.encode(surface, forKey: .surface)
     }
 
     private static func safeIdentifier(_ value: String?, maximum: Int) -> String? {

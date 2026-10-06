@@ -23,7 +23,8 @@ enum SamplePayload {
             responseOutputTokens: 1_000,
             responseDurationSeconds: 12.5,
             responseCount: 3,
-            delegatedOutputTokens: 0
+            delegatedOutputTokens: 0,
+            surface: .cli
         )
     }
 

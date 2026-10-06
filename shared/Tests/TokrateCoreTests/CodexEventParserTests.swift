@@ -404,6 +404,50 @@ final class CodexEventParserTests: XCTestCase {
         XCTAssertEqual(twoTurns.drainCompletedResponses().count, 2)
     }
 
+    private func completedMetric(originator: Any?) throws -> TurnMetric {
+        var parser = CodexEventParser(sourceIdentity: "session-file")
+        var meta: [String: Any] = ["id": "session-1", "source": "vscode"]
+        if let originator { meta["originator"] = originator }
+        _ = parser.consume(line: try event(type: "session_meta", payload: meta))
+        _ = parser.consume(line: try started("turn-1"))
+        _ = parser.consume(line: try event(type: "token_usage_record", payload: [
+            "turn_id": "turn-1", "turn_token_usage": ["output_tokens": 50]
+        ]))
+        return try XCTUnwrap(parser.consume(line: try event(type: "event_msg", payload: [
+            "type": "task_complete", "turn_id": "turn-1", "started_at": "2026-10-03T10:00:00Z",
+            "completed_at": "2026-10-03T10:00:05Z", "duration_ms": 5_000
+        ])))
+    }
+
+    func testSurfaceComesFromTheSessionOriginatorNotTheSource() throws {
+        // The source says "vscode" for every fixture; only the originator decides.
+        XCTAssertEqual(try completedMetric(originator: "Codex Desktop").surface, .desktop)
+        XCTAssertEqual(try completedMetric(originator: "codex_cli_rs").surface, .cli)
+        XCTAssertEqual(try completedMetric(originator: "codex_vscode").surface, .ide)
+        XCTAssertEqual(try completedMetric(originator: "codex_exec").surface, .sdk)
+        XCTAssertEqual(try completedMetric(originator: "buzz-acp").surface, .other)
+        XCTAssertNil(try completedMetric(originator: nil).surface)
+        XCTAssertNil(try completedMetric(originator: "").surface)
+        XCTAssertNil(try completedMetric(originator: 42).surface)
+    }
+
+    func testTheRawOriginatorIsNeverPersistedAndResetClearsTheSurface() throws {
+        let metric = try completedMetric(originator: "vibe-codex-executor")
+        XCTAssertEqual(metric.surface, .other)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(metric), as: UTF8.self).contains("vibe-codex-executor"))
+
+        var parser = CodexEventParser(sourceIdentity: "a")
+        _ = parser.consume(line: try event(type: "session_meta", payload: ["id": "s", "originator": "codex_exec"]))
+        parser.reset(sourceIdentity: "b")
+        _ = parser.consume(line: try started("turn-2"))
+        _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "turn-2", "turn_token_usage": ["output_tokens": 50]]))
+        let after = try XCTUnwrap(parser.consume(line: try event(type: "event_msg", payload: [
+            "type": "task_complete", "turn_id": "turn-2", "started_at": "2026-10-03T10:00:00Z",
+            "completed_at": "2026-10-03T10:00:05Z", "duration_ms": 5_000
+        ])))
+        XCTAssertNil(after.surface)
+    }
+
     private func started(_ turnID: String) throws -> Data {
         try event(type: "event_msg", payload: ["type": "task_started", "turn_id": turnID])
     }

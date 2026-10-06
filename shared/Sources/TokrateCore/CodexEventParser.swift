@@ -39,6 +39,7 @@ public struct CodexEventParser: Sendable {
     private var primaryRootKey: String?
     private var delegationEvents: [DelegationEvent] = []
     private var clientVersion: String?
+    private var surface: ToolSurface?
     private var sourceKind = "unknown"
     private var provider = "unknown"
     /// Timestamp of the latest record that triggered a model request: the turn start, a user
@@ -67,6 +68,7 @@ public struct CodexEventParser: Sendable {
         delegatedRootKey = nil
         primaryRootKey = nil
         clientVersion = nil
+        surface = nil
         sourceKind = "unknown"
         provider = "unknown"
         lastTriggerAt = nil
@@ -97,6 +99,7 @@ public struct CodexEventParser: Sendable {
 
         if eventType == "session_meta" {
             if let version = payload["cli_version"] as? String, version.range(of: "^[a-zA-Z0-9._+-]{1,40}$", options: .regularExpression) != nil { clientVersion = version }
+            surface = ToolSurface.codex(originator: payload["originator"] as? String)
             provider = payload["model_provider"] as? String == "openai" ? "openai" : "unknown"
             if let source = payload["source"] as? String, ["cli", "vscode", "exec", "desktop", "app"].contains(source) { sourceKind = "primary" }
             if let source = payload["source"] as? [String: Any], source["subagent"] != nil { isAgentSession = true }
@@ -245,7 +248,8 @@ public struct CodexEventParser: Sendable {
             reasoningEffort: state.reasoningEffortWasAmbiguous ? nil : state.reasoningEffort,
             responseOutputTokens: state.responseCount > 0 ? state.responseTokens : nil,
             responseDurationSeconds: state.responseCount > 0 ? state.responseSeconds : nil,
-            responseCount: state.responseCount > 0 ? state.responseCount : nil
+            responseCount: state.responseCount > 0 ? state.responseCount : nil,
+            surface: surface
         )
     }
 
