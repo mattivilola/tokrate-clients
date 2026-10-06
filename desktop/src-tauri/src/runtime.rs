@@ -15,7 +15,7 @@ use tokrate_core::{
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-05-v3";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-06-v4";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1203,7 +1203,7 @@ mod tests {
     }
     #[test]
     fn notice_version_three_pauses_sharing_that_was_accepted_under_earlier_versions() {
-        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-05-v3");
+        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-06-v4");
         for old in [OLD_NOTICE, PREVIOUS_NOTICE] {
             assert_ne!(SHARING_NOTICE_VERSION, old);
             let dir = temporary();

@@ -10,6 +10,10 @@ export const REGION_NOTICE =
 export const DELEGATED_NOTICE =
   "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator.";
 
+/** From notice version 4: each turn also carries where the coding tool ran, as a category. */
+export const SURFACE_NOTICE =
+  "From 0.1.18 each turn also includes where the coding tool ran, as a category (command line, desktop app, editor extension, SDK or automation, other), never the app's own name.";
+
 /** Obviously fake values in the exact shape of the shared allowlist (see core/src/sharing.rs). */
 export function buildSentExample(): string {
   return JSON.stringify(
@@ -38,6 +42,7 @@ export function buildSentExample(): string {
           responseDurationMs: 4321,
           responseCount: 2,
           delegatedOutputTokens: 0,
+          surface: "cli",
         },
       ],
     },
@@ -79,6 +84,7 @@ export function SharingChoice({
             <li>Coding tool, model and effort</li>
             <li>Token counts and turn duration</li>
             <li>Output tokens of subagent work a turn started</li>
+            <li>Where the tool ran, as a category</li>
             <li>Response timing within the turn</li>
             <li>First-token time, when available</li>
             <li>Time rounded to 5 minutes</li>
@@ -96,6 +102,7 @@ export function SharingChoice({
       </div>
       <p className="detail-fine region-notice">{REGION_NOTICE}</p>
       <p className="detail-fine region-notice">{DELEGATED_NOTICE}</p>
+      <p className="detail-fine region-notice">{SURFACE_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

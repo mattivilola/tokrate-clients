@@ -1,7 +1,7 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
     bedrock_region_or_unknown, response_qualifies, speed_is_plausible, ReportedReasoningEffort,
-    ResponseMetric, ResponseTotals, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
+    ResponseMetric, ResponseTotals, ToolSurface, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
     CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
 };
 use crate::parser::JsonlEventParser;
@@ -36,6 +36,11 @@ enum RecordScope {
     Primary,
     /// Records of one subagent transcript (`<session>/subagents/agent-<id>.jsonl`).
     Subagent,
+}
+
+/// Category of a record's top-level `entrypoint`; the raw string is never kept.
+fn entrypoint_surface(root: &serde_json::Map<String, Value>) -> Option<ToolSurface> {
+    ToolSurface::from_claude_entrypoint(root.get("entrypoint").and_then(Value::as_str))
 }
 
 /// True for a record written when a response arrives rather than when it was requested.
@@ -91,6 +96,8 @@ struct TurnState {
     responses: ResponseTotals,
     /// Id of the delegated work item reported as started for this subagent turn.
     work_id: Option<String>,
+    /// Category of the first usable `entrypoint`: the prompt record's, else an assistant record's.
+    surface: Option<ToolSurface>,
 }
 
 /// The API response (one unique `message.id`) whose records are currently being read.
@@ -329,6 +336,7 @@ impl ClaudeTranscriptParser {
                     session_identity,
                     agent_identity,
                     work_id,
+                    surface: entrypoint_surface(object),
                     ..TurnState::default()
                 });
                 return None;
@@ -356,6 +364,9 @@ impl ClaudeTranscriptParser {
         }
         if let Some(timestamp) = parse_date(object.get("timestamp")) {
             record_activity(turn, timestamp);
+        }
+        if turn.surface.is_none() {
+            turn.surface = entrypoint_surface(object);
         }
         let synthetic = message.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL);
         if synthetic {
@@ -901,6 +912,7 @@ impl ClaudeTranscriptParser {
             provider_region: (turn.provider.provider() == "amazon-bedrock")
                 .then(|| turn.region.provider().to_owned()),
             delegated_output_tokens: None,
+            surface: turn.surface,
         })
     }
 

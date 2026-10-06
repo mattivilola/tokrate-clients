@@ -48,6 +48,68 @@ fn default_metric_version() -> String {
     CODEX_METRIC_VERSION.to_owned()
 }
 
+/// Where the coding tool ran. Only this category is stored and shared; the tool's own
+/// originator or entrypoint string never leaves the parser.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolSurface {
+    Cli,
+    Desktop,
+    Ide,
+    Sdk,
+    Other,
+}
+
+/// Editor hosts, matched anywhere in an originator or entrypoint (lowercased).
+const IDE_MARKERS: [&str; 4] = ["vscode", "jetbrains", "cursor", "windsurf"];
+
+impl ToolSurface {
+    /// Category of a Codex `session_meta.payload.originator`; `None` when absent or empty.
+    pub fn from_codex_originator(originator: Option<&str>) -> Option<Self> {
+        let value = originator?.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        Some(match value.as_str() {
+            "codex desktop" | "codex_work_desktop" => Self::Desktop,
+            "codex_cli_rs" | "codex-tui" | "codex_tui" => Self::Cli,
+            "codex_exec" => Self::Sdk,
+            _ if IDE_MARKERS.iter().any(|marker| value.contains(marker)) => Self::Ide,
+            _ if value.starts_with("codex_sdk") => Self::Sdk,
+            _ => Self::Other,
+        })
+    }
+
+    /// Category of a Claude Code transcript record's top-level `entrypoint`; `None` when absent
+    /// or empty.
+    pub fn from_claude_entrypoint(entrypoint: Option<&str>) -> Option<Self> {
+        let value = entrypoint?.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        Some(match value.as_str() {
+            "cli" => Self::Cli,
+            "claude-desktop" => Self::Desktop,
+            _ if IDE_MARKERS.iter().any(|marker| value.contains(marker))
+                || value.contains("ide") =>
+            {
+                Self::Ide
+            }
+            _ if value.starts_with("sdk") => Self::Sdk,
+            _ => Self::Other,
+        })
+    }
+}
+
+/// A stored surface this version does not know (or of another type) is unknown, not an error.
+fn deserialize_surface<'de, D>(deserializer: D) -> Result<Option<ToolSurface>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 /// One completed coding-tool turn, normalized without prompts, responses, or source paths.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +158,10 @@ pub struct TurnMetric {
     /// records it does not apply to (subagent turns, records saved before the field existed).
     #[serde(default)]
     pub delegated_output_tokens: Option<i64>,
+    /// Where the coding tool ran, as a category. `None` when unknown, for Grok Build and for
+    /// records saved before the field existed or holding a value this version does not know.
+    #[serde(default, deserialize_with = "deserialize_surface")]
+    pub surface: Option<ToolSurface>,
 }
 
 /// Per-turn totals over qualifying responses, accumulated by the parsers.
@@ -214,6 +280,7 @@ impl TurnMetric {
             response_count: None,
             provider_region: None,
             delegated_output_tokens: None,
+            surface: None,
         }
     }
 
@@ -268,6 +335,7 @@ impl TurnMetric {
             response_count: None,
             provider_region: None,
             delegated_output_tokens: None,
+            surface: None,
         }
     }
 }

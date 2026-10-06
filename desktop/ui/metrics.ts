@@ -29,6 +29,11 @@ export interface Metric {
    * `outputTokens`. null: not final yet, or not applicable (subagent and legacy records).
    */
   delegatedOutputTokens?: number | null;
+  /**
+   * Where the coding tool ran, as a category; null when unknown. Not part of cohort identity and
+   * not shown locally (shared with the community sample from 0.1.18).
+   */
+  surface?: "cli" | "desktop" | "ide" | "sdk" | "other" | null;
 }
 /** One qualifying API response from the live stream (local only, never persisted). */
 export interface LiveResponse {

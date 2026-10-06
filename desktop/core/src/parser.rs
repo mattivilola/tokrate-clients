@@ -1,7 +1,7 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
     response_qualifies, speed_is_plausible, ReportedReasoningEffort, ResponseMetric,
-    ResponseTotals, TurnMetric,
+    ResponseTotals, ToolSurface, TurnMetric,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Number, Value};
@@ -91,6 +91,7 @@ pub(crate) struct CodexEventParser {
     root_session: Option<String>,
     delegation_events: Vec<DelegationEvent>,
     client_version: Option<String>,
+    surface: Option<ToolSurface>,
     source_kind: String,
     provider: String,
     /// Latest turn start, user message or tool output: what triggers the next model request.
@@ -113,6 +114,7 @@ impl CodexEventParser {
             root_session: None,
             delegation_events: Vec::new(),
             client_version: None,
+            surface: None,
             source_kind: "unknown".to_owned(),
             provider: "unknown".to_owned(),
             latest_trigger: None,
@@ -299,6 +301,7 @@ impl CodexEventParser {
             response_count,
             provider_region: None,
             delegated_output_tokens: None,
+            surface: self.surface,
         };
         if self.source_kind == "primary" {
             // The root session joins this turn with the delegated work started during it.
@@ -490,6 +493,10 @@ impl CodexEventParser {
             .and_then(Value::as_str)
             .filter(|value| safe_identifier(value, 40, true))
             .map(str::to_owned);
+        // `source` is unreliable (the desktop app reports "vscode"); only the category of the
+        // originator is kept, never the string itself.
+        self.surface =
+            ToolSurface::from_codex_originator(payload.get("originator").and_then(Value::as_str));
         self.provider = if payload.get("model_provider").and_then(Value::as_str) == Some("openai") {
             "openai".to_owned()
         } else {

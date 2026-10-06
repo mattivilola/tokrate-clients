@@ -1,5 +1,5 @@
 use crate::model::{
-    bedrock_region_or_unknown, ReportedReasoningEffort, TurnMetric, CLAUDE_CLIENT,
+    bedrock_region_or_unknown, ReportedReasoningEffort, ToolSurface, TurnMetric, CLAUDE_CLIENT,
     CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT,
     CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
     GROK_PARSER_VERSION,
@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.17";
+pub const APP_VERSION: &str = "0.1.18";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -51,6 +51,8 @@ pub struct SharedSample {
     /// Output tokens of subagent work the turn started (always serialized): a number for
     /// primary turns, null for every other source kind.
     pub delegated_output_tokens: Option<i64>,
+    /// Where the coding tool ran, as a category (always serialized, null when unknown).
+    pub surface: Option<ToolSurface>,
 }
 
 impl SharedSample {
@@ -159,6 +161,7 @@ impl SharedSample {
             provider_region: (provider == "amazon-bedrock")
                 .then(|| bedrock_region_or_unknown(metric.provider_region.as_deref()).to_owned()),
             delegated_output_tokens,
+            surface: metric.surface,
         })
     }
 }

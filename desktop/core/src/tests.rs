@@ -1148,7 +1148,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.17");
+    assert_eq!(sample.app_version, "0.1.18");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1185,6 +1185,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
             "responseOutputTokens",
             "sampleId",
             "sourceKind",
+            "surface",
             "ttftMs"
         ]
     );
@@ -1919,7 +1920,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::seconds(3));
     let retry = queue.batch(now + Duration::seconds(3));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.17");
+    assert_eq!(first[0].app_version, "0.1.18");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -1976,6 +1977,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     claude.response_duration_seconds = Some(8.0);
     claude.response_count = Some(2);
     claude.delegated_output_tokens = Some(350);
+    claude.surface = Some(crate::ToolSurface::Cli);
     let mut bedrock = TurnMetric::new_observed(
         "local-bedrock-digest".into(),
         completed,
@@ -1996,6 +1998,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     bedrock.response_count = Some(3);
     bedrock.provider_region = Some("eu".into());
     bedrock.delegated_output_tokens = Some(0);
+    bedrock.surface = Some(crate::ToolSurface::Desktop);
     let subagent = TurnMetric::new_observed(
         "local-subagent-digest".into(),
         completed,
@@ -2064,7 +2067,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.17-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.18-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2072,7 +2075,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.17-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.18-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2094,7 +2097,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.17");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.18");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2116,6 +2119,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][1]["delegatedOutputTokens"], 0);
     assert_eq!(actual["samples"][2]["delegatedOutputTokens"], Value::Null);
     assert_eq!(actual["samples"][3]["delegatedOutputTokens"], 0);
+    // The surface category is always present: a name when known, null otherwise (Grok, subagent).
+    assert_eq!(actual["samples"][0]["surface"], "cli");
+    assert_eq!(actual["samples"][1]["surface"], Value::Null);
+    assert_eq!(actual["samples"][2]["surface"], Value::Null);
+    assert_eq!(actual["samples"][3]["surface"], "desktop");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2585,7 +2593,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.17");
+    assert_eq!(crate::APP_VERSION, "0.1.18");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -6189,4 +6197,254 @@ fn claude_parsers_report_primary_turns_and_subagent_work_through_the_side_channe
             },
         ]
     );
+}
+
+// --- Tool surface (0.1.18) -------------------------------------------------------------------
+
+use crate::ToolSurface;
+
+#[test]
+fn codex_originators_map_to_surface_categories() {
+    let cases = [
+        (Some("Codex Desktop"), Some(ToolSurface::Desktop)),
+        (Some("codex_work_desktop"), Some(ToolSurface::Desktop)),
+        (Some("codex_cli_rs"), Some(ToolSurface::Cli)),
+        (Some("codex-tui"), Some(ToolSurface::Cli)),
+        (Some("codex_tui"), Some(ToolSurface::Cli)),
+        (Some("codex_vscode"), Some(ToolSurface::Ide)),
+        (Some("codex_exec"), Some(ToolSurface::Sdk)),
+        (Some("codex_sdk_ts"), Some(ToolSurface::Sdk)),
+        (Some("vibe-codex-executor"), Some(ToolSurface::Other)),
+        (Some("buzz-acp"), Some(ToolSurface::Other)),
+        (Some("t3code_desktop"), Some(ToolSurface::Other)),
+        (Some("bb"), Some(ToolSurface::Other)),
+        // Case and surrounding whitespace do not matter; editor hosts match anywhere.
+        (Some("  CODEX DESKTOP "), Some(ToolSurface::Desktop)),
+        (Some("Codex_CLI_RS"), Some(ToolSurface::Cli)),
+        (Some("my-JetBrains-plugin"), Some(ToolSurface::Ide)),
+        (Some("cursor-agent"), Some(ToolSurface::Ide)),
+        (Some("windsurf"), Some(ToolSurface::Ide)),
+        (Some(""), None),
+        (Some("   "), None),
+        (None, None),
+    ];
+    for (originator, expected) in cases {
+        assert_eq!(
+            ToolSurface::from_codex_originator(originator),
+            expected,
+            "{originator:?}"
+        );
+    }
+}
+
+#[test]
+fn claude_entrypoints_map_to_surface_categories() {
+    let cases = [
+        (Some("cli"), Some(ToolSurface::Cli)),
+        (Some("claude-desktop"), Some(ToolSurface::Desktop)),
+        (Some("claude-vscode"), Some(ToolSurface::Ide)),
+        (Some("claude-jetbrains"), Some(ToolSurface::Ide)),
+        (Some("claude-ide"), Some(ToolSurface::Ide)),
+        (Some("sdk-ts"), Some(ToolSurface::Sdk)),
+        (Some("sdk-py"), Some(ToolSurface::Sdk)),
+        (Some("mcp"), Some(ToolSurface::Other)),
+        (Some(" CLI "), Some(ToolSurface::Cli)),
+        (Some(""), None),
+        (None, None),
+    ];
+    for (entrypoint, expected) in cases {
+        assert_eq!(
+            ToolSurface::from_claude_entrypoint(entrypoint),
+            expected,
+            "{entrypoint:?}"
+        );
+    }
+}
+
+fn codex_turn_with_meta(meta: Value) -> TurnMetric {
+    let mut parser = crate::parser::CodexEventParser::new("file".into());
+    let timestamp = "2026-10-03T10:00:00Z";
+    parser.consume(&event("session_meta", meta, timestamp));
+    parser.consume(&event(
+        "turn_context",
+        json!({ "turn_id": "turn", "model": "gpt-test", "effort": "high" }),
+        timestamp,
+    ));
+    parser.consume(&event(
+        "token_usage_record",
+        json!({ "turn_id": "turn", "turn_token_usage": { "output_tokens": 13 } }),
+        timestamp,
+    ));
+    parser.consume(&event(
+        "event_msg",
+        json!({ "type": "task_started", "turn_id": "turn", "started_at": timestamp }),
+        timestamp,
+    ));
+    parser
+        .consume(&event(
+            "event_msg",
+            json!({
+                "type": "task_complete",
+                "turn_id": "turn",
+                "started_at": timestamp,
+                "completed_at": "2026-10-03T10:00:02Z",
+            }),
+            "2026-10-03T10:00:02Z",
+        ))
+        .unwrap()
+}
+
+#[test]
+fn codex_surface_comes_from_the_originator_never_from_the_source() {
+    let surface = |meta: Value| {
+        let turn = codex_turn_with_meta(meta);
+        let json = serde_json::to_string(&turn).unwrap();
+        // Only the category is stored; the originator string itself is never kept.
+        assert!(!json.contains("Codex Desktop") && !json.contains("private-tool"));
+        turn.surface
+    };
+    // The desktop app reports source "vscode": the originator decides.
+    assert_eq!(
+        surface(json!({"id":"s","source":"vscode","originator":"Codex Desktop"})),
+        Some(ToolSurface::Desktop)
+    );
+    assert_eq!(
+        surface(json!({"id":"s","source":"cli","originator":"codex_cli_rs"})),
+        Some(ToolSurface::Cli)
+    );
+    assert_eq!(
+        surface(json!({"id":"s","source":"cli","originator":"private-tool"})),
+        Some(ToolSurface::Other)
+    );
+    // Without a usable originator the surface is unknown, whatever the source says.
+    assert_eq!(surface(json!({"id":"s","source":"vscode"})), None);
+    assert_eq!(
+        surface(json!({"id":"s","source":"cli","originator":""})),
+        None
+    );
+    assert_eq!(
+        surface(json!({"id":"s","source":"cli","originator":7})),
+        None
+    );
+}
+
+fn with_entrypoint(line: Vec<u8>, entrypoint: &str) -> Vec<u8> {
+    let mut record: Value = serde_json::from_slice(&line).unwrap();
+    record["entrypoint"] = json!(entrypoint);
+    serde_json::to_vec(&record).unwrap()
+}
+
+#[test]
+fn claude_surface_comes_from_the_prompt_record_else_the_assistant_records() {
+    let start = "2026-10-03T10:00:00Z";
+    let end = "2026-10-03T10:00:10Z";
+    let turn = |prompt_entrypoint: Option<&str>, call: Option<&str>, last: Option<&str>| {
+        let mut parser = claude_parser();
+        let prompt = claude_user(start, "human", json!("synthetic"));
+        parser.consume_settled(&match prompt_entrypoint {
+            Some(value) => with_entrypoint(prompt, value),
+            None => prompt,
+        });
+        let first = assistant("2026-10-03T10:00:05Z", "call-1", "tool_use", 5);
+        parser.consume_settled(&match call {
+            Some(value) => with_entrypoint(first, value),
+            None => first,
+        });
+        let final_record = assistant(end, "call-2", "end_turn", 7);
+        parser
+            .consume_settled(&match last {
+                Some(value) => with_entrypoint(final_record, value),
+                None => final_record,
+            })
+            .unwrap()
+    };
+    let result = turn(Some("cli"), None, None);
+    assert_eq!(result.surface, Some(ToolSurface::Cli));
+    // The prompt record wins over later assistant records; the first non-empty value wins.
+    assert_eq!(
+        turn(Some("claude-desktop"), Some("cli"), None).surface,
+        Some(ToolSurface::Desktop)
+    );
+    assert_eq!(
+        turn(None, Some("claude-vscode"), Some("cli")).surface,
+        Some(ToolSurface::Ide)
+    );
+    assert_eq!(
+        turn(None, None, Some("sdk-ts")).surface,
+        Some(ToolSurface::Sdk)
+    );
+    assert_eq!(
+        turn(Some(""), None, Some("mcp")).surface,
+        Some(ToolSurface::Other)
+    );
+    assert_eq!(turn(None, None, None).surface, None);
+    // Only the category is kept, never the entrypoint string.
+    assert!(
+        !serde_json::to_string(&turn(Some("secret-ide-host"), None, None))
+            .unwrap()
+            .contains("secret-ide-host")
+    );
+}
+
+#[test]
+fn grok_turns_carry_no_surface() {
+    let steps = grok_call_steps(&[20_000]);
+    assert_eq!(grok_single_record(&steps, 2_000, json!(1)).surface, None);
+}
+
+#[test]
+fn surface_round_trips_through_history_and_decodes_missing_or_unknown_values() {
+    let now = time("2026-10-03T12:00:00Z");
+    let directory = TestDir::new();
+    let path = directory.path().join("history.json");
+    let mut known = metric("known", now - Duration::hours(1));
+    known.surface = Some(ToolSurface::Ide);
+    let plain = metric("plain", now - Duration::hours(2));
+    assert_eq!(plain.surface, None);
+    let mut history = History::default();
+    history.merge(&[known.clone(), plain.clone()], now);
+    history.save(&path).unwrap();
+    let loaded = History::load(&path, now).unwrap();
+    let by_id = |id: &str| {
+        loaded
+            .records()
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap()
+            .surface
+    };
+    assert_eq!(by_id("known"), Some(ToolSurface::Ide));
+    assert_eq!(by_id("plain"), None);
+    let encoded = serde_json::to_value(&known).unwrap();
+    assert_eq!(encoded["surface"], "ide");
+
+    // A record saved before the field existed has no key; a value from a future version, or of
+    // another type, is unknown rather than a failure that would drop the record.
+    let mut legacy = serde_json::to_value(&known).unwrap();
+    legacy.as_object_mut().unwrap().remove("surface");
+    let restored: TurnMetric = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(restored.surface, None);
+    for stored in [json!("terminal-v9"), json!(7), json!(["cli"]), Value::Null] {
+        legacy["surface"] = stored;
+        let restored: TurnMetric = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(restored.surface, None);
+        assert_eq!(restored.id, "known");
+    }
+    legacy["surface"] = json!("sdk");
+    let restored: TurnMetric = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.surface, Some(ToolSurface::Sdk));
+}
+
+#[test]
+fn shared_samples_always_serialize_the_surface() {
+    let mut turn = metric("surface", time("2026-10-03T10:00:00Z"));
+    let share = |turn: &TurnMetric| {
+        serde_json::to_value(crate::SharedSample::from_metric(turn, Uuid::new_v4()).unwrap())
+            .unwrap()
+    };
+    let unknown = share(&turn);
+    assert!(unknown.as_object().unwrap().contains_key("surface"));
+    assert_eq!(unknown["surface"], Value::Null);
+    turn.surface = Some(ToolSurface::Desktop);
+    assert_eq!(share(&turn)["surface"], "desktop");
 }
