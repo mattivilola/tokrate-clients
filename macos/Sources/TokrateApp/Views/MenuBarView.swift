@@ -1,19 +1,73 @@
 import SwiftUI
 import TokrateCore
 
-/// The menu-bar popover: header, hero speed, trend, your models, community line, footer.
+/// The menu-bar popover. Its dashboard (snapshot, gauge, charts) only exists while the window is on
+/// screen: see `WindowVisibilityGate`. While hidden this view reads no `HistoryStore` state, and
+/// the gate keeps the last height so the window does not resize when it is shown again.
 struct MenuBarView: View {
     static let width: CGFloat = 360
     /// The popover grows with its content up to this height, then scrolls.
     static let maximumHeight: CGFloat = 600
 
-    @Bindable var store: HistoryStore
-    @ObservedObject var updates: AppUpdates
+    let store: HistoryStore
+    let updates: AppUpdates
     var showInitialConsentDashboard: () -> Bool
     private let maximumHeight: CGFloat
+    private let followsWindowVisibility: Bool
+    private let isWindowVisible: Bool?
+    // State that must survive hiding and showing the popover lives here, above the gate.
     @State private var range: DashboardRange
     @State private var showsDetails: Bool
     @State private var contentHeight: CGFloat = MenuBarView.maximumHeight
+
+    /// `followsWindowVisibility: false` (previews, tests) always renders the dashboard.
+    /// `isWindowVisible` overrides the initial visibility.
+    init(
+        store: HistoryStore,
+        updates: AppUpdates,
+        showInitialConsentDashboard: @escaping () -> Bool = { false },
+        range: DashboardRange = .day,
+        showsDetails: Bool = false,
+        maximumHeight: CGFloat = MenuBarView.maximumHeight,
+        followsWindowVisibility: Bool = false,
+        isWindowVisible: Bool? = nil
+    ) {
+        self.maximumHeight = maximumHeight
+        self.store = store
+        self.updates = updates
+        self.showInitialConsentDashboard = showInitialConsentDashboard
+        self.followsWindowVisibility = followsWindowVisibility
+        self.isWindowVisible = isWindowVisible
+        _range = State(initialValue: range)
+        _showsDetails = State(initialValue: showsDetails)
+    }
+
+    var body: some View {
+        WindowVisibilityGate(tracksWindow: followsWindowVisibility, isVisible: isWindowVisible, keepsHeight: true) {
+            MenuBarDashboardView(
+                store: store,
+                updates: updates,
+                showInitialConsentDashboard: showInitialConsentDashboard,
+                maximumHeight: maximumHeight,
+                range: $range,
+                showsDetails: $showsDetails,
+                contentHeight: $contentHeight
+            )
+        }
+        .frame(width: Self.width)
+        .background(DashboardStyle.surface)
+    }
+}
+
+/// The popover's content: header, hero speed, trend, your models, community line, footer.
+private struct MenuBarDashboardView: View {
+    let store: HistoryStore
+    @ObservedObject var updates: AppUpdates
+    var showInitialConsentDashboard: () -> Bool
+    let maximumHeight: CGFloat
+    @Binding var range: DashboardRange
+    @Binding var showsDetails: Bool
+    @Binding var contentHeight: CGFloat
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @AppStorage("showProviderBadge") private var showProviderBadge = true
     @AppStorage("showToolChip") private var showToolChip = true
@@ -21,22 +75,6 @@ struct MenuBarView: View {
     @Environment(\.openSettings) private var openSettings
 
     private static let chromeHeight: CGFloat = 104
-
-    init(
-        store: HistoryStore,
-        updates: AppUpdates,
-        showInitialConsentDashboard: @escaping () -> Bool = { false },
-        range: DashboardRange = .day,
-        showsDetails: Bool = false,
-        maximumHeight: CGFloat = MenuBarView.maximumHeight
-    ) {
-        self.maximumHeight = maximumHeight
-        self.store = store
-        self.updates = updates
-        self.showInitialConsentDashboard = showInitialConsentDashboard
-        _range = State(initialValue: range)
-        _showsDetails = State(initialValue: showsDetails)
-    }
 
     var body: some View {
         let now = Date.now
@@ -66,7 +104,7 @@ struct MenuBarView: View {
             Divider().overlay(DashboardStyle.line)
             footer
         }
-        .frame(width: Self.width)
+        .frame(width: MenuBarView.width)
         .background(DashboardStyle.surface)
         .tint(DashboardStyle.accent)
     }

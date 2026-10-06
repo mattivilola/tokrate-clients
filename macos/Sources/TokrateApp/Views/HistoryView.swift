@@ -2,11 +2,26 @@ import Charts
 import SwiftUI
 import TokrateCore
 
+/// Root of the history window. The window stays alive after it is closed, so the history only
+/// renders while the window is on screen; the selected range survives closing.
+struct HistoryWindowView: View {
+    let store: HistoryStore
+    let updates: AppUpdates
+    @State private var range: DashboardRange = .week
+
+    var body: some View {
+        WindowVisibilityGate {
+            HistoryView(store: store, updates: updates, range: $range)
+        }
+        .frame(minWidth: 820, minHeight: 680)
+    }
+}
+
 /// The full history window: filters, a large gauge, the trend chart, summaries and the latest 500 turns.
 struct HistoryView: View {
     @Bindable var store: HistoryStore
     @ObservedObject var updates: AppUpdates
-    @State private var range: DashboardRange = .week
+    @Binding var range: DashboardRange
 
     var body: some View {
         let now = Date.now

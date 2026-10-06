@@ -70,7 +70,8 @@ struct TokrateApp: App {
             MenuBarView(
                 store: historyStore,
                 updates: appDelegate.updates,
-                showInitialConsentDashboard: { appDelegate.showInitialConsentDashboard() }
+                showInitialConsentDashboard: { appDelegate.showInitialConsentDashboard() },
+                followsWindowVisibility: true
             )
         } label: {
             MenuBarLabel(readout: historyStore.menuBarReadout, showsSpeed: showMenuBarSpeed, showsBadge: showProviderBadge, showsToolChip: showToolChip)
@@ -78,8 +79,7 @@ struct TokrateApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Tokrate", id: "history") {
-            HistoryView(store: historyStore, updates: appDelegate.updates)
-                .frame(minWidth: 820, minHeight: 680)
+            HistoryWindowView(store: historyStore, updates: appDelegate.updates)
         }
         .defaultSize(width: 940, height: 780)
         .commands {

@@ -64,9 +64,9 @@ final class PreviewRenderTests: XCTestCase {
 
             // Full history.
             let history = try await makeFixture(work: work, sharing: .contributing, records: PreviewData.records())
-            render(HistoryView(store: history.store, updates: history.updates).frame(width: 960, height: 1280), dark: dark, to: output, name: "history-\(mode)", fixedSize: CGSize(width: 960, height: 1280))
+            render(HistoryView(store: history.store, updates: history.updates, range: .constant(.week)).frame(width: 960, height: 1280), dark: dark, to: output, name: "history-\(mode)", fixedSize: CGSize(width: 960, height: 1280))
             history.store.dashboardSelection = .all
-            render(HistoryView(store: history.store, updates: history.updates).frame(width: 960, height: 1100), dark: dark, to: output, name: "history-compare-all-\(mode)", fixedSize: CGSize(width: 960, height: 1100))
+            render(HistoryView(store: history.store, updates: history.updates, range: .constant(.week)).frame(width: 960, height: 1100), dark: dark, to: output, name: "history-compare-all-\(mode)", fixedSize: CGSize(width: 960, height: 1100))
             history.store.stopMonitoring()
 
             // Efficiency indicator: popover chart, compact comparison and the history window comparison.
