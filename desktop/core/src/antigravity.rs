@@ -3,7 +3,7 @@
 
 use crate::antigravity_db::read_database;
 use crate::antigravity_turns::{finished_turns, live_calls};
-use crate::model::{ResponseMetric, TurnMetric};
+use crate::model::{ResponseMetric, ToolSurface, TurnMetric};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -11,11 +11,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// The data folders under the root that hold `<conversationId>.db` files.
-const CONVERSATION_FOLDERS: [&str; 3] = [
-    "antigravity/conversations",
-    "antigravity-ide/conversations",
-    "antigravity-cli/conversations",
+/// The data folders under the root that hold `<conversationId>.db` files, with the surface of
+/// the Antigravity product that writes to each: the app, the IDE and the `agy` CLI.
+const CONVERSATION_FOLDERS: [(&str, ToolSurface); 3] = [
+    ("antigravity/conversations", ToolSurface::Desktop),
+    ("antigravity-ide/conversations", ToolSurface::Ide),
+    ("antigravity-cli/conversations", ToolSurface::Cli),
 ];
 /// The history retention: databases untouched for longer are not opened.
 const RETENTION_DAYS: i64 = 7;
@@ -90,12 +91,23 @@ impl<T: std::hash::Hash + Eq + Clone> Remembered<T> {
     }
 }
 
+/// Delay before retrying a database after `failures` consecutive failed reads: 10 s, doubling up to
+/// 5 minutes, so a permanently unreadable file is not reopened on every poll.
+pub(crate) fn retry_delay(failures: u32) -> Duration {
+    Duration::seconds((10_i64 << failures.saturating_sub(1).min(5)).min(300))
+}
+
 struct Conversation {
     id: String,
+    /// Where the database was found.
+    surface: ToolSurface,
     /// The signature the last successful read saw; `None` until one succeeds.
     read_at: Option<Signature>,
     /// Orders re-reads: databases serviced longest ago go first.
     serviced: u64,
+    /// Consecutive failed reads; a failing database waits `retry_delay(failures)` before the next try.
+    failures: u32,
+    retry_at: Option<DateTime<Utc>>,
     emitted: Remembered<String>,
     published: Remembered<i64>,
 }
@@ -103,6 +115,7 @@ struct Conversation {
 struct Candidate {
     path: PathBuf,
     id: String,
+    surface: ToolSurface,
 }
 
 /// Bounded reader for Antigravity conversation databases.
@@ -137,7 +150,7 @@ impl AntigravityMonitor {
     pub fn has_conversation_folder(root: &Path) -> bool {
         CONVERSATION_FOLDERS
             .iter()
-            .any(|folder| root.join(folder).is_dir())
+            .any(|(folder, _)| root.join(folder).is_dir())
     }
 
     pub fn poll(&mut self, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
@@ -167,8 +180,10 @@ impl AntigravityMonitor {
             .iter()
             .filter_map(|(path, conversation)| {
                 let signature = Signature::of(path)?;
-                (signature.modified()? >= cutoff && conversation.read_at != Some(signature))
-                    .then(|| (path.clone(), signature))
+                (signature.modified()? >= cutoff
+                    && conversation.read_at != Some(signature)
+                    && conversation.retry_at.is_none_or(|retry_at| retry_at <= now))
+                .then(|| (path.clone(), signature))
             })
             .collect();
         stale.sort_by(|left, right| {
@@ -188,16 +203,20 @@ impl AntigravityMonitor {
             };
             self.ticks += 1;
             conversation.serviced = self.ticks;
-            // An unreadable database is skipped for now and retried on the next poll.
+            // An unreadable database (locked, corrupt, another schema) is retried with a growing delay.
             let Ok(snapshot) = read_database(&path) else {
+                conversation.failures = conversation.failures.saturating_add(1);
+                conversation.retry_at = Some(now + retry_delay(conversation.failures));
                 continue;
             };
+            conversation.failures = 0;
+            conversation.retry_at = None;
             conversation.read_at = Some(signature);
             self.bytes_read_last_poll += snapshot.bytes_read;
             if snapshot.is_subagent {
                 continue;
             }
-            for turn in finished_turns(&conversation.id, &snapshot) {
+            for turn in finished_turns(&conversation.id, conversation.surface, &snapshot) {
                 if !conversation.emitted.contains(&turn.execution_id) {
                     conversation.emitted.insert(turn.execution_id);
                     records.push(turn.metric);
@@ -233,7 +252,7 @@ impl AntigravityMonitor {
         let cutoff = now - Duration::days(RETENTION_DAYS);
         let mut found: Vec<(DateTime<Utc>, Candidate)> = Vec::new();
         let mut visited = 0;
-        for folder in CONVERSATION_FOLDERS {
+        for (folder, surface) in CONVERSATION_FOLDERS {
             let Ok(entries) = fs::read_dir(self.root.join(folder)) else {
                 continue;
             };
@@ -266,6 +285,7 @@ impl AntigravityMonitor {
                         Candidate {
                             path,
                             id: id.to_owned(),
+                            surface,
                         },
                     ));
                 }
@@ -285,8 +305,11 @@ impl AntigravityMonitor {
                 .entry(candidate.path)
                 .or_insert_with(|| Conversation {
                     id: candidate.id,
+                    surface: candidate.surface,
                     read_at: None,
                     serviced: 0,
+                    failures: 0,
+                    retry_at: None,
                     emitted: Remembered::new(),
                     published: Remembered::new(),
                 });

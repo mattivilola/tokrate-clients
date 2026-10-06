@@ -7,6 +7,7 @@ final class AntigravityConversationMonitorTests: XCTestCase {
     private var root: URL!
     private var bumps = 0
     private let conversationID = "11111111-2222-3333-4444-555555555555"
+    private static let safetyNet = AntigravityConversationMonitor.discoveryInterval
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("tokrate-antigravity-\(UUID().uuidString)", isDirectory: true)
@@ -80,6 +81,12 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: Date.now.addingTimeInterval(Double(bumps))], ofItemAtPath: database.url.path)
     }
 
+    /// What the folder watcher would report for a changed database.
+    @discardableResult
+    private func notify(_ monitor: AntigravityConversationMonitor, _ database: SyntheticAntigravityDatabase, wal: Bool = false) async -> Bool {
+        await monitor.noteChanges(SessionFolderChange(paths: [database.url.standardizedFileURL.path + (wal ? "-wal" : "")]))
+    }
+
     private func onlyMetric(_ update: MonitorUpdate, file: StaticString = #filePath, line: UInt = #line) throws -> TurnMetric {
         XCTAssertEqual(update.metrics.count, 1, file: file, line: line)
         return try XCTUnwrap(update.metrics.first, file: file, line: line)
@@ -140,10 +147,12 @@ final class AntigravityConversationMonitorTests: XCTestCase {
 
         try database.setExecutor(id: "exec-1", state: 4, variant: "gemini-3.8-flash-medium")
         try bump(database)
+        await notify(monitor, database)
         let finished = await monitor.poll()
         XCTAssertEqual(finished.metrics.count, 1)
 
         try bump(database)
+        await notify(monitor, database)
         let readsBefore = await monitor.databaseReadCount
         let again = await monitor.poll()
         XCTAssertTrue(again.metrics.isEmpty, "an emitted execution is not emitted again")
@@ -390,10 +399,12 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         // A new call arrives; the earlier one is not published again.
         try database.addStep(SyntheticStep(execution: "exec-1", created: 140, completed: 150, output: 1_500, generation: nil))
         try bump(database)
+        await notify(monitor, database)
         let second = await monitor.poll()
         XCTAssertEqual(second.responses.map(\.outputTokens), [1_500])
 
         try bump(database)
+        await notify(monitor, database)
         let third = await monitor.poll()
         XCTAssertTrue(third.responses.isEmpty)
         XCTAssertFalse(response.id.contains(conversationID), "the local id carries no conversation id")
@@ -550,12 +561,13 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertEqual(reads, 1, "unchanged databases are not opened")
 
         try bump(database)
+        await notify(monitor, database)
         _ = await monitor.poll(now: start.addingTimeInterval(6))
         reads = await monitor.databaseReadCount
         XCTAssertEqual(reads, 2)
 
         // A discovery pass sees the same signature and does not re-read either.
-        _ = await monitor.poll(now: start.addingTimeInterval(30))
+        _ = await monitor.poll(now: start.addingTimeInterval(Self.safetyNet + 30))
         reads = await monitor.databaseReadCount
         XCTAssertEqual(reads, 2)
     }
@@ -574,6 +586,7 @@ final class AntigravityConversationMonitorTests: XCTestCase {
 
         try database.setExecutor(id: "exec-1", state: 4, variant: "gemini-3.8-flash-medium")
         try FileManager.default.setAttributes([.modificationDate: Date.now.addingTimeInterval(5)], ofItemAtPath: walPath)
+        await notify(monitor, database, wal: true)
         let update = await monitor.poll(now: start.addingTimeInterval(2))
         XCTAssertEqual(update.metrics.count, 1, "the finished state exists only in the write-ahead log")
         XCTAssertEqual(update.metrics.first?.outputTokens, 1_700)
@@ -667,6 +680,192 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertFalse(set.contains(97))
     }
 
+    // MARK: Surface
+
+    func testSurfaceFollowsTheFolderTheDatabaseWasFoundIn() async throws {
+        let expected = [("antigravity", "desktop"), ("antigravity-ide", "ide"), ("antigravity-cli", "cli")]
+        for (folder, _) in expected {
+            let database = try makeDatabase("conversation-\(folder)", folder: folder)
+            try addRun(database, calls: standardCalls)
+        }
+        let update = await monitor().poll()
+        XCTAssertEqual(update.metrics.count, 3)
+        for (folder, surface) in expected {
+            let metric = try XCTUnwrap(update.metrics.first { $0.id == digest("antigravity|conversation-\(folder)|exec-1") })
+            XCTAssertEqual(metric.surface?.rawValue, surface, folder)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(SharedSample(metric))) as? [String: Any])
+            XCTAssertEqual(json["surface"] as? String, surface, folder)
+            // The surface survives the settle re-emission and a save/load round trip.
+            XCTAssertEqual(metric.withDelegatedOutputTokens(0).surface?.rawValue, surface)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            XCTAssertEqual(try decoder.decode(TurnMetric.self, from: encoder.encode(metric)).surface?.rawValue, surface)
+        }
+    }
+
+    // MARK: Ambiguous executors
+
+    func testAnExecutionIdWithMoreThanOneExecutorRowIsSkipped() async throws {
+        let database = try makeDatabase()
+        try addRun(database, execution: "exec-1", calls: standardCalls)
+        try database.addExecutor(id: "exec-1", state: 4, variant: "gemini-3.8-flash-high")
+        try addRun(database, execution: "exec-2", calls: [Call(created: 100, completed: 110, output: 1_000)])
+        let update = await monitor(liveSince: .distantPast).poll()
+        XCTAssertEqual(update.metrics.map(\.id), [digest("antigravity|\(conversationID)|exec-2")], "exec-1 is ambiguous")
+        // Responses are newest first: exec-2's call, then the two qualifying calls of the ambiguous exec-1.
+        XCTAssertEqual(update.responses.map(\.outputTokens), [1_000, 550, 1_000])
+        XCTAssertEqual(update.responses.map(\.reasoningEffort), ["medium", nil, nil], "no effort for calls whose execution has two executor rows")
+    }
+
+    // MARK: Folder watcher
+
+    func testNoteChangesIgnoresEverythingExceptDatabasesInTheConversationFolders() async throws {
+        let database = try makeDatabase()
+        try addRun(database, calls: standardCalls)
+        let monitor = monitor()
+        _ = await monitor.poll()
+        let folder = database.url.deletingLastPathComponent().standardizedFileURL.path
+        let gemini = root.standardizedFileURL.path
+        let irrelevant: Set<String> = [
+            "\(gemini)/antigravity/brain/abc/overview.txt",
+            "\(gemini)/antigravity/implicit/x.pb",
+            "\(gemini)/tmp/session/chat.json",
+            "\(gemini)/GEMINI.md",
+            "\(folder)/legacy.pb",
+            "\(folder)/\(conversationID).db-shm",
+            "\(folder)/\(conversationID).db-journal",
+            "\(folder)/nested/deep.db",
+            "\(gemini)/antigravity-backup/conversations/\(conversationID).db",
+            "\(folder)/.db",
+            "\(folder)/.db-wal"
+        ]
+        let noted = await monitor.noteChanges(SessionFolderChange(paths: irrelevant))
+        XCTAssertFalse(noted)
+        let deadline = await monitor.nextPollDeadline(now: .now)
+        XCTAssertNil(deadline, "irrelevant churn leaves nothing pending")
+        let reads = await monitor.databaseReadCount
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testDatabaseAndWalChangesAreReadOnTheNextPoll() async throws {
+        let database = try makeDatabase(writeAheadLog: true)
+        try addRun(database, state: 3, calls: standardCalls)
+        let monitor = monitor()
+        let start = Date.now
+        _ = await monitor.poll(now: start)
+        let idle = await monitor.nextPollDeadline(now: start)
+        XCTAssertNil(idle, "caught up")
+
+        for wal in [false, true] {
+            try database.setExecutor(id: "exec-1", state: wal ? 4 : 3, variant: nil)
+            try FileManager.default.setAttributes([.modificationDate: Date.now.addingTimeInterval(Double(bumps + 10))], ofItemAtPath: database.url.path + (wal ? "-wal" : ""))
+            bumps += 10
+            let noted = await notify(monitor, database, wal: wal)
+            XCTAssertTrue(noted, wal ? "-wal" : ".db")
+            let deadline = await monitor.nextPollDeadline(now: start)
+            XCTAssertEqual(deadline, start, "a changed database is pending")
+            let update = await monitor.poll(now: start.addingTimeInterval(2))
+            XCTAssertEqual(update.metrics.count, wal ? 1 : 0)
+            let after = await monitor.nextPollDeadline(now: start.addingTimeInterval(2))
+            XCTAssertNil(after)
+        }
+        // A report for an unchanged database has nothing to read.
+        let unchanged = await notify(monitor, database)
+        XCTAssertFalse(unchanged)
+    }
+
+    func testANewDatabaseTriggersDiscoveryAndAVanishedOneIsDropped() async throws {
+        let first = try makeDatabase("first")
+        try addRun(first, calls: standardCalls)
+        let monitor = monitor()
+        let start = Date.now
+        let initial = await monitor.poll(now: start)
+        XCTAssertEqual(initial.metrics.count, 1)
+
+        let second = try makeDatabase("second", folder: "antigravity-cli")
+        try addRun(second, calls: standardCalls)
+        // Without a report the new file waits for the safety net.
+        let quiet = await monitor.poll(now: start.addingTimeInterval(2))
+        XCTAssertTrue(quiet.metrics.isEmpty)
+
+        let noted = await notify(monitor, second)
+        XCTAssertTrue(noted)
+        let deadline = await monitor.nextPollDeadline(now: start)
+        XCTAssertEqual(deadline, start, "discovery is due")
+        let discovered = await monitor.poll(now: start.addingTimeInterval(4))
+        XCTAssertEqual(discovered.metrics.map(\.id), [digest("antigravity|second|exec-1")])
+        let status = await monitor.status()
+        XCTAssertEqual(status.conversations, 2)
+
+        try FileManager.default.removeItem(at: first.url)
+        let vanished = await notify(monitor, first)
+        XCTAssertTrue(vanished)
+        _ = await monitor.poll(now: start.addingTimeInterval(6))
+        let afterRemoval = await monitor.status()
+        XCTAssertEqual(afterRemoval.conversations, 1)
+    }
+
+    func testAConversationFolderEventAndALostEventTriggerDiscovery() async throws {
+        let monitor = monitor()
+        let folder = root.appendingPathComponent("antigravity/conversations", isDirectory: true).standardizedFileURL.path
+        let notedFolder = await monitor.noteChanges(SessionFolderChange(paths: [folder]))
+        XCTAssertTrue(notedFolder)
+        var deadline = await monitor.nextPollDeadline(now: .now)
+        XCTAssertNotNil(deadline)
+        _ = await monitor.poll()
+        deadline = await monitor.nextPollDeadline(now: .now)
+        XCTAssertNil(deadline)
+
+        let notedLoss = await monitor.noteChanges(SessionFolderChange(mustRescan: true))
+        XCTAssertTrue(notedLoss)
+        deadline = await monitor.nextPollDeadline(now: .now)
+        XCTAssertNotNil(deadline)
+    }
+
+    func testNextPollDeadlineCoversDeferredReadsAndRetryBackoff() async throws {
+        for index in 0..<10 {
+            let database = try makeDatabase("conversation-\(index)")
+            try addRun(database, calls: standardCalls)
+        }
+        let monitor = monitor()
+        let start = Date.now
+        _ = await monitor.poll(now: start)
+        var deadline = await monitor.nextPollDeadline(now: start)
+        XCTAssertEqual(deadline, start, "two reads were deferred by the per-poll cap")
+        _ = await monitor.poll(now: start.addingTimeInterval(2))
+        deadline = await monitor.nextPollDeadline(now: start.addingTimeInterval(2))
+        XCTAssertNil(deadline)
+
+        // An unreadable database is retried later, and the monitor asks to be polled then.
+        let garbage = databaseURL("garbage")
+        try Data("not sqlite".utf8).write(to: garbage)
+        let noted = await monitor.noteChanges(SessionFolderChange(paths: [garbage.standardizedFileURL.path]))
+        XCTAssertTrue(noted)
+        _ = await monitor.poll(now: start.addingTimeInterval(4))
+        let retry = await monitor.nextPollDeadline(now: start.addingTimeInterval(5))
+        XCTAssertEqual(retry, start.addingTimeInterval(14))
+        let due = await monitor.nextPollDeadline(now: start.addingTimeInterval(15))
+        XCTAssertEqual(due, start.addingTimeInterval(15), "the retry is due")
+    }
+
+    func testAnIdleMonitorDoesNoFileWorkUntilTheSafetyNet() async throws {
+        let database = try makeDatabase()
+        try addRun(database, calls: standardCalls)
+        let monitor = monitor()
+        let start = Date.now
+        _ = await monitor.poll(now: start)
+        // A change nobody reported is not seen between discoveries...
+        try addRun(database, execution: "exec-2", calls: [Call(created: 100, completed: 110, output: 1_000)])
+        try bump(database)
+        let unseen = await monitor.poll(now: start.addingTimeInterval(30))
+        XCTAssertTrue(unseen.metrics.isEmpty)
+        // ...but the safety-net discovery finds it.
+        let found = await monitor.poll(now: start.addingTimeInterval(Self.safetyNet + 1))
+        XCTAssertEqual(found.metrics.count, 1)
+    }
+
     // MARK: Sharing
 
     func testGoogleProviderIsSharedOnlyForAntigravityAndSampleCarriesTheTuple() async throws {
@@ -682,7 +881,8 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertEqual(json["reasoningEffort"] as? String, "medium")
         XCTAssertEqual(json["sourceKind"] as? String, "primary")
         XCTAssertEqual(json["delegatedOutputTokens"] as? Int, 0)
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.17", "the app version is owned elsewhere")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.18")
+        XCTAssertEqual(json["surface"] as? String, "desktop")
         XCTAssertTrue(SharedSample.isAllowedProvider("google", client: "antigravity"))
         XCTAssertFalse(SharedSample.isAllowedProvider("google", client: "codex"))
         XCTAssertFalse(SharedSample.isAllowedProvider("google", client: "claude-code"))

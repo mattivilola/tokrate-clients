@@ -34,6 +34,8 @@ struct AntigravityTurnBuilder: Sendable {
     static let metricVersion = "antigravity-observed-execution-v1"
 
     let conversationID: String
+    /// Where the conversation ran, from the folder its database was found in.
+    let surface: ToolSurface
     let steps: [AntigravityStep]
     let executors: [AntigravityExecutor]
     /// Decoded generations by `gen_metadata.idx`; a missing entry is a generation that is absent or unreadable.
@@ -121,7 +123,8 @@ struct AntigravityTurnBuilder: Sendable {
             responseCount: responses.isEmpty ? nil : responses.count,
             // Subagent work started by this run is not part of its tokens and cannot be attributed yet:
             // the turn stays pending (shown locally, never shared) instead of claiming zero.
-            delegatedOutputTokens: steps.contains(where: \.hasSubtrajectory) ? nil : 0
+            delegatedOutputTokens: steps.contains(where: \.hasSubtrajectory) ? nil : 0,
+            surface: surface
         )
         let hasResponse = metric.responseOutputTokens != nil
         return hasResponse && !metric.hasPlausibleResponseTiming ? metric.withoutResponseTiming() : metric

@@ -5,8 +5,8 @@ use crate::antigravity_db::{read_database, read_only_uri};
 use crate::antigravity_turns::turn_id;
 use crate::protobuf::{Malformed, Message};
 use crate::{
-    AntigravityMonitor, ProviderBadge, SharedSample, SourceMonitor, TurnMetric, ANTIGRAVITY_CLIENT,
-    ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
+    AntigravityMonitor, ProviderBadge, SharedSample, SourceMonitor, ToolSurface, TurnMetric,
+    ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
 };
 use chrono::{DateTime, Duration, SubsecRound, Utc};
 use rusqlite::{params, Connection};
@@ -600,6 +600,7 @@ fn a_finished_execution_becomes_one_turn_with_exact_values() {
     assert_eq!(turn.response_duration_seconds, Some(20.0));
     assert_eq!(turn.response_count, Some(2));
     assert_eq!(turn.delegated_output_tokens, Some(0));
+    assert_eq!(turn.surface, Some(ToolSurface::Desktop));
     // Each execution is emitted once.
     assert!(poll(&mut monitor, now()).is_empty());
 }
@@ -1035,6 +1036,31 @@ fn only_conversation_databases_of_the_three_folders_are_read_and_pb_files_are_ig
     let turns = poll(&mut monitor, now());
     assert_eq!(turns.len(), 3);
     assert!(turns.iter().all(|turn| turn.output_tokens == 500));
+    // The surface is the Antigravity product that owns the folder the database was found in.
+    for (folder, surface) in [
+        ("antigravity", ToolSurface::Desktop),
+        ("antigravity-ide", ToolSurface::Ide),
+        ("antigravity-cli", ToolSurface::Cli),
+    ] {
+        let id = turn_id(
+            &format!("{folder}-conversation"),
+            &format!("{folder}-execution"),
+        );
+        let turn = turns.iter().find(|turn| turn.id == id).unwrap();
+        assert_eq!(turn.surface, Some(surface), "{folder}");
+        // It is shared as its category, always serialized.
+        let sample = SharedSample::from_metric(turn, Uuid::new_v4()).unwrap();
+        assert_eq!(sample.surface, Some(surface), "{folder}");
+        let json = serde_json::to_value(&sample).unwrap();
+        assert_eq!(
+            json["surface"],
+            match surface {
+                ToolSurface::Desktop => "desktop",
+                ToolSurface::Ide => "ide",
+                _ => "cli",
+            }
+        );
+    }
 }
 
 #[test]
@@ -1251,4 +1277,12 @@ fn the_google_badge_is_matched_by_model_prefix_or_provider() {
     assert_eq!(ProviderBadge::of(None, None), ProviderBadge::Unknown);
     assert_eq!(ProviderBadge::Google.letter(), Some('G'));
     assert_eq!(ProviderBadge::Google.label(), "Google");
+}
+
+#[test]
+fn unreadable_database_retry_delay_doubles_up_to_five_minutes() {
+    let seconds: Vec<i64> = (1..=8)
+        .map(|failures| crate::antigravity::retry_delay(failures).num_seconds())
+        .collect();
+    assert_eq!(seconds, [10, 20, 40, 80, 160, 300, 300, 300]);
 }

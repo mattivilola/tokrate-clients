@@ -146,9 +146,14 @@ describe("tool hints", () => {
 
 describe("coding tool table", () => {
   it("derives titles and chips from one table", () => {
-    expect(SOURCE_TITLES).toEqual({ codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build" });
+    expect(SOURCE_TITLES).toEqual({
+      codex: "Codex",
+      "claude-code": "Claude Code",
+      "grok-build": "Grok Build",
+      antigravity: "Antigravity",
+    });
     expect(Object.keys(CODING_TOOLS)).toEqual(Object.keys(SOURCE_TITLES));
-    expect(["codex", "claude-code", "grok-build"].map(toolChip)).toEqual(["CX", "CC", "GB"]);
+    expect(["codex", "claude-code", "grok-build", "antigravity"].map(toolChip)).toEqual(["CX", "CC", "GB", "AG"]);
     expect(toolLabel("claude-code")).toBe("Claude Code");
     expect(toolLabel("other")).toBe("Coding tool");
   });

@@ -231,6 +231,8 @@ final class PresentationTests: XCTestCase {
         let claude = ModelCohort(claudeMetric("1"))
         XCTAssertEqual(ModelPickerGrouping.chipTool(selection: .autoTool("codex"))?.chip, "CX")
         XCTAssertEqual(ModelPickerGrouping.chipTool(selection: .cohort(claude))?.chip, "CC")
+        XCTAssertEqual(CodingTool.named("antigravity").chip, "AG")
+        XCTAssertEqual(CodingTool.named("antigravity").title, "Antigravity")
         XCTAssertNil(ModelPickerGrouping.chipTool(selection: .auto))
         XCTAssertNil(ModelPickerGrouping.chipTool(selection: .all))
     }

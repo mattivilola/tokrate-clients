@@ -62,7 +62,8 @@ struct CodingTool: Equatable, Sendable {
     private static let known = [
         CodingTool(id: "codex", title: "Codex", chip: "CX"),
         CodingTool(id: "claude-code", title: "Claude Code", chip: "CC"),
-        CodingTool(id: "grok-build", title: "Grok Build", chip: "GB")
+        CodingTool(id: "grok-build", title: "Grok Build", chip: "GB"),
+        CodingTool(id: "antigravity", title: "Antigravity", chip: "AG")
     ]
 
     /// The tool for a recorded client id; an unknown id is shown as recorded, chipped by its first two letters.

@@ -314,6 +314,7 @@ final class HistoryStore {
                     await monitor.nextPollDeadline(now: polledAt),
                     await claudeMonitor.nextPollDeadline(now: polledAt),
                     await grokMonitor.nextPollDeadline(now: polledAt),
+                    await antigravityMonitor.nextPollDeadline(now: polledAt),
                     // A failed poll is retried at the normal cadence.
                     failures.isEmpty ? nil : polledAt
                 ].compactMap { $0 }
@@ -361,6 +362,9 @@ final class HistoryStore {
             case .grokBuild:
                 guard let grokMonitor else { continue }
                 notify = { await grokMonitor.noteChanges($0) }
+            case .antigravity:
+                guard let antigravityMonitor else { continue }
+                notify = { await antigravityMonitor.noteChanges($0) }
             }
             // Only a change a monitor cares about wakes the poll.
             watchers[kind] = SessionFolderWatcher(root: folder(for: kind)) { change in

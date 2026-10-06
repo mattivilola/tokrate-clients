@@ -2,8 +2,8 @@
 
 use crate::antigravity_db::{Executor, Generation, Snapshot, Step};
 use crate::model::{
-    response_qualifies, speed_is_plausible, ResponseMetric, ResponseTotals, TurnMetric,
-    ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
+    response_qualifies, speed_is_plausible, ResponseMetric, ResponseTotals, ToolSurface,
+    TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
 };
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -28,7 +28,11 @@ pub(crate) struct LiveCall {
 
 /// Executions of the snapshot that are finished and measurable. An execution id that appears in
 /// more than one executor row is ambiguous and skipped.
-pub(crate) fn finished_turns(conversation_id: &str, snapshot: &Snapshot) -> Vec<ExecutionTurn> {
+pub(crate) fn finished_turns(
+    conversation_id: &str,
+    surface: ToolSurface,
+    snapshot: &Snapshot,
+) -> Vec<ExecutionTurn> {
     let executors = unique_executors(snapshot);
     let mut steps: HashMap<&str, Vec<&Step>> = HashMap::new();
     for step in &snapshot.steps {
@@ -44,8 +48,13 @@ pub(crate) fn finished_turns(conversation_id: &str, snapshot: &Snapshot) -> Vec<
         let Some(execution_steps) = steps.get(executor.id.as_str()) else {
             continue;
         };
-        if let Some(metric) = execution_metric(conversation_id, executor, execution_steps, snapshot)
-        {
+        if let Some(metric) = execution_metric(
+            conversation_id,
+            surface,
+            executor,
+            execution_steps,
+            snapshot,
+        ) {
             turns.push(ExecutionTurn {
                 execution_id: executor.id.clone(),
                 metric,
@@ -57,6 +66,7 @@ pub(crate) fn finished_turns(conversation_id: &str, snapshot: &Snapshot) -> Vec<
 
 fn execution_metric(
     conversation_id: &str,
+    surface: ToolSurface,
     executor: &Executor,
     steps: &[&Step],
     snapshot: &Snapshot,
@@ -130,6 +140,7 @@ fn execution_metric(
     metric.response_output_tokens = response_output_tokens;
     metric.response_duration_seconds = response_duration_seconds;
     metric.response_count = response_count;
+    metric.surface = Some(surface);
     // Subagent work started by the execution is not part of its output and cannot be attributed
     // yet: the turn stays local and is never final.
     metric.delegated_output_tokens = if steps.iter().any(|step| step.has_subtrajectory) {
