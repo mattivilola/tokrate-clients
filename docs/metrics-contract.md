@@ -372,10 +372,14 @@ Hit ratio = `cacheReadInputTokens / inputTokens` (defined only when `inputTokens
 | Claude Code (primary and subagent turns) | assistant `message.usage` | Σ (`input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`) | Σ `cache_read_input_tokens` | Σ `cache_creation_input_tokens` |
 | Codex | `token_usage_record` payload `turn_token_usage`, the last one seen in the turn (cumulative) | `input_tokens` (already includes cached) | `cached_input_tokens` | `null` |
 | Grok Build | usage ledger turn row (`usage.json`) | `inputTokens` (already includes cached) | `cachedReadTokens` | `null` |
+| Antigravity | each model call's usage message (`steps.metadata` field 9) | Σ (9.2 + 9.5) | Σ 9.5 | `null` |
+| OpenCode | each assistant message's `tokens` | Σ (`input` + `cache.read` + `cache.write`) | Σ `cache.read` | Σ `cache.write` when the turn's provider is `anthropic`, else `null` |
 
 - **Claude Code.** `input_tokens` excludes cached tokens, so the input total adds all three counts. Records repeated for one `message.id` carry identical input and cache values (only `output_tokens` grows): each count is taken once per unique `message.id`, from the first record that has it, over the same unique messages the turn already counts for output. If any counted message lacks `input_tokens`, `cache_read_input_tokens` or `cache_creation_input_tokens`, all three fields are `null` for the turn: a missing count is not zero, and a partial sum would understate the input.
 - **Codex.** Only `turn_token_usage` of `token_usage_record` is used (it is cumulative, so the last record of the turn wins, like `output_tokens`); `event_msg`/`token_count` is not used. A record without `input_tokens` or `cached_input_tokens` gives `null`. Codex's logs carry a cache-write field that is always 0; it is treated as not reported, never as 0.
 - **Grok Build.** `cacheCreationTokens` is always 0 and is ignored for the same reason. A row without `inputTokens` or `cachedReadTokens` gives `null`.
+- **Antigravity.** 9.2 counts the uncached input and 9.5 the cache reads; Antigravity writes proto3, so an absent count is 0 (a call that read nothing from the cache), not missing. 9.1 is a model enum, not a token count. Cache writes are not recorded.
+- **OpenCode.** `tokens.input` excludes cached tokens (it is the non-cached input), so the total adds all three counts. A message without a `tokens.input` or `tokens.cache.read` number makes all three fields `null` for the turn. Only Anthropic reports cache writes explicitly; other providers log 0, which is treated as not reported.
 - Delegated work events are unchanged: subagent output is not added to `inputTokens`.
 
 ### Null and consistency rules
@@ -393,6 +397,7 @@ The three fields are stored with each history record. Records saved before 0.1.1
 
 - `SharedSample` gains `inputTokens`, `cacheReadInputTokens` and `cacheWriteInputTokens`, always encoded (explicit `null` when not reported) for every client and source kind, like `surface`. `appVersion` stays `0.1.18`.
 - The consent notice stays at version 4 and adds: "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache." The consent example payload includes the three keys.
+
 ## Antigravity (0.1.18)
 
 Antigravity is Google's agentic coding tool (the Antigravity desktop app, Antigravity IDE and the `agy` CLI). Client id `antigravity`, parser `antigravity-conversation-v1`, metric `antigravity-observed-execution-v1` (label "Turn speed"; short explanation "Prompt through final answer of one agent run, including tools & waiting"), sourceKind `primary`. Gemini models get the new inference provider `google`.
