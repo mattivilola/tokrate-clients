@@ -10,17 +10,18 @@ enum ToolChip {
     @MainActor private static var images: [String: NSImage] = [:]
 
     /// The chip as a menu-item icon: a template image, so the menu tints it for light, dark and
-    /// highlighted rows. Cached per chip text.
+    /// highlighted rows. Drawn in the label colour, which the handler resolves for the appearance it
+    /// draws in, so it stays legible where a host draws it untinted. Cached per chip text.
     @MainActor static func image(chip: String) -> NSImage {
         if let cached = images[chip] { return cached }
         let image = NSImage(size: size, flipped: false) { rect in
-            NSColor.black.setStroke()
+            NSColor.labelColor.setStroke()
             let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: cornerRadius, yRadius: cornerRadius)
             outline.lineWidth = 1
             outline.stroke()
             let text = NSAttributedString(string: chip, attributes: [
                 .font: NSFont.systemFont(ofSize: 8, weight: .bold),
-                .foregroundColor: NSColor.black
+                .foregroundColor: NSColor.labelColor
             ])
             let textSize = text.size()
             text.draw(at: NSPoint(x: rect.midX - textSize.width / 2, y: rect.midY - textSize.height / 2))
