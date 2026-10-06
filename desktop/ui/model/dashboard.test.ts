@@ -12,7 +12,12 @@ import { pickerAccessibleLabel, pickerLabel } from "../components/Header";
 import { heroCaption } from "../components/Hero";
 import { chartCopy } from "../components/Trend";
 import { buildDashboard, communityLine } from "./dashboard";
-import { DELEGATED_NOTICE, SURFACE_NOTICE, buildSentExample } from "../components/SharingChoice";
+import {
+  DELEGATED_NOTICE,
+  PROMPT_CACHE_NOTICE,
+  SURFACE_NOTICE,
+  buildSentExample,
+} from "../components/SharingChoice";
 import { EFFICIENCY_EXPLANATION, EFFICIENCY_INSUFFICIENT } from "../metrics";
 import { PROVIDER_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
@@ -485,8 +490,17 @@ describe("sharing notice", () => {
     const sample = JSON.parse(buildSentExample()).samples[0];
     expect(sample).toHaveProperty("delegatedOutputTokens");
     expect(sample).toHaveProperty("surface");
+    for (const key of ["inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]) {
+      expect(sample).toHaveProperty(key);
+    }
+    expect(sample.cacheWriteInputTokens).toBeNull();
     expect(DELEGATED_NOTICE).toBe(
       "From 0.1.16 each turn also includes the output tokens of subagent work it started (delegated output tokens), used for the efficiency indicator.",
+    );
+  });
+  it("states the prompt-cache token counts in the notice", () => {
+    expect(PROMPT_CACHE_NOTICE).toBe(
+      "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache.",
     );
   });
   it("states the surface category in the notice", () => {

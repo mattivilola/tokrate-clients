@@ -299,10 +299,13 @@ final class PresentationTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["schemaVersion"] as? Int, 1)
         let sample = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
-        let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface"]
+        let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]
         XCTAssertEqual(Set(sample.keys), expected)
         XCTAssertEqual(sample["appVersion"] as? String, "0.1.18")
         XCTAssertEqual(sample["surface"] as? String, "cli")
+        XCTAssertEqual(sample["inputTokens"] as? Int, 48_000)
+        XCTAssertEqual(sample["cacheReadInputTokens"] as? Int, 36_000)
+        XCTAssertTrue(sample["cacheWriteInputTokens"] is NSNull, "Codex does not report cache writes")
         XCTAssertEqual(sample["responseCount"] as? Int, 3)
         XCTAssertTrue(sample["providerRegion"] is NSNull, "the region is derived by the server, not sent by the app")
         XCTAssertTrue(SamplePayload.exampleJSON().contains("providerRegion"))

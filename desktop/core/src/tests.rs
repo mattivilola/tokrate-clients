@@ -1167,10 +1167,13 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
         keys,
         [
             "appVersion",
+            "cacheReadInputTokens",
+            "cacheWriteInputTokens",
             "client",
             "clientVersion",
             "delegatedOutputTokens",
             "durationMs",
+            "inputTokens",
             "metricVersion",
             "model",
             "observedAt",
@@ -1978,6 +1981,8 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     claude.response_count = Some(2);
     claude.delegated_output_tokens = Some(350);
     claude.surface = Some(crate::ToolSurface::Cli);
+    // Claude Code: input includes cached tokens (3,000 uncached + 40,000 read + 9,000 written).
+    claude.set_prompt_cache(Some(52_000), Some(40_000), Some(9_000));
     let mut bedrock = TurnMetric::new_observed(
         "local-bedrock-digest".into(),
         completed,
@@ -1999,6 +2004,8 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     bedrock.provider_region = Some("eu".into());
     bedrock.delegated_output_tokens = Some(0);
     bedrock.surface = Some(crate::ToolSurface::Desktop);
+    // A first request: nothing read from the cache, 12,000 tokens written to it.
+    bedrock.set_prompt_cache(Some(18_000), Some(0), Some(12_000));
     let subagent = TurnMetric::new_observed(
         "local-subagent-digest".into(),
         completed,
@@ -2033,6 +2040,8 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     grok.response_duration_seconds = Some(10.0);
     grok.response_count = Some(4);
     grok.delegated_output_tokens = Some(0);
+    // Grok Build reports no cache write.
+    grok.set_prompt_cache(Some(90_000), Some(70_000), None);
     let samples = [
         crate::SharedSample::from_metric(
             &claude,
@@ -2124,6 +2133,24 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][1]["surface"], Value::Null);
     assert_eq!(actual["samples"][2]["surface"], Value::Null);
     assert_eq!(actual["samples"][3]["surface"], "desktop");
+    // Prompt-cache fields are always present: numbers when reported, null otherwise (the write is
+    // Claude Code only, a subagent here reports none).
+    assert_eq!(actual["samples"][0]["inputTokens"], 52_000);
+    assert_eq!(actual["samples"][0]["cacheReadInputTokens"], 40_000);
+    assert_eq!(actual["samples"][0]["cacheWriteInputTokens"], 9_000);
+    assert_eq!(actual["samples"][1]["inputTokens"], 90_000);
+    assert_eq!(actual["samples"][1]["cacheReadInputTokens"], 70_000);
+    assert_eq!(actual["samples"][1]["cacheWriteInputTokens"], Value::Null);
+    for key in [
+        "inputTokens",
+        "cacheReadInputTokens",
+        "cacheWriteInputTokens",
+    ] {
+        assert_eq!(actual["samples"][2][key], Value::Null, "{key}");
+    }
+    assert_eq!(actual["samples"][3]["inputTokens"], 18_000);
+    assert_eq!(actual["samples"][3]["cacheReadInputTokens"], 0);
+    assert_eq!(actual["samples"][3]["cacheWriteInputTokens"], 12_000);
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -6447,4 +6474,394 @@ fn shared_samples_always_serialize_the_surface() {
     assert_eq!(unknown["surface"], Value::Null);
     turn.surface = Some(ToolSurface::Desktop);
     assert_eq!(share(&turn)["surface"], "desktop");
+}
+
+// --- Prompt cache (0.1.18) -------------------------------------------------------------------
+
+/// Claude Code usage: `input_tokens` excludes the cached tokens.
+fn with_usage(line: Vec<u8>, usage: Value) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(&line).unwrap();
+    for (key, field) in usage.as_object().unwrap() {
+        value["message"]["usage"][key] = field.clone();
+    }
+    serde_json::to_vec(&value).unwrap()
+}
+
+fn cache_usage(input: i64, read: i64, create: i64) -> Value {
+    json!({
+        "input_tokens": input,
+        "cache_read_input_tokens": read,
+        "cache_creation_input_tokens": create
+    })
+}
+
+fn prompt_cache(metric: &TurnMetric) -> (Option<i64>, Option<i64>, Option<i64>) {
+    (
+        metric.input_tokens,
+        metric.cache_read_input_tokens,
+        metric.cache_write_input_tokens,
+    )
+}
+
+#[test]
+fn claude_prompt_cache_sums_unique_messages_and_takes_repeated_records_once() {
+    let mut parser = claude_parser();
+    parser.consume_settled(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "turn",
+        json!("synthetic"),
+    ));
+    // One message is written as several records: only output_tokens grows, the rest repeats.
+    for (at, tokens, stop) in [
+        ("2026-10-03T10:00:02Z", 10, ""),
+        ("2026-10-03T10:00:03Z", 40, ""),
+        ("2026-10-03T10:00:04Z", 90, "tool_use"),
+    ] {
+        parser.consume_settled(&with_usage(
+            assistant(at, "call-1", stop, tokens),
+            cache_usage(5, 1_000, 200),
+        ));
+    }
+    let result = parser
+        .consume_settled(&with_usage(
+            assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 60),
+            cache_usage(3, 1_300, 0),
+        ))
+        .unwrap();
+    assert_eq!(result.output_tokens, 150);
+    // input = sum(input + read + create) = (5 + 1,000 + 200) + (3 + 1,300 + 0)
+    assert_eq!(prompt_cache(&result), (Some(2_508), Some(2_300), Some(200)));
+}
+
+#[test]
+fn claude_prompt_cache_takes_each_field_from_the_first_record_that_has_it() {
+    let mut parser = claude_parser();
+    parser.consume_settled(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "turn",
+        json!("synthetic"),
+    ));
+    parser.consume_settled(&assistant("2026-10-03T10:00:02Z", "call", "", 5));
+    let result = parser
+        .consume_settled(&with_usage(
+            assistant("2026-10-03T10:00:10Z", "call", "end_turn", 50),
+            cache_usage(4, 90, 6),
+        ))
+        .unwrap();
+    assert_eq!(prompt_cache(&result), (Some(100), Some(90), Some(6)));
+}
+
+#[test]
+fn claude_prompt_cache_is_unreported_when_any_counted_message_lacks_a_field() {
+    let complete = cache_usage(1, 2, 3);
+    let run = |first: Value, second: Value| {
+        let mut parser = claude_parser();
+        parser.consume_settled(&claude_user(
+            "2026-10-03T10:00:00Z",
+            "turn",
+            json!("synthetic"),
+        ));
+        parser.consume_settled(&with_usage(
+            assistant("2026-10-03T10:00:04Z", "call-1", "tool_use", 20),
+            first,
+        ));
+        parser
+            .consume_settled(&with_usage(
+                assistant("2026-10-03T10:00:10Z", "call-2", "end_turn", 20),
+                second,
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        prompt_cache(&run(complete.clone(), complete.clone())),
+        (Some(12), Some(4), Some(6))
+    );
+    for missing in [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ] {
+        let mut incomplete = complete.clone();
+        incomplete.as_object_mut().unwrap().remove(missing);
+        for result in [
+            run(incomplete.clone(), complete.clone()),
+            run(complete.clone(), incomplete.clone()),
+        ] {
+            // Missing is not zero: the whole set is unreported, the turn itself still is.
+            assert_eq!(result.output_tokens, 40, "{missing}");
+            assert_eq!(prompt_cache(&result), (None, None, None), "{missing}");
+        }
+    }
+    let none = run(json!({}), json!({}));
+    assert_eq!(prompt_cache(&none), (None, None, None));
+}
+
+#[test]
+fn claude_subagent_turns_report_prompt_cache_too() {
+    let session = "11111111-2222-4333-8444-555555555555";
+    let agent = "a1b2c3d4e5f60718";
+    let mut parser = crate::claude_parser::ClaudeTranscriptParser::new_subagent("file".into());
+    parser.consume_settled(&as_subagent(
+        claude_user("2026-10-03T10:00:00Z", "task", json!("synthetic")),
+        session,
+        agent,
+    ));
+    parser.consume_settled(&as_subagent(
+        with_usage(
+            assistant("2026-10-03T10:00:04Z", "sub-1", "tool_use", 10),
+            cache_usage(2, 500, 100),
+        ),
+        session,
+        agent,
+    ));
+    let result = parser
+        .consume_settled(&as_subagent(
+            with_usage(
+                assistant("2026-10-03T10:00:10Z", "sub-2", "end_turn", 30),
+                cache_usage(1, 700, 0),
+            ),
+            session,
+            agent,
+        ))
+        .unwrap();
+    assert_eq!(result.source_kind.as_deref(), Some("subagent"));
+    assert_eq!(prompt_cache(&result), (Some(1_303), Some(1_200), Some(100)));
+    let sample = crate::SharedSample::from_metric(&result, Uuid::new_v4()).unwrap();
+    assert_eq!(sample.input_tokens, Some(1_303));
+    assert_eq!(sample.cache_write_input_tokens, Some(100));
+}
+
+#[test]
+fn codex_prompt_cache_comes_from_the_last_turn_token_usage_and_never_reports_a_write() {
+    let usage = |at: &str, response: &str, turn_usage: Value| {
+        codex_line(
+            "token_usage_record",
+            json!({
+                "turn_id": "turn-1",
+                "response_id": response,
+                "usage": {"output_tokens": 300},
+                "turn_token_usage": turn_usage
+            }),
+            at,
+        )
+    };
+    let run = |usages: Vec<Vec<u8>>| {
+        let mut parser = crate::parser::CodexEventParser::new("file".into());
+        let mut turns = Vec::new();
+        let mut lines = vec![
+            codex_line(
+                "session_meta",
+                json!({"id": "session-1", "source": "cli", "model_provider": "openai"}),
+                "2026-10-03T10:00:00.000Z",
+            ),
+            codex_line(
+                "event_msg",
+                json!({"type": "task_started", "turn_id": "turn-1"}),
+                "2026-10-03T10:00:00.000Z",
+            ),
+        ];
+        lines.extend(usages);
+        lines.push(codex_line(
+            "event_msg",
+            json!({"type": "task_complete", "turn_id": "turn-1", "duration_ms": 25000}),
+            "2026-10-03T10:00:25.100Z",
+        ));
+        for line in lines {
+            turns.extend(parser.consume(&line));
+        }
+        assert_eq!(turns.len(), 1);
+        turns.remove(0)
+    };
+    // Cumulative: the last record wins, and Codex's input already includes the cached tokens.
+    let result = run(vec![
+        usage(
+            "2026-10-03T10:00:04Z",
+            "resp-1",
+            json!({"output_tokens": 300, "input_tokens": 30_000, "cached_input_tokens": 12_000, "cache_creation_input_tokens": 0}),
+        ),
+        usage(
+            "2026-10-03T10:00:12Z",
+            "resp-2",
+            json!({"output_tokens": 700, "input_tokens": 80_000, "cached_input_tokens": 61_000, "cache_creation_input_tokens": 0}),
+        ),
+    ]);
+    assert_eq!(result.output_tokens, 700);
+    assert_eq!(prompt_cache(&result), (Some(80_000), Some(61_000), None));
+    let sample =
+        crate::SharedSample::from_metric(&result.with_delegated_output_tokens(0), Uuid::new_v4())
+            .unwrap();
+    assert_eq!(sample.cache_write_input_tokens, None);
+
+    // A record without input counts (or with a cache larger than the input) reports nothing.
+    for incomplete in [
+        json!({"output_tokens": 50, "cached_input_tokens": 10}),
+        json!({"output_tokens": 50, "input_tokens": 100}),
+        json!({"output_tokens": 50, "input_tokens": 100, "cached_input_tokens": 101}),
+    ] {
+        let result = run(vec![usage("2026-10-03T10:00:04Z", "resp-1", incomplete)]);
+        assert_eq!(prompt_cache(&result), (None, None, None));
+    }
+    let zero = run(vec![usage(
+        "2026-10-03T10:00:04Z",
+        "resp-1",
+        json!({"output_tokens": 50, "input_tokens": 100, "cached_input_tokens": 0}),
+    )]);
+    assert_eq!(prompt_cache(&zero), (Some(100), Some(0), None));
+}
+
+#[test]
+fn grok_prompt_cache_comes_from_the_ledger_row_and_never_reports_a_write() {
+    let run = |row_fields: Value| {
+        let temp = TestDir::new();
+        let mut usage = grok_usage("session-id", 7, 50);
+        for (key, value) in row_fields.as_object().unwrap() {
+            usage["turns"][0][key] = value.clone();
+        }
+        write_grok_session(
+            temp.path(),
+            "session-id",
+            &grok_turn_events("session-id", 7, "completed"),
+            &usage,
+        );
+        let now = time("2026-10-03T10:00:06Z");
+        let mut monitor = GrokMonitor::new(temp.path().to_path_buf());
+        let mut found = Vec::new();
+        for _ in 0..3 {
+            found.extend(monitor.poll(now).unwrap());
+            if !found.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 1);
+        found.remove(0)
+    };
+    // Grok's inputTokens already includes the cached tokens; cacheCreationTokens is always 0.
+    let result =
+        run(json!({"inputTokens": 90_000, "cachedReadTokens": 70_000, "cacheCreationTokens": 0}));
+    assert_eq!(prompt_cache(&result), (Some(90_000), Some(70_000), None));
+    let sample = crate::SharedSample::from_metric(&result, Uuid::new_v4()).unwrap();
+    assert_eq!(sample.cache_write_input_tokens, None);
+    assert!(serde_json::to_value(&sample).unwrap()["cacheWriteInputTokens"].is_null());
+
+    for incomplete in [
+        json!({}),
+        json!({"inputTokens": 90_000}),
+        json!({"cachedReadTokens": 70_000}),
+        json!({"inputTokens": 100, "cachedReadTokens": 101}),
+        json!({"inputTokens": "90000", "cachedReadTokens": 1}),
+    ] {
+        let result = run(incomplete);
+        assert_eq!(result.output_tokens, 50);
+        assert_eq!(prompt_cache(&result), (None, None, None));
+    }
+    assert_eq!(
+        prompt_cache(&run(json!({"inputTokens": 100, "cachedReadTokens": 0}))),
+        (Some(100), Some(0), None)
+    );
+}
+
+#[test]
+fn prompt_cache_fields_are_consistent_or_all_none() {
+    use crate::model::consistent_prompt_cache as consistent;
+    assert_eq!(
+        consistent(Some(100), Some(100), Some(0)),
+        (Some(100), Some(100), Some(0))
+    );
+    assert_eq!(
+        consistent(Some(100), Some(0), None),
+        (Some(100), Some(0), None)
+    );
+    for inconsistent in [
+        consistent(Some(100), Some(101), Some(5)),
+        consistent(Some(100), None, None),
+        consistent(None, Some(10), None),
+        consistent(None, None, Some(5)),
+        consistent(Some(100), None, Some(5)),
+        consistent(Some(-1), Some(0), None),
+        consistent(Some(100), Some(-1), None),
+        consistent(Some(100), Some(10), Some(-1)),
+    ] {
+        assert_eq!(inconsistent, (None, None, None));
+    }
+    let mut metric = metric("cache", time("2026-10-03T10:00:00Z"));
+    metric.set_prompt_cache(Some(10), Some(11), Some(2));
+    assert_eq!(prompt_cache(&metric), (None, None, None));
+    metric.set_prompt_cache(Some(10), Some(4), Some(2));
+    assert_eq!(prompt_cache(&metric), (Some(10), Some(4), Some(2)));
+    // A copy with its delegated total settled keeps them.
+    assert_eq!(
+        prompt_cache(&metric.with_delegated_output_tokens(5)),
+        (Some(10), Some(4), Some(2))
+    );
+}
+
+#[test]
+fn shared_samples_always_encode_prompt_cache_keys_and_never_share_an_inconsistent_set() {
+    let now = time("2026-10-03T10:00:00Z");
+    let none = crate::SharedSample::from_metric(&metric("none", now), Uuid::new_v4()).unwrap();
+    let json = serde_json::to_value(&none).unwrap();
+    for key in [
+        "inputTokens",
+        "cacheReadInputTokens",
+        "cacheWriteInputTokens",
+    ] {
+        assert!(json.get(key).unwrap().is_null(), "{key} is explicit null");
+    }
+    let mut reported = metric("reported", now);
+    reported.set_prompt_cache(Some(52_000), Some(40_000), Some(9_000));
+    let json =
+        serde_json::to_value(crate::SharedSample::from_metric(&reported, Uuid::new_v4()).unwrap())
+            .unwrap();
+    assert_eq!(json["inputTokens"], 52_000);
+    assert_eq!(json["cacheReadInputTokens"], 40_000);
+    assert_eq!(json["cacheWriteInputTokens"], 9_000);
+    // Fields set directly (not through set_prompt_cache) are still vetted at the boundary.
+    let mut bad = metric("bad", now);
+    bad.input_tokens = Some(10);
+    bad.cache_read_input_tokens = Some(11);
+    let sample = crate::SharedSample::from_metric(&bad, Uuid::new_v4()).unwrap();
+    assert_eq!(
+        (
+            sample.input_tokens,
+            sample.cache_read_input_tokens,
+            sample.cache_write_input_tokens
+        ),
+        (None, None, None)
+    );
+}
+
+#[test]
+fn history_without_prompt_cache_fields_decodes_and_inconsistent_stored_sets_are_dropped() {
+    let mut stored = metric("stored", time("2026-10-03T10:00:00Z"));
+    stored.set_prompt_cache(Some(100), Some(60), Some(10));
+    let mut legacy = serde_json::to_value(&stored).unwrap();
+    for key in [
+        "inputTokens",
+        "cacheReadInputTokens",
+        "cacheWriteInputTokens",
+    ] {
+        legacy.as_object_mut().unwrap().remove(key);
+    }
+    let restored: TurnMetric = serde_json::from_value(legacy).unwrap();
+    assert_eq!(prompt_cache(&restored), (None, None, None));
+    // Round trip keeps them.
+    let round: TurnMetric = serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+    assert_eq!(prompt_cache(&round), (Some(100), Some(60), Some(10)));
+
+    // A persisted record whose set is inconsistent loads as not reported.
+    let temp = TestDir::new();
+    let path = temp.path().join("history.json");
+    let now = time("2026-10-03T10:30:00Z");
+    let mut bad = serde_json::to_value(metric("bad", time("2026-10-03T10:00:00Z"))).unwrap();
+    bad["inputTokens"] = json!(10);
+    bad["cacheReadInputTokens"] = json!(11);
+    bad["cacheWriteInputTokens"] = json!(2);
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({"schemaVersion": 1, "records": [bad]})).unwrap(),
+    )
+    .unwrap();
+    let history = History::load(&path, now).unwrap();
+    assert_eq!(history.records().len(), 1);
+    assert_eq!(prompt_cache(&history.records()[0]), (None, None, None));
 }

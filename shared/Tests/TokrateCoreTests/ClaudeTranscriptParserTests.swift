@@ -265,7 +265,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let metric = try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "s1", output: 200, stop: "end_turn", sidechain: true)))
         let sample = try XCTUnwrap(SharedSample(metric))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface"])
+        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"])
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
@@ -1306,6 +1306,103 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertFalse(stored.contains("some-third-party-app"))
     }
 
+    // MARK: Prompt cache (0.1.18)
+
+    /// Usage the way Claude Code writes it: `input_tokens` excludes the cached tokens.
+    private func cacheUsage(input: Int? = 0, read: Int? = 0, create: Int? = 0) -> [String: Int] {
+        var usage: [String: Int] = [:]
+        if let input { usage["input_tokens"] = input }
+        if let read { usage["cache_read_input_tokens"] = read }
+        if let create { usage["cache_creation_input_tokens"] = create }
+        return usage
+    }
+
+    func testPromptCacheSumsUniqueMessagesAndTakesRepeatedRecordsOfOneMessageOnce() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        // One message is written as several records: only output_tokens grows, the rest repeats.
+        for (index, output) in [10, 40, 90].enumerated() {
+            XCTAssertNil(parser.consume(line: try assistant(
+                at: 2 + Double(index), id: "m1", output: output, stop: index == 2 ? "tool_use" : nil,
+                cache: cacheUsage(input: 5, read: 1_000, create: 200)
+            )))
+        }
+        XCTAssertNil(parser.consume(line: try toolResult(at: 6)))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(
+            at: 10, id: "m2", output: 60, stop: "end_turn", cache: cacheUsage(input: 3, read: 1_300, create: 0)
+        )))
+        XCTAssertEqual(metric.outputTokens, 150)
+        // input = Σ(input + read + create) = (5 + 1_000 + 200) + (3 + 1_300 + 0)
+        XCTAssertEqual(metric.inputTokens, 2_508)
+        XCTAssertEqual(metric.cacheReadInputTokens, 2_300)
+        XCTAssertEqual(metric.cacheWriteInputTokens, 200)
+    }
+
+    func testPromptCacheTakesAFieldFromTheFirstRecordThatHasIt() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        XCTAssertNil(parser.consume(line: try assistant(at: 2, id: "m1", output: 5, stop: nil)))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(
+            at: 10, id: "m1", output: 50, stop: "end_turn", cache: cacheUsage(input: 4, read: 90, create: 6)
+        )))
+        XCTAssertEqual(metric.inputTokens, 100)
+        XCTAssertEqual(metric.cacheReadInputTokens, 90)
+        XCTAssertEqual(metric.cacheWriteInputTokens, 6)
+    }
+
+    func testPromptCacheIsNilWhenAnyCountedMessageLacksAField() throws {
+        func metric(first: [String: Int], second: [String: Int]) throws -> TurnMetric {
+            var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+            _ = parser.consume(line: try user(at: 0, id: "prompt"))
+            _ = parser.consume(line: try assistant(at: 3, id: "m1", output: 20, stop: "tool_use", cache: first))
+            _ = parser.consume(line: try toolResult(at: 5))
+            return try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "m2", output: 20, stop: "end_turn", cache: second)))
+        }
+        let complete = cacheUsage(input: 1, read: 2, create: 3)
+        XCTAssertEqual(try metric(first: complete, second: complete).inputTokens, 12)
+        for incomplete in [
+            cacheUsage(input: nil), cacheUsage(read: nil), cacheUsage(create: nil), [:]
+        ] {
+            for turn in [try metric(first: incomplete, second: complete), try metric(first: complete, second: incomplete)] {
+                // Missing is not zero: the whole set is not reported, but the turn itself still is.
+                XCTAssertEqual(turn.outputTokens, 40)
+                XCTAssertNil(turn.inputTokens)
+                XCTAssertNil(turn.cacheReadInputTokens)
+                XCTAssertNil(turn.cacheWriteInputTokens)
+            }
+        }
+    }
+
+    func testPromptCacheIsReportedForSubagentTurnsToo() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic", scope: .subagent)
+        _ = parser.consume(line: try user(at: 0, id: "task", sidechain: true))
+        _ = parser.consume(line: try assistant(at: 4, id: "s1", output: 60, stop: "tool_use", sidechain: true, cache: cacheUsage(input: 2, read: 500, create: 100)))
+        _ = parser.consume(line: try toolResult(at: 5, sidechain: true))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(
+            at: 10, id: "s2", output: 140, stop: "end_turn", sidechain: true, cache: cacheUsage(input: 1, read: 700, create: 0)
+        )))
+        XCTAssertEqual(metric.sourceKind, "subagent")
+        XCTAssertEqual(metric.inputTokens, 1_303)
+        XCTAssertEqual(metric.cacheReadInputTokens, 1_200)
+        XCTAssertEqual(metric.cacheWriteInputTokens, 100)
+        let sample = try XCTUnwrap(SharedSample(metric))
+        XCTAssertEqual(sample.inputTokens, 1_303)
+        XCTAssertEqual(sample.cacheWriteInputTokens, 100)
+    }
+
+    func testPromptCacheCountsOnlyTheMessagesTheTurnCounts() throws {
+        // A second turn starts fresh: the first turn's messages never leak into it.
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "p1"))
+        let first = try XCTUnwrap(terminal(&parser, assistant(at: 5, id: "a1", output: 20, stop: "end_turn", cache: cacheUsage(input: 1, read: 10, create: 5))))
+        XCTAssertEqual(first.inputTokens, 16)
+        _ = parser.consume(line: try user(at: 4_000, id: "p2"))
+        let second = try XCTUnwrap(terminal(&parser, assistant(at: 4_005, id: "a2", output: 20, stop: "end_turn", cache: cacheUsage(input: 2, read: 0, create: 0))))
+        XCTAssertEqual(second.inputTokens, 2)
+        XCTAssertEqual(second.cacheReadInputTokens, 0)
+        XCTAssertEqual(second.cacheWriteInputTokens, 0)
+    }
+
     // MARK: Synthetic fixtures
 
     /// Feeds a terminal record. A terminal turn closes on the next record or at the end of a poll, so
@@ -1361,7 +1458,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
     private func assistant(
         at seconds: Double, id: String, model: String = "claude-sonnet-5-5", output: Int?, stop: String?,
         sidechain: Bool = false, origin: Date? = nil, requestID: String? = nil, effort: String? = nil,
-        blocks: [String]? = nil, parent: String? = nil
+        blocks: [String]? = nil, parent: String? = nil, cache: [String: Int] = [:]
     ) throws -> Data {
         var value = envelope(sidechain: sidechain)
         if let parent { value["parentUuid"] = parent }
@@ -1369,6 +1466,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         if let effort { value["perTurnEffort"] = effort }
         var usage: [String: Any] = [:]
         if let output { usage["output_tokens"] = output }
+        usage.merge(cache) { _, new in new }
         value["type"] = "assistant"
         value["uuid"] = "record-\(id)"
         value["timestamp"] = timestamp(seconds, origin: origin ?? base)

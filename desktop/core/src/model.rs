@@ -162,6 +162,38 @@ pub struct TurnMetric {
     /// records saved before the field existed or holding a value this version does not know.
     #[serde(default, deserialize_with = "deserialize_surface")]
     pub surface: Option<ToolSurface>,
+    /// Input (prompt) tokens processed across all model requests of the turn, including tokens
+    /// served from the prompt cache. `None` when the source does not report it and for records
+    /// saved before the field existed. Set only through [`TurnMetric::set_prompt_cache`].
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    /// Input tokens served from the provider's prompt cache; never more than `input_tokens`, and
+    /// `None` exactly when `input_tokens` is.
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<i64>,
+    /// Tokens written to the prompt cache. Reported by Claude Code only: `None` for Codex and
+    /// Grok Build (their logs carry a field that is always 0, which is not a report) and whenever
+    /// `input_tokens` is `None`.
+    #[serde(default)]
+    pub cache_write_input_tokens: Option<i64>,
+}
+
+/// The prompt-cache fields as one consistent set (contract "Prompt cache"): input and cache-read
+/// travel together, cache-write needs the input total, and a read larger than the input is
+/// inconsistent source data, so every field is dropped. Negative values are never valid.
+pub fn consistent_prompt_cache(
+    input: Option<i64>,
+    read: Option<i64>,
+    write: Option<i64>,
+) -> (Option<i64>, Option<i64>, Option<i64>) {
+    match (input, read) {
+        (Some(input), Some(read))
+            if input >= 0 && read >= 0 && read <= input && write.is_none_or(|write| write >= 0) =>
+        {
+            (Some(input), Some(read), write)
+        }
+        _ => (None, None, None),
+    }
 }
 
 /// Per-turn totals over qualifying responses, accumulated by the parsers.
@@ -281,7 +313,20 @@ impl TurnMetric {
             provider_region: None,
             delegated_output_tokens: None,
             surface: None,
+            input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
         }
+    }
+
+    /// Sets the prompt-cache fields, keeping only a consistent set (see
+    /// [`consistent_prompt_cache`]).
+    pub fn set_prompt_cache(&mut self, input: Option<i64>, read: Option<i64>, write: Option<i64>) {
+        (
+            self.input_tokens,
+            self.cache_read_input_tokens,
+            self.cache_write_input_tokens,
+        ) = consistent_prompt_cache(input, read, write);
     }
 
     /// The same record with its delegated subagent output attribution settled.
@@ -336,6 +381,9 @@ impl TurnMetric {
             provider_region: None,
             delegated_output_tokens: None,
             surface: None,
+            input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
         }
     }
 }

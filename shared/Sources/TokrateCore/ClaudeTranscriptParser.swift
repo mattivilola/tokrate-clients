@@ -27,6 +27,12 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     /// Turn accounting for one API message (every record sharing a `message.id`).
     private struct MessageUsage: Sendable {
         var outputTokens: Int?
+        /// Prompt-cache usage of the message (contract "Prompt cache"). Records repeated for one
+        /// `message.id` carry identical values, so each is taken once, from the first record that has it.
+        /// `input_tokens` excludes cached tokens.
+        var inputTokens: Int?
+        var cacheReadInputTokens: Int?
+        var cacheCreationInputTokens: Int?
         /// Timestamp of the message's latest assistant record.
         var endedAt: Date?
     }
@@ -387,10 +393,14 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         }
         state.regions.insert(ClaudeModelID.bedrockRegion(rawModel) ?? "unknown")
 
-        let output = nonnegativeInteger((message["usage"] as? [String: Any])?["output_tokens"])
+        let usageFields = message["usage"] as? [String: Any]
+        let output = nonnegativeInteger(usageFields?["output_tokens"])
         var usage = state.messages[messageID] ?? MessageUsage()
         if let prior = usage.outputTokens, let output, output < prior { state.hasIncompleteUsage = true }
         if let output, usage.outputTokens.map({ output >= $0 }) ?? true { usage.outputTokens = output }
+        if usage.inputTokens == nil { usage.inputTokens = nonnegativeInteger(usageFields?["input_tokens"]) }
+        if usage.cacheReadInputTokens == nil { usage.cacheReadInputTokens = nonnegativeInteger(usageFields?["cache_read_input_tokens"]) }
+        if usage.cacheCreationInputTokens == nil { usage.cacheCreationInputTokens = nonnegativeInteger(usageFields?["cache_creation_input_tokens"]) }
         if let timestamp { usage.endedAt = max(usage.endedAt ?? timestamp, timestamp) } else { usage.endedAt = nil }
         state.messages[messageID] = usage
         if isTerminal { state.terminalMessageID = messageID }
@@ -498,6 +508,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         let provider = state.hasRecordWithoutProviderEvidence || state.providers.count != 1
             ? "unknown" : state.providers.first ?? "unknown"
         let hasResponse = state.responseCount > 0
+        let promptCache = Self.promptCache(of: state.messages.values)
         return TurnMetric(
             id: identityDigest(for: state),
             completedAt: completedAt,
@@ -518,8 +529,32 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             responseDurationSeconds: hasResponse ? state.responseSeconds : nil,
             responseCount: hasResponse ? state.responseCount : nil,
             providerRegion: provider == "amazon-bedrock" ? (state.regions.count == 1 ? state.regions.first : "unknown") : nil,
-            surface: state.surface
+            surface: state.surface,
+            inputTokens: promptCache?.input,
+            cacheReadInputTokens: promptCache?.read,
+            cacheWriteInputTokens: promptCache?.write
         )
+    }
+
+    /// Prompt-cache totals over the turn's counted messages: the input total includes cached tokens
+    /// (`input_tokens` excludes them). Any message missing one of the three counts, or an overflow,
+    /// leaves the whole set unreported: a missing count is not zero.
+    private static func promptCache(of messages: Dictionary<String, MessageUsage>.Values) -> (input: Int, read: Int, write: Int)? {
+        var input = 0, read = 0, write = 0
+        for message in messages {
+            guard let uncached = message.inputTokens, let cached = message.cacheReadInputTokens,
+                  let created = message.cacheCreationInputTokens else { return nil }
+            let (messageInput, firstOverflow) = uncached.addingReportingOverflow(cached)
+            let (messageTotal, secondOverflow) = messageInput.addingReportingOverflow(created)
+            let (newInput, inputOverflow) = input.addingReportingOverflow(messageTotal)
+            let (newRead, readOverflow) = read.addingReportingOverflow(cached)
+            let (newWrite, writeOverflow) = write.addingReportingOverflow(created)
+            guard !(firstOverflow || secondOverflow || inputOverflow || readOverflow || writeOverflow) else { return nil }
+            input = newInput
+            read = newRead
+            write = newWrite
+        }
+        return (input, read, write)
     }
 
     private mutating func noteActivity(at timestamp: Date) {

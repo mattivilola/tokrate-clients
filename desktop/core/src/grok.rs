@@ -410,6 +410,9 @@ struct UsageTurn {
     ended_at: Option<DateTime<Utc>>,
     output_tokens: Option<i64>,
     reasoning_tokens: Option<i64>,
+    /// `inputTokens` (including cached tokens) and `cachedReadTokens` of the ledger row.
+    input_tokens: Option<i64>,
+    cached_read_tokens: Option<i64>,
     incomplete: Option<bool>,
     model_usage: Option<Value>,
     model_calls: ModelCalls,
@@ -471,6 +474,8 @@ impl UsageSnapshot {
                     ended_at: parse_date(value.get("endedAt")),
                     output_tokens: value.get("outputTokens").and_then(Value::as_i64),
                     reasoning_tokens: value.get("reasoningTokens").and_then(Value::as_i64),
+                    input_tokens: value.get("inputTokens").and_then(Value::as_i64),
+                    cached_read_tokens: value.get("cachedReadTokens").and_then(Value::as_i64),
                     incomplete: value.get("usageIsIncomplete").and_then(Value::as_bool),
                     model_usage: value.get("modelUsage").cloned(),
                     model_calls: ModelCalls::parse(value.get("modelCalls")),
@@ -757,6 +762,8 @@ impl GrokSession {
             metric.response_count = response_count;
             // Grok's ledger output already includes nested agent output: final at emission.
             metric.delegated_output_tokens = Some(0);
+            // `cacheCreationTokens` is always 0 in Grok's ledger: not reported, never 0.
+            metric.set_prompt_cache(row.input_tokens, row.cached_read_tokens, None);
             // A turn becomes immutable when first accepted. A later usage.json
             // rewrite must not create a second contribution with the same ID;
             // this matches the Swift monitor and backend's first-write dedupe.

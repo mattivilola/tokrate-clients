@@ -129,6 +129,75 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertNil(decoded.responseSpeedTPS, "a zero count is not a measurement")
     }
 
+    // MARK: Prompt cache (0.1.18)
+
+    private func cached(input: Int?, read: Int?, write: Int?) -> TurnMetric {
+        TurnMetric(
+            id: "cache", completedAt: Date(timeIntervalSince1970: 1_800_000_000), model: "claude-sonnet-5-5", outputTokens: 1_000,
+            durationSeconds: 60, codexTTFTSeconds: nil, turnThroughputTPS: 16.6, client: "claude-code",
+            parserVersion: "claude-transcript-v4", metricVersion: "claude-observed-turn-v1",
+            responseOutputTokens: 900, responseDurationSeconds: 18, responseCount: 2, providerRegion: "us",
+            delegatedOutputTokens: 40, surface: .cli,
+            inputTokens: input, cacheReadInputTokens: read, cacheWriteInputTokens: write
+        )
+    }
+
+    func testPromptCacheFieldsRoundTripAndEveryCopyHelperKeepsThem() throws {
+        let full = cached(input: 50_000, read: 40_000, write: 6_000)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(full)) as? [String: Any])
+        XCTAssertEqual(object["inputTokens"] as? Int, 50_000)
+        XCTAssertEqual(object["cacheReadInputTokens"] as? Int, 40_000)
+        XCTAssertEqual(object["cacheWriteInputTokens"] as? Int, 6_000)
+        XCTAssertEqual(try JSONDecoder().decode(TurnMetric.self, from: JSONEncoder().encode(full)), full)
+
+        for copy in [full.withoutResponseTiming(), full.withDelegatedOutputTokens(7)] {
+            XCTAssertEqual(copy.inputTokens, 50_000)
+            XCTAssertEqual(copy.cacheReadInputTokens, 40_000)
+            XCTAssertEqual(copy.cacheWriteInputTokens, 6_000)
+        }
+
+        // Not reported (and Codex / Grok Build, which never report a write): encoded only when present.
+        let noWrite = cached(input: 50_000, read: 40_000, write: nil)
+        let noWriteObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(noWrite)) as? [String: Any])
+        XCTAssertNil(noWriteObject["cacheWriteInputTokens"])
+        XCTAssertEqual(try JSONDecoder().decode(TurnMetric.self, from: JSONEncoder().encode(noWrite)), noWrite)
+        XCTAssertNil(noWrite.withDelegatedOutputTokens(1).cacheWriteInputTokens)
+        let none = cached(input: nil, read: nil, write: nil)
+        let noneObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(none)) as? [String: Any])
+        for key in ["inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"] { XCTAssertNil(noneObject[key]) }
+    }
+
+    func testPromptCacheFieldsAreConsistentOrAllNil() {
+        let valid = cached(input: 100, read: 100, write: 0)
+        XCTAssertEqual([valid.inputTokens, valid.cacheReadInputTokens, valid.cacheWriteInputTokens], [100, 100, 0])
+        XCTAssertEqual(cached(input: 100, read: 0, write: nil).cacheReadInputTokens, 0)
+        for inconsistent in [
+            cached(input: 100, read: 101, write: 5),  // a read larger than the input is bad source data
+            cached(input: 100, read: nil, write: nil), cached(input: nil, read: 10, write: nil),
+            cached(input: nil, read: nil, write: 5), cached(input: 100, read: nil, write: 5),
+            cached(input: -1, read: 0, write: nil), cached(input: 100, read: -1, write: nil), cached(input: 100, read: 10, write: -1)
+        ] {
+            XCTAssertNil(inconsistent.inputTokens)
+            XCTAssertNil(inconsistent.cacheReadInputTokens)
+            XCTAssertNil(inconsistent.cacheWriteInputTokens)
+        }
+    }
+
+    func testRecordsSavedBeforePromptCacheDecodeWithNilFieldsAndInconsistentStoredSetsReadAsNotReported() throws {
+        let old = #"{"id":"x","completedAt":1,"outputTokens":100,"durationSeconds":10,"turnThroughputTPS":10,"surface":"cli"}"#
+        let decoded = try JSONDecoder().decode(TurnMetric.self, from: Data(old.utf8))
+        XCTAssertNil(decoded.inputTokens)
+        XCTAssertNil(decoded.cacheReadInputTokens)
+        XCTAssertNil(decoded.cacheWriteInputTokens)
+        XCTAssertEqual(decoded.surface, .cli)
+
+        let bad = #"{"id":"x","completedAt":1,"outputTokens":100,"durationSeconds":10,"turnThroughputTPS":10,"inputTokens":10,"cacheReadInputTokens":11,"cacheWriteInputTokens":2}"#
+        let decodedBad = try JSONDecoder().decode(TurnMetric.self, from: Data(bad.utf8))
+        XCTAssertNil(decodedBad.inputTokens)
+        XCTAssertNil(decodedBad.cacheReadInputTokens)
+        XCTAssertNil(decodedBad.cacheWriteInputTokens)
+    }
+
     func testLoadingHistoryDropsImpossibleTurnsAndClearsImplausibleResponseTiming() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         func claude(

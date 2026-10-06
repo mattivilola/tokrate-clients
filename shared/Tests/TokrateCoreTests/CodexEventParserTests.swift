@@ -448,6 +448,53 @@ final class CodexEventParserTests: XCTestCase {
         XCTAssertNil(after.surface)
     }
 
+    // MARK: Prompt cache (0.1.18)
+
+    private func promptCacheMetric(usages: [[String: Any]]) throws -> TurnMetric? {
+        var parser = CodexEventParser(sourceIdentity: "session-file")
+        _ = parser.consume(line: try event(type: "session_meta", payload: ["id": "session-1", "source": "cli"]))
+        _ = parser.consume(line: try started("turn-1"))
+        for usage in usages {
+            _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "turn-1", "turn_token_usage": usage]))
+        }
+        return parser.consume(line: try event(type: "event_msg", payload: [
+            "type": "task_complete", "turn_id": "turn-1", "started_at": "2026-10-03T10:00:00Z",
+            "completed_at": "2026-10-03T10:00:05Z", "duration_ms": 5_000
+        ]))
+    }
+
+    func testPromptCacheComesFromTheLastCumulativeTurnTokenUsageAndCacheWriteIsNeverReported() throws {
+        let metric = try XCTUnwrap(promptCacheMetric(usages: [
+            ["input_tokens": 30_000, "cached_input_tokens": 12_000, "cache_creation_input_tokens": 0, "output_tokens": 20],
+            ["input_tokens": 80_000, "cached_input_tokens": 61_000, "cache_creation_input_tokens": 0, "output_tokens": 50]
+        ]))
+        XCTAssertEqual(metric.outputTokens, 50)
+        // Codex's input_tokens already includes the cached tokens.
+        XCTAssertEqual(metric.inputTokens, 80_000)
+        XCTAssertEqual(metric.cacheReadInputTokens, 61_000)
+        XCTAssertNil(metric.cacheWriteInputTokens, "Codex's write field is always 0, which is not a report")
+        let sample = try XCTUnwrap(SharedSample(metric.withDelegatedOutputTokens(0)))
+        XCTAssertEqual(sample.inputTokens, 80_000)
+        XCTAssertNil(sample.cacheWriteInputTokens)
+    }
+
+    func testPromptCacheIsNilWithoutATokenUsageRecordOrWithIncompleteOrInconsistentFields() throws {
+        // Without a token_usage_record a Codex turn has no output total and is not emitted at all.
+        XCTAssertNil(try promptCacheMetric(usages: []))
+        let noInput = try XCTUnwrap(promptCacheMetric(usages: [["output_tokens": 50, "cached_input_tokens": 10]]))
+        XCTAssertNil(noInput.inputTokens)
+        XCTAssertNil(noInput.cacheReadInputTokens)
+        let noCached = try XCTUnwrap(promptCacheMetric(usages: [["output_tokens": 50, "input_tokens": 100]]))
+        XCTAssertNil(noCached.inputTokens)
+        XCTAssertNil(noCached.cacheReadInputTokens)
+        let inconsistent = try XCTUnwrap(promptCacheMetric(usages: [["output_tokens": 50, "input_tokens": 100, "cached_input_tokens": 101]]))
+        XCTAssertNil(inconsistent.inputTokens)
+        XCTAssertNil(inconsistent.cacheReadInputTokens)
+        let zero = try XCTUnwrap(promptCacheMetric(usages: [["output_tokens": 50, "input_tokens": 100, "cached_input_tokens": 0]]))
+        XCTAssertEqual(zero.inputTokens, 100)
+        XCTAssertEqual(zero.cacheReadInputTokens, 0)
+    }
+
     private func started(_ turnID: String) throws -> Data {
         try event(type: "event_msg", payload: ["type": "task_started", "turn_id": turnID])
     }

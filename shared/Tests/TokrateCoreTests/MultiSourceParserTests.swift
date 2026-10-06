@@ -408,13 +408,14 @@ final class MultiSourceParserTests: XCTestCase {
     }
 
     private func grokMetric(
-        _ turn: (parser: GrokSessionParser, endedAt: Date), output: Int, modelCalls: Any? = 9, number: Int = 0
+        _ turn: (parser: GrokSessionParser, endedAt: Date), output: Int, modelCalls: Any? = 9, number: Int = 0,
+        extra: [String: Any] = [:]
     ) throws -> TurnMetric {
         var parser = turn.parser
         let snapshot = try usageSnapshot(
             number: number, endedAt: iso8601(turn.endedAt.addingTimeInterval(0.02)), output: output,
             updatedAt: iso8601(turn.endedAt.addingTimeInterval(1)), modelUsage: ["grok-4.7-build": ["outputTokens": output]],
-            modelCalls: modelCalls
+            modelCalls: modelCalls, extra: extra
         )
         return try XCTUnwrap(parser.reconcile(snapshot: snapshot).first)
     }
@@ -450,6 +451,40 @@ final class MultiSourceParserTests: XCTestCase {
         )
         XCTAssertEqual(try XCTUnwrap(shorter.responseDurationSeconds), 99.2, accuracy: 0.001)
         XCTAssertEqual(try XCTUnwrap(shorter.responseSpeedTPS), 8_032 / 99.2, accuracy: 0.01)
+    }
+
+    // MARK: Prompt cache (0.1.18)
+
+    func testGrokPromptCacheComesFromTheLedgerRowAndCacheWriteIsNeverReported() throws {
+        let metric = try grokMetric(
+            try grokTurn(calls: [GrokCall(generating: 10)]), output: 400,
+            extra: ["inputTokens": 90_000, "cachedReadTokens": 70_000, "cacheCreationTokens": 0]
+        )
+        // Grok's inputTokens already includes the cached tokens.
+        XCTAssertEqual(metric.inputTokens, 90_000)
+        XCTAssertEqual(metric.cacheReadInputTokens, 70_000)
+        XCTAssertNil(metric.cacheWriteInputTokens, "cacheCreationTokens is always 0, which is not a report")
+        let sample = try XCTUnwrap(SharedSample(metric))
+        XCTAssertEqual(sample.inputTokens, 90_000)
+        XCTAssertEqual(sample.cacheReadInputTokens, 70_000)
+        XCTAssertNil(sample.cacheWriteInputTokens)
+    }
+
+    func testGrokPromptCacheIsNilWhenAKeyIsMissingOrTheRowIsInconsistent() throws {
+        let calls = [GrokCall(generating: 10)]
+        for extra: [String: Any] in [
+            [:], ["inputTokens": 90_000], ["cachedReadTokens": 70_000],
+            ["inputTokens": 100, "cachedReadTokens": 101], ["inputTokens": "90000", "cachedReadTokens": 1]
+        ] {
+            let metric = try grokMetric(try grokTurn(calls: calls), output: 400, extra: extra)
+            XCTAssertEqual(metric.outputTokens, 400)
+            XCTAssertNil(metric.inputTokens)
+            XCTAssertNil(metric.cacheReadInputTokens)
+            XCTAssertNil(metric.cacheWriteInputTokens)
+        }
+        let zero = try grokMetric(try grokTurn(calls: calls), output: 400, extra: ["inputTokens": 100, "cachedReadTokens": 0])
+        XCTAssertEqual(zero.inputTokens, 100)
+        XCTAssertEqual(zero.cacheReadInputTokens, 0)
     }
 
     func testGrokFirstWindowStartsAtLoopStartAndLastIsClosedByTurnEnd() throws {
@@ -682,7 +717,8 @@ final class MultiSourceParserTests: XCTestCase {
         incomplete: Bool = false,
         modelUsage: [String: [String: Int]],
         primaryModelId: String? = nil,
-        modelCalls: Any? = 2
+        modelCalls: Any? = 2,
+        extra: [String: Any] = [:]
     ) throws -> Data {
         // The usage ledger numbers turns from 1 while events.jsonl numbers them from 0.
         var turn: [String: Any] = [
@@ -691,6 +727,7 @@ final class MultiSourceParserTests: XCTestCase {
             "usageIsIncomplete": incomplete, "modelUsage": modelUsage
         ]
         if let modelCalls { turn["modelCalls"] = modelCalls }
+        turn.merge(extra) { _, new in new }
         if let primaryModelId { turn["primaryModelId"] = primaryModelId }
         return try json(["sessionId": sessionID, "updatedAt": updatedAt, "turns": [turn]])
     }

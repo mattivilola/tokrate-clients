@@ -112,6 +112,12 @@ impl History {
                     record.response_duration_seconds = None;
                     record.response_count = None;
                 }
+                // A stored set that is not consistent reads as not reported.
+                record.set_prompt_cache(
+                    record.input_tokens,
+                    record.cache_read_input_tokens,
+                    record.cache_write_input_tokens,
+                );
                 by_id.insert(record.id.clone(), record);
             }
         }

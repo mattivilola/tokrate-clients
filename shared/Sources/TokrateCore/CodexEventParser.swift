@@ -15,6 +15,9 @@ public struct CodexEventParser: Sendable {
         var startObserved = false
         var outputTokens: Int?
         var reasoningOutputTokens: Int?
+        /// From the latest `turn_token_usage`: input tokens including the cached ones, and the cached ones.
+        var inputTokens: Int?
+        var cachedInputTokens: Int?
         var durationMilliseconds: Double?
         var ttftMilliseconds: Double?
         var model: String?
@@ -146,6 +149,8 @@ public struct CodexEventParser: Sendable {
                 // Codex reports cumulative per-turn usage. A later record replaces the prior total.
                 state.outputTokens = output
                 state.reasoningOutputTokens = nonnegativeInteger(usage["reasoning_output_tokens"])
+                state.inputTokens = nonnegativeInteger(usage["input_tokens"])
+                state.cachedInputTokens = nonnegativeInteger(usage["cached_input_tokens"])
             }
             turns[turnID] = state
             return nil
@@ -249,7 +254,11 @@ public struct CodexEventParser: Sendable {
             responseOutputTokens: state.responseCount > 0 ? state.responseTokens : nil,
             responseDurationSeconds: state.responseCount > 0 ? state.responseSeconds : nil,
             responseCount: state.responseCount > 0 ? state.responseCount : nil,
-            surface: surface
+            surface: surface,
+            // Codex logs a cache-write field that is always 0: not reported, never 0.
+            inputTokens: state.inputTokens,
+            cacheReadInputTokens: state.cachedInputTokens,
+            cacheWriteInputTokens: nil
         )
     }
 

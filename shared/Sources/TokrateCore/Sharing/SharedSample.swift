@@ -29,6 +29,12 @@ public struct SharedSample: Encodable, Sendable {
     public let delegatedOutputTokens: Int?
     /// Where the coding tool ran, as a category (contract "Surface"); null when unknown. Always sent.
     public let surface: String?
+    /// Prompt-cache usage (contract "Prompt cache"): input tokens of the turn including cached ones,
+    /// those read from the cache, and those written to it (Claude Code only). Always sent; null when
+    /// the source does not report them.
+    public let inputTokens: Int?
+    public let cacheReadInputTokens: Int?
+    public let cacheWriteInputTokens: Int?
     /// Largest accepted delegated total (the same bound the server enforces).
     public static let maximumDelegatedOutputTokens = 100_000_000
     public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
@@ -61,6 +67,9 @@ public struct SharedSample: Encodable, Sendable {
             delegatedOutputTokens = nil
         }
         surface = metric.surface?.rawValue
+        inputTokens = metric.inputTokens
+        cacheReadInputTokens = metric.cacheReadInputTokens
+        cacheWriteInputTokens = metric.cacheWriteInputTokens
         provider = metric.provider ?? "unknown"
         reasoningEffort = metric.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown"
         outputTokens = metric.outputTokens
@@ -97,6 +106,7 @@ public struct SharedSample: Encodable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, reasoningEffort, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
         case responseOutputTokens, responseDurationMs, responseCount, providerRegion, delegatedOutputTokens, surface
+        case inputTokens, cacheReadInputTokens, cacheWriteInputTokens
     }
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -121,6 +131,9 @@ public struct SharedSample: Encodable, Sendable {
         try container.encode(providerRegion, forKey: .providerRegion)
         try container.encode(delegatedOutputTokens, forKey: .delegatedOutputTokens)
         try container.encode(surface, forKey: .surface)
+        try container.encode(inputTokens, forKey: .inputTokens)
+        try container.encode(cacheReadInputTokens, forKey: .cacheReadInputTokens)
+        try container.encode(cacheWriteInputTokens, forKey: .cacheWriteInputTokens)
     }
 
     private static func safeIdentifier(_ value: String?, maximum: Int) -> String? {

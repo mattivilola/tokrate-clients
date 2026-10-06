@@ -1,8 +1,8 @@
 use crate::model::{
-    bedrock_region_or_unknown, ReportedReasoningEffort, ToolSurface, TurnMetric, CLAUDE_CLIENT,
-    CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT,
-    CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION,
+    bedrock_region_or_unknown, consistent_prompt_cache, ReportedReasoningEffort, ToolSurface,
+    TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
+    CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION,
+    GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -53,6 +53,12 @@ pub struct SharedSample {
     pub delegated_output_tokens: Option<i64>,
     /// Where the coding tool ran, as a category (always serialized, null when unknown).
     pub surface: Option<ToolSurface>,
+    /// Prompt-cache usage (always serialized, null when the source does not report it): input
+    /// tokens of the turn including cached ones, those read from the cache, and those written to
+    /// it (Claude Code only).
+    pub input_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
 }
 
 impl SharedSample {
@@ -124,6 +130,12 @@ impl SharedSample {
         let (response_output_tokens, response_duration_ms, response_count) =
             shared_response_fields(metric);
         let provider = shared_provider(client, metric.provider.as_deref());
+        let (input_tokens, cache_read_input_tokens, cache_write_input_tokens) =
+            consistent_prompt_cache(
+                metric.input_tokens,
+                metric.cache_read_input_tokens,
+                metric.cache_write_input_tokens,
+            );
         Some(Self {
             sample_id,
             observed_at: format_date(observed_at),
@@ -162,6 +174,9 @@ impl SharedSample {
                 .then(|| bedrock_region_or_unknown(metric.provider_region.as_deref()).to_owned()),
             delegated_output_tokens,
             surface: metric.surface,
+            input_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
         })
     }
 }

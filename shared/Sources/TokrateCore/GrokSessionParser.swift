@@ -69,6 +69,9 @@ struct GrokSessionParser: JSONLMetricParser {
         let endedAt: Date
         let outputTokens: Int
         let reasoningTokens: Int?
+        /// `inputTokens` (including cached tokens) and `cachedReadTokens` of the ledger row.
+        let inputTokens: Int?
+        let cachedReadTokens: Int?
         let model: String?
         let modelCalls: ModelCalls
     }
@@ -160,7 +163,9 @@ struct GrokSessionParser: JSONLMetricParser {
             let model = soleModelUsage(entry["modelUsage"])
             let reasoningTokens = nonnegativeInteger(entry["reasoningTokens"]).flatMap { $0 <= outputTokens ? $0 : nil }
             let value = UsageTurn(
-                endedAt: endedAt, outputTokens: outputTokens, reasoningTokens: reasoningTokens, model: model,
+                endedAt: endedAt, outputTokens: outputTokens, reasoningTokens: reasoningTokens,
+                inputTokens: nonnegativeInteger(entry["inputTokens"]),
+                cachedReadTokens: nonnegativeInteger(entry["cachedReadTokens"]), model: model,
                 modelCalls: modelCalls(entry["modelCalls"])
             )
             if replacement[number] != nil {
@@ -216,7 +221,11 @@ struct GrokSessionParser: JSONLMetricParser {
                 responseOutputTokens: response?.tokens,
                 responseDurationSeconds: response?.seconds,
                 responseCount: response?.count,
-                delegatedOutputTokens: 0
+                delegatedOutputTokens: 0,
+                // `cacheCreationTokens` is always 0 in Grok's ledger: not reported, never 0.
+                inputTokens: usage.inputTokens,
+                cacheReadInputTokens: usage.cachedReadTokens,
+                cacheWriteInputTokens: nil
             ))
             emittedTurnNumbers.insert(number)
         }

@@ -343,3 +343,47 @@ Only the category is stored and shared. The raw originator or entrypoint string,
 
 - `SharedSample` gains `surface` (the category string, or an explicit `null`), always encoded like the other nullable fields. `appVersion` is `0.1.18` (0.1.17 before). The server accepts the key only from 0.1.18, where it is required (a category or `null`).
 - **Consent notice version 4.** `SharingPreferences.currentNoticeVersion` is 4. Re-consent behaves as for versions 2 and 3: a saved OFF stays OFF. The notice adds: "From 0.1.18 each turn also includes where the coding tool ran, as a category (command line, desktop app, editor extension, SDK or automation, other), never the app's own name." The consent example payload includes the new key.
+
+
+## Prompt cache (0.1.18)
+
+Three new nullable per-turn fields describe the prompt tokens of a turn and how many came from the provider's prompt cache. They are part of the same 0.1.18 contract and sharing notice 4 as `surface`: no parser or metric version changes, and turn speed, response speed and the efficiency indicator are unchanged. They are analysed server-side first: not part of any cohort identity and shown by no local UI.
+
+### Fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `inputTokens` | Int? | Total input (prompt) tokens processed across all model requests of the turn, **including** cached tokens. |
+| `cacheReadInputTokens` | Int? | Input tokens served from the provider's prompt cache. Never more than `inputTokens`. |
+| `cacheWriteInputTokens` | Int? | Tokens written to the prompt cache. Reported by Claude Code only; `null` for Codex and Grok Build. |
+
+Hit ratio = `cacheReadInputTokens / inputTokens` (defined only when `inputTokens > 0`).
+
+### Per-source mapping
+
+| Client | Source | `inputTokens` | `cacheReadInputTokens` | `cacheWriteInputTokens` |
+| --- | --- | --- | --- | --- |
+| Claude Code (primary and subagent turns) | assistant `message.usage` | Σ (`input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`) | Σ `cache_read_input_tokens` | Σ `cache_creation_input_tokens` |
+| Codex | `token_usage_record` payload `turn_token_usage`, the last one seen in the turn (cumulative) | `input_tokens` (already includes cached) | `cached_input_tokens` | `null` |
+| Grok Build | usage ledger turn row (`usage.json`) | `inputTokens` (already includes cached) | `cachedReadTokens` | `null` |
+
+- **Claude Code.** `input_tokens` excludes cached tokens, so the input total adds all three counts. Records repeated for one `message.id` carry identical input and cache values (only `output_tokens` grows): each count is taken once per unique `message.id`, from the first record that has it, over the same unique messages the turn already counts for output. If any counted message lacks `input_tokens`, `cache_read_input_tokens` or `cache_creation_input_tokens`, all three fields are `null` for the turn: a missing count is not zero, and a partial sum would understate the input.
+- **Codex.** Only `turn_token_usage` of `token_usage_record` is used (it is cumulative, so the last record of the turn wins, like `output_tokens`); `event_msg`/`token_count` is not used. A record without `input_tokens` or `cached_input_tokens` gives `null`. Codex's logs carry a cache-write field that is always 0; it is treated as not reported, never as 0.
+- **Grok Build.** `cacheCreationTokens` is always 0 and is ignored for the same reason. A row without `inputTokens` or `cachedReadTokens` gives `null`.
+- Delegated work events are unchanged: subagent output is not added to `inputTokens`.
+
+### Null and consistency rules
+
+- `inputTokens` and `cacheReadInputTokens` are both `null` or both non-null. `cacheWriteInputTokens` is `null` whenever `inputTokens` is `null`.
+- If `cacheReadInputTokens > inputTokens` (inconsistent source data), or any value is negative, all three are `null`.
+- `0` is a valid value (a request that read nothing from the cache); `null` means not reported. The two are never mixed up.
+- The rules are enforced where a record is built, and where stored history is loaded (a stored inconsistent set reads as not reported); the desktop core checks it once more when a shared sample is built.
+
+### Persistence
+
+The three fields are stored with each history record. Records saved before 0.1.18 carry none and decode with all three `null`.
+
+### Sharing and consent notice 4
+
+- `SharedSample` gains `inputTokens`, `cacheReadInputTokens` and `cacheWriteInputTokens`, always encoded (explicit `null` when not reported) for every client and source kind, like `surface`. `appVersion` stays `0.1.18`.
+- The consent notice stays at version 4 and adds: "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache." The consent example payload includes the three keys.

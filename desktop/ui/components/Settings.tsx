@@ -2,7 +2,13 @@ import { useEffect, type ReactNode } from "react";
 import { ArrowLeft, ArrowUpRight, Check, FolderOpen, Minus, RotateCcw } from "lucide-react";
 import { client } from "../metrics";
 import { folderName, SOURCE_TITLES } from "../model/format";
-import { DELEGATED_NOTICE, REGION_NOTICE, SURFACE_NOTICE, buildSentExample } from "./SharingChoice";
+import {
+  DELEGATED_NOTICE,
+  PROMPT_CACHE_NOTICE,
+  REGION_NOTICE,
+  SURFACE_NOTICE,
+  buildSentExample,
+} from "./SharingChoice";
 import { useStore } from "../store/store";
 import type { SourceId, SourceStatus } from "../store/types";
 import { Chip, Disclosure, StatusDot, Switch, useAppStore } from "./primitives";
@@ -203,7 +209,7 @@ export function SettingsView() {
           </div>
           <p className="fine">
             Contribution is off until you choose. No prompts, responses, code or local file
-            paths are uploaded. {REGION_NOTICE} {DELEGATED_NOTICE} {SURFACE_NOTICE} You can withdraw at any time: turning sharing off stops future
+            paths are uploaded. {REGION_NOTICE} {DELEGATED_NOTICE} {SURFACE_NOTICE} {PROMPT_CACHE_NOTICE} You can withdraw at any time: turning sharing off stops future
             community requests and clears queued reports. Reports already received cannot be
             recalled by the switch.
           </p>

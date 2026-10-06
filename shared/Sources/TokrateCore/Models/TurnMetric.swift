@@ -42,6 +42,15 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// Where the coding tool ran (contract "Surface"). Nil when the source gives no signal; only the
     /// category is kept, never the originator or entrypoint it came from.
     public let surface: ToolSurface?
+    /// Input (prompt) tokens processed across all model requests of the turn, including tokens served
+    /// from the prompt cache (contract "Prompt cache"). Nil when the source does not report it.
+    public let inputTokens: Int?
+    /// Input tokens served from the provider's prompt cache; never more than `inputTokens`, and nil
+    /// exactly when `inputTokens` is.
+    public let cacheReadInputTokens: Int?
+    /// Tokens written to the prompt cache. Reported by Claude Code only; nil for Codex and Grok Build
+    /// (their logs carry a field that is always 0, which is not a report) and whenever `inputTokens` is nil.
+    public let cacheWriteInputTokens: Int?
     /// Generic name for the source-reported TTFT observation. The stored Codex name remains
     /// for backward compatibility with existing history files.
     /// Output tokens per second while the model was responding: tools and waiting excluded.
@@ -153,7 +162,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         responseCount: Int? = nil,
         providerRegion: String? = nil,
         delegatedOutputTokens: Int? = nil,
-        surface: ToolSurface? = nil
+        surface: ToolSurface? = nil,
+        inputTokens: Int? = nil,
+        cacheReadInputTokens: Int? = nil,
+        cacheWriteInputTokens: Int? = nil
     ) {
         // The three response fields travel together: a partial set carries no usable measurement.
         let hasResponse = responseOutputTokens.map { $0 > 0 } == true
@@ -165,6 +177,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         self.providerRegion = providerRegion
         self.delegatedOutputTokens = delegatedOutputTokens
         self.surface = surface
+        let cache = Self.consistentPromptCache(input: inputTokens, read: cacheReadInputTokens, write: cacheWriteInputTokens)
+        self.inputTokens = cache.input
+        self.cacheReadInputTokens = cache.read
+        self.cacheWriteInputTokens = cache.write
         self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         self.client = client
         self.clientVersion = clientVersion
@@ -188,6 +204,16 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         case reasoningOutputTokens, sourceKind, provider, outputTokens, durationSeconds, codexTTFTSeconds
         case turnThroughputTPS, streamingTPS
         case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion, delegatedOutputTokens, surface
+        case inputTokens, cacheReadInputTokens, cacheWriteInputTokens
+    }
+
+    /// The prompt-cache fields as one consistent set (contract "Prompt cache"): input and cache-read
+    /// travel together, cache-write needs the input total, and a read larger than the input is
+    /// inconsistent source data, so every field is dropped. Negative values are never valid.
+    static func consistentPromptCache(input: Int?, read: Int?, write: Int?) -> (input: Int?, read: Int?, write: Int?) {
+        guard let input, let read, input >= 0, read >= 0, read <= input, write.map({ $0 >= 0 }) ?? true
+        else { return (nil, nil, nil) }
+        return (input, read, write)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -220,6 +246,16 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         // Records saved before 0.1.18 carry no surface. A value this build does not know (written by a
         // newer one) reads as unknown instead of failing the record.
         surface = (try? values.decodeIfPresent(String.self, forKey: .surface)).flatMap(ToolSurface.init(rawValue:))
+        // Records saved before 0.1.18 carry no prompt-cache fields. The set is normalized exactly as
+        // when it is built, so a stored inconsistent set reads as not reported.
+        let cache = Self.consistentPromptCache(
+            input: try values.decodeIfPresent(Int.self, forKey: .inputTokens),
+            read: try values.decodeIfPresent(Int.self, forKey: .cacheReadInputTokens),
+            write: try values.decodeIfPresent(Int.self, forKey: .cacheWriteInputTokens)
+        )
+        inputTokens = cache.input
+        cacheReadInputTokens = cache.read
+        cacheWriteInputTokens = cache.write
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -246,6 +282,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encodeIfPresent(providerRegion, forKey: .providerRegion)
         try values.encodeIfPresent(delegatedOutputTokens, forKey: .delegatedOutputTokens)
         try values.encodeIfPresent(surface, forKey: .surface)
+        try values.encodeIfPresent(inputTokens, forKey: .inputTokens)
+        try values.encodeIfPresent(cacheReadInputTokens, forKey: .cacheReadInputTokens)
+        try values.encodeIfPresent(cacheWriteInputTokens, forKey: .cacheWriteInputTokens)
     }
 
     /// This record without response timing, for a measurement that failed `hasPlausibleResponseTiming`.
@@ -257,7 +296,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
             clientVersion: clientVersion, parserVersion: parserVersion, metricVersion: metricVersion,
             reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
             reasoningEffort: reasoningEffort, providerRegion: providerRegion,
-            delegatedOutputTokens: delegatedOutputTokens, surface: surface
+            delegatedOutputTokens: delegatedOutputTokens, surface: surface,
+            inputTokens: inputTokens, cacheReadInputTokens: cacheReadInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens
         )
     }
 
@@ -271,7 +312,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
             reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
             reasoningEffort: reasoningEffort, responseOutputTokens: responseOutputTokens,
             responseDurationSeconds: responseDurationSeconds, responseCount: responseCount,
-            providerRegion: providerRegion, delegatedOutputTokens: tokens, surface: surface
+            providerRegion: providerRegion, delegatedOutputTokens: tokens, surface: surface,
+            inputTokens: inputTokens, cacheReadInputTokens: cacheReadInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens
         )
     }
 }

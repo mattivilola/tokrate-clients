@@ -8,7 +8,7 @@ final class SharedSampleTests: XCTestCase {
     private func claude(
         provider: String? = "anthropic", region: String? = nil, outputTokens: Int = 1_000, durationSeconds: Double = 100,
         tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil, sourceKind: String = "primary", delegated: Int? = 0,
-        surface: ToolSurface? = nil
+        surface: ToolSurface? = nil, input: Int? = nil, cacheRead: Int? = nil, cacheWrite: Int? = nil
     ) -> TurnMetric {
         TurnMetric(
             id: "LOCAL_PRIVATE_DIGEST", completedAt: now, model: "claude-sonnet-4-5", outputTokens: outputTokens,
@@ -16,7 +16,8 @@ final class SharedSampleTests: XCTestCase {
             client: "claude-code", clientVersion: "2.1.37", parserVersion: "claude-transcript-v4",
             metricVersion: "claude-observed-turn-v1", sourceKind: sourceKind, provider: provider,
             responseOutputTokens: tokens, responseDurationSeconds: seconds, responseCount: count, providerRegion: region,
-            delegatedOutputTokens: delegated, surface: surface
+            delegatedOutputTokens: delegated, surface: surface,
+            inputTokens: input, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite
         )
     }
 
@@ -30,11 +31,13 @@ final class SharedSampleTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), [
             "sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider",
             "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs",
-            "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface"
+            "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface",
+            "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"
         ])
         XCTAssertEqual(object["appVersion"] as? String, "0.1.18")
         XCTAssertEqual(sample.appVersion, "0.1.18")
-        for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens", "surface"] {
+        for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens", "surface",
+                    "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"] {
             XCTAssertTrue(object[key] is NSNull, "\(key) is encoded as null when absent")
         }
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(sample), as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
@@ -51,6 +54,31 @@ final class SharedSampleTests: XCTestCase {
         XCTAssertTrue(try json(unknown)["surface"] is NSNull)
         // Subagent records carry their own session's surface like any other turn.
         XCTAssertEqual(try XCTUnwrap(SharedSample(claude(sourceKind: "subagent", delegated: nil, surface: .sdk))).surface, "sdk")
+    }
+
+    func testPromptCacheTokensAreSharedAndEncodedAsExplicitNullsWhenNotReported() throws {
+        let reported = try XCTUnwrap(SharedSample(claude(input: 52_000, cacheRead: 40_000, cacheWrite: 9_000)))
+        XCTAssertEqual(reported.inputTokens, 52_000)
+        XCTAssertEqual(reported.cacheReadInputTokens, 40_000)
+        XCTAssertEqual(reported.cacheWriteInputTokens, 9_000)
+        let object = try json(reported)
+        XCTAssertEqual(object["inputTokens"] as? Int, 52_000)
+        XCTAssertEqual(object["cacheReadInputTokens"] as? Int, 40_000)
+        XCTAssertEqual(object["cacheWriteInputTokens"] as? Int, 9_000)
+
+        // Codex and Grok Build report no cache write: the key is present and null.
+        let noWrite = try json(try XCTUnwrap(SharedSample(claude(input: 52_000, cacheRead: 0, cacheWrite: nil))))
+        XCTAssertEqual(noWrite["cacheReadInputTokens"] as? Int, 0)
+        XCTAssertTrue(noWrite["cacheWriteInputTokens"] is NSNull)
+
+        for sourceKind in ["primary", "subagent"] {
+            let none = try json(try XCTUnwrap(SharedSample(claude(sourceKind: sourceKind, delegated: sourceKind == "primary" ? 0 : nil))))
+            for key in ["inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"] {
+                XCTAssertTrue(none[key] is NSNull, "\(key) is encoded as null when not reported")
+            }
+        }
+        // Subagent records carry their own turn's cache usage like any other turn.
+        XCTAssertEqual(try XCTUnwrap(SharedSample(claude(sourceKind: "subagent", delegated: nil, input: 10, cacheRead: 4, cacheWrite: 1))).cacheReadInputTokens, 4)
     }
 
     func testDelegatedOutputTokensAreSharedForFinalPrimaryTurnsAndNullForSubagents() throws {

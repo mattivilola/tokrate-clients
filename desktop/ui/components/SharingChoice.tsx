@@ -14,6 +14,10 @@ export const DELEGATED_NOTICE =
 export const SURFACE_NOTICE =
   "From 0.1.18 each turn also includes where the coding tool ran, as a category (command line, desktop app, editor extension, SDK or automation, other), never the app's own name.";
 
+/** Under the same notice version 4: each turn also carries its input and prompt-cache token counts. */
+export const PROMPT_CACHE_NOTICE =
+  "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache.";
+
 /** Obviously fake values in the exact shape of the shared allowlist (see core/src/sharing.rs). */
 export function buildSentExample(): string {
   return JSON.stringify(
@@ -43,6 +47,9 @@ export function buildSentExample(): string {
           responseCount: 2,
           delegatedOutputTokens: 0,
           surface: "cli",
+          inputTokens: 456,
+          cacheReadInputTokens: 300,
+          cacheWriteInputTokens: null,
         },
       ],
     },
@@ -103,6 +110,7 @@ export function SharingChoice({
       <p className="detail-fine region-notice">{REGION_NOTICE}</p>
       <p className="detail-fine region-notice">{DELEGATED_NOTICE}</p>
       <p className="detail-fine region-notice">{SURFACE_NOTICE}</p>
+      <p className="detail-fine region-notice">{PROMPT_CACHE_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

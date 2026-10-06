@@ -34,6 +34,14 @@ export interface Metric {
    * not shown locally (shared with the community sample from 0.1.18).
    */
   surface?: "cli" | "desktop" | "ide" | "sdk" | "other" | null;
+  /**
+   * Input tokens of the turn including those served from the provider's prompt cache, those read
+   * from the cache, and those written to it (Claude Code only). null when the source does not
+   * report them. Not shown locally (shared with the community sample from 0.1.18).
+   */
+  inputTokens?: number | null;
+  cacheReadInputTokens?: number | null;
+  cacheWriteInputTokens?: number | null;
 }
 /** One qualifying API response from the live stream (local only, never persisted). */
 export interface LiveResponse {

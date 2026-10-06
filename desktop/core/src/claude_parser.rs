@@ -66,6 +66,59 @@ pub(crate) fn is_subagent_transcript_path(path: &Path) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().starts_with("agent-"))
 }
 
+/// Usage of one API message (every record sharing a `message.id`).
+#[derive(Default)]
+struct MessageUsage {
+    output_tokens: Option<i64>,
+    /// Prompt-cache usage (contract "Prompt cache"). Records repeated for one `message.id` carry
+    /// identical values, so each is taken once, from the first record that has it.
+    /// `input_tokens` excludes cached tokens.
+    input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+}
+
+impl MessageUsage {
+    fn observe_prompt_cache(&mut self, usage: Option<&serde_json::Map<String, Value>>) {
+        let field = |name: &str| nonnegative_integer(usage.and_then(|usage| usage.get(name)));
+        self.input_tokens = self.input_tokens.or_else(|| field("input_tokens"));
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .or_else(|| field("cache_read_input_tokens"));
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .or_else(|| field("cache_creation_input_tokens"));
+    }
+}
+
+/// Prompt-cache totals `(input, read, write)` over a turn's counted messages. The input total
+/// includes cached tokens (`input_tokens` excludes them). A message missing one of the three
+/// counts, or an overflow, leaves the whole set unreported: a missing count is not zero.
+fn prompt_cache_totals(
+    messages: &HashMap<String, MessageUsage>,
+) -> (Option<i64>, Option<i64>, Option<i64>) {
+    let totals =
+        messages
+            .values()
+            .try_fold((0_i64, 0_i64, 0_i64), |(input, read, write), message| {
+                let uncached = message.input_tokens?;
+                let cached = message.cache_read_input_tokens?;
+                let created = message.cache_creation_input_tokens?;
+                Some((
+                    input
+                        .checked_add(uncached)?
+                        .checked_add(cached)?
+                        .checked_add(created)?,
+                    read.checked_add(cached)?,
+                    write.checked_add(created)?,
+                ))
+            });
+    match totals {
+        Some((input, read, write)) => (Some(input), Some(read), Some(write)),
+        None => (None, None, None),
+    }
+}
+
 #[derive(Default)]
 struct TurnState {
     /// Distinguishes this turn from later ones, so a response is only counted by its own turn.
@@ -78,7 +131,7 @@ struct TurnState {
     invalid: bool,
     ambiguous: bool,
     incomplete_usage: bool,
-    messages: HashMap<String, Option<i64>>,
+    messages: HashMap<String, MessageUsage>,
     model: Option<String>,
     model_ambiguous: bool,
     has_modelless_message: bool,
@@ -411,7 +464,8 @@ impl ClaudeTranscriptParser {
             let output_tokens = nonnegative_integer(usage.and_then(|u| u.get("output_tokens")));
             match turn.messages.get_mut(message_id) {
                 Some(previous) => {
-                    if let (Some(previous_value), Some(current_value)) = (*previous, output_tokens)
+                    if let (Some(previous_value), Some(current_value)) =
+                        (previous.output_tokens, output_tokens)
                     {
                         if current_value < previous_value {
                             turn.incomplete_usage = true;
@@ -419,14 +473,20 @@ impl ClaudeTranscriptParser {
                             // Output usage for one API message can be observed more than
                             // once while its transcript snapshot is being written. Keep
                             // the latest valid cumulative total; never add snapshots.
-                            *previous = Some(current_value);
+                            previous.output_tokens = Some(current_value);
                         }
-                    } else if previous.is_none() && output_tokens.is_some() {
-                        *previous = output_tokens;
+                    } else if previous.output_tokens.is_none() && output_tokens.is_some() {
+                        previous.output_tokens = output_tokens;
                     }
+                    previous.observe_prompt_cache(usage);
                 }
                 None => {
-                    turn.messages.insert(message_id.to_owned(), output_tokens);
+                    let mut message_usage = MessageUsage {
+                        output_tokens,
+                        ..MessageUsage::default()
+                    };
+                    message_usage.observe_prompt_cache(usage);
+                    turn.messages.insert(message_id.to_owned(), message_usage);
                 }
             }
         }
@@ -836,14 +896,16 @@ impl ClaudeTranscriptParser {
             || duration <= 0.0
             || !duration.is_finite()
             || turn.messages.is_empty()
-            || turn.messages.values().any(Option::is_none)
+            || turn
+                .messages
+                .values()
+                .any(|message| message.output_tokens.is_none())
         {
             return None;
         }
-        let output_tokens = turn
-            .messages
-            .values()
-            .try_fold(0_i64, |total, value| total.checked_add((*value)?))?;
+        let output_tokens = turn.messages.values().try_fold(0_i64, |total, message| {
+            total.checked_add(message.output_tokens?)
+        })?;
         let throughput = output_tokens as f64 / duration;
         if !throughput.is_finite()
             || throughput < 0.0
@@ -867,7 +929,9 @@ impl ClaudeTranscriptParser {
         if !self.remember_emitted(id.clone()) {
             return None;
         }
-        Some(TurnMetric {
+        let (input_tokens, cache_read_input_tokens, cache_write_input_tokens) =
+            prompt_cache_totals(&turn.messages);
+        let mut metric = TurnMetric {
             id,
             completed_at,
             model: if turn.model_ambiguous || turn.has_modelless_message {
@@ -913,7 +977,16 @@ impl ClaudeTranscriptParser {
                 .then(|| turn.region.provider().to_owned()),
             delegated_output_tokens: None,
             surface: turn.surface,
-        })
+            input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
+        };
+        metric.set_prompt_cache(
+            input_tokens,
+            cache_read_input_tokens,
+            cache_write_input_tokens,
+        );
+        Some(metric)
     }
 
     fn remember_emitted(&mut self, id: String) -> bool {

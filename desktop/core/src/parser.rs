@@ -55,6 +55,10 @@ struct TurnState {
     start_observed: bool,
     output_tokens: Option<i64>,
     reasoning_output_tokens: Option<i64>,
+    /// From the latest `turn_token_usage`: input tokens including the cached ones, and the cached
+    /// ones.
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
     duration_milliseconds: Option<f64>,
     ttft_milliseconds: Option<f64>,
     model: Option<String>,
@@ -194,6 +198,9 @@ impl CodexEventParser {
                     state.output_tokens = Some(output);
                     state.reasoning_output_tokens =
                         nonnegative_integer(usage.get("reasoning_output_tokens"));
+                    state.input_tokens = nonnegative_integer(usage.get("input_tokens"));
+                    state.cached_input_tokens =
+                        nonnegative_integer(usage.get("cached_input_tokens"));
                 }
             }
             return None;
@@ -271,7 +278,7 @@ impl CodexEventParser {
                 - Duration::nanoseconds((measured.duration * 1e9).min(i64::MAX as f64) as i64)
         });
 
-        let metric = TurnMetric {
+        let mut metric = TurnMetric {
             id: id.clone(),
             completed_at,
             model: if state.model_was_ambiguous {
@@ -302,7 +309,12 @@ impl CodexEventParser {
             provider_region: None,
             delegated_output_tokens: None,
             surface: self.surface,
+            input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
         };
+        // Codex logs a cache-write field that is always 0: not reported, never 0.
+        metric.set_prompt_cache(state.input_tokens, state.cached_input_tokens, None);
         if self.source_kind == "primary" {
             // The root session joins this turn with the delegated work started during it.
             let root = self
