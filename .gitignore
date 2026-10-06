@@ -9,3 +9,4 @@ desktop/src-tauri/target/
 desktop/dist/
 desktop/src-tauri/gen/
 desktop/src-tauri/icons/generated/
+.local/
