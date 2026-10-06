@@ -1,8 +1,23 @@
 import Foundation
-import TokrateCore
+@testable import TokrateCore
 import XCTest
 
 final class JSONLFileReaderTests: XCTestCase {
+    func testLineFeedSearchFindsTheNextBreakFromAnyStart() {
+        let data = Data("ab\ncd\n\nef".utf8)
+        XCTAssertEqual(data.indexOfLineFeed(from: 0), 2)
+        XCTAssertEqual(data.indexOfLineFeed(from: 2), 2)
+        XCTAssertEqual(data.indexOfLineFeed(from: 3), 5)
+        XCTAssertEqual(data.indexOfLineFeed(from: 6), 6)
+        XCTAssertNil(data.indexOfLineFeed(from: 7))
+        XCTAssertNil(data.indexOfLineFeed(from: data.endIndex))
+        XCTAssertNil(Data().indexOfLineFeed(from: 0))
+        // A slice keeps the indices of its base, as `pending` does after a partial removal.
+        let slice = data[3...]
+        XCTAssertEqual(slice.indexOfLineFeed(from: slice.startIndex), 5)
+        XCTAssertNil(slice.indexOfLineFeed(from: 7))
+    }
+
     func testPartialLinesWaitForNewlineAndMalformedLinesAreSkipped() throws {
         let file = try temporaryFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }

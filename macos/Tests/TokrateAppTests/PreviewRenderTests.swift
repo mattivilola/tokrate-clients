@@ -115,8 +115,8 @@ final class PreviewRenderTests: XCTestCase {
             // Gauge states and brand.
             let first = PreviewData.series[0]
             let cohort = ModelCohort(model: first.model, provider: first.provider, clientVersion: first.clientVersion, reasoningEffort: first.effort, client: first.client, parserVersion: first.parser, metricVersion: first.metric)
-            let liveReading = HeroReading(kind: .live, value: 112.4, model: first.model, provider: first.provider, effort: first.effort, chip: nil, completedAt: Date.now.addingTimeInterval(-120), responseCount: 5, cohort: cohort)
-            let turnReading = HeroReading(kind: .turnFallback, value: 62.4, model: "grok-code-fast-1", provider: "xai", effort: nil, chip: "Work turn", completedAt: Date.now.addingTimeInterval(-3 * 3_600), responseCount: nil, cohort: ModelCohort(model: "grok-code-fast-1", provider: "xai", clientVersion: nil, client: "grok-build", parserVersion: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1"))
+            let liveReading = HeroReading(kind: .live, value: 112.4, model: first.model, provider: first.provider, effort: first.effort, chip: nil, completedAt: Date.now.addingTimeInterval(-120), responseCount: 5, cohort: cohort, client: first.client)
+            let turnReading = HeroReading(kind: .turnFallback, value: 62.4, model: "grok-code-fast-1", provider: "xai", effort: nil, chip: "Work turn", completedAt: Date.now.addingTimeInterval(-3 * 3_600), responseCount: nil, cohort: ModelCohort(model: "grok-code-fast-1", provider: "xai", clientVersion: nil, client: "grok-build", parserVersion: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1"), client: "grok-build")
             render(
                 HStack(alignment: .top, spacing: 24) {
                     ThroughputGaugeView(reading: liveReading, compact: true, delta: SpeedDelta(latest: 112.4, median: MetricStats(values: [98, 104, 110, 108, 101])))
@@ -201,6 +201,8 @@ final class PreviewRenderTests: XCTestCase {
             codexFolder: codex,
             claudeProjectsFolder: claude,
             grokSessionsFolder: grok,
+            antigravityDataFolder: grok.deletingLastPathComponent().appendingPathComponent("gemini", isDirectory: true),
+            openCodeDataFolder: grok.deletingLastPathComponent().appendingPathComponent("opencode", isDirectory: true),
             sharingPreferences: preferences,
             defaults: defaults,
             initialRecords: records
@@ -370,20 +372,28 @@ private struct BrandPreview: View {
 private struct MenuBarPreview: View {
     let dark: Bool
 
-    private var readouts: [(ModelMaker, String)] {
-        [(.anthropic, "112.4 tok/s"), (.openAI, "74.1 tok/s"), (.xAI, "131.0 tok/s"), (.unknown, "— tok/s")]
+    private var readouts: [(ModelMaker, String, CodingTool?)] {
+        [
+            (.anthropic, "112.4 tok/s", CodingTool.named("claude-code")), (.openAI, "74.1 tok/s", CodingTool.named("codex")),
+            (.xAI, "131.0 tok/s", CodingTool.named("grok-build")), (.unknown, "— tok/s", nil)
+        ]
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(readouts.enumerated()), id: \.offset) { _, item in
                 MenuBarLabel(
-                    readout: MenuBarReadout(speedText: item.1, group: nil, maker: item.0, accessibilityLabel: item.0.title),
-                    showsSpeed: true, showsBadge: true
+                    readout: MenuBarReadout(speedText: item.1, group: nil, maker: item.0, tool: item.2, accessibilityLabel: item.0.title),
+                    showsSpeed: true, showsBadge: true, showsToolChip: true
                 )
                 .foregroundStyle(dark ? Color.white : Color.black)
             }
-            MenuBarLabel(readout: MenuBarReadout(speedText: "112.4 tok/s", group: nil, maker: .anthropic, accessibilityLabel: ""), showsSpeed: true, showsBadge: false)
+            let anthropic = MenuBarReadout(speedText: "112.4 tok/s", group: nil, maker: .anthropic, tool: CodingTool.named("claude-code"), accessibilityLabel: "")
+            MenuBarLabel(readout: anthropic, showsSpeed: true, showsBadge: false, showsToolChip: true)
+                .foregroundStyle(dark ? Color.white : Color.black)
+            MenuBarLabel(readout: anthropic, showsSpeed: true, showsBadge: true, showsToolChip: false)
+                .foregroundStyle(dark ? Color.white : Color.black)
+            MenuBarLabel(readout: anthropic, showsSpeed: true, showsBadge: false, showsToolChip: false)
                 .foregroundStyle(dark ? Color.white : Color.black)
         }
         .padding(16)

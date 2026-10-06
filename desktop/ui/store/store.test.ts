@@ -8,6 +8,7 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
     monitoring: true,
     showSpeed: true,
     showProviderBadge: true,
+    showToolChip: true,
     selection: "auto",
     days: 1,
     root: "",
@@ -40,6 +41,7 @@ function bridge(over: Partial<Bridge> = {}): Bridge {
     updateSettings: async () => (current = snapshot({ consentPromptRequired: false })),
     recordSharingConsent: async () =>
       (current = snapshot({ consentPromptRequired: false })),
+    setDashboardFilters: async () => {},
     retrySharing: unused,
     chooseFolder: unused,
     resetFolder: unused,
@@ -106,6 +108,62 @@ describe("AppStore", () => {
     store.setToolFilter("claude-code");
     await vi.waitFor(() => expect(update).toHaveBeenCalledWith({ selection: "auto" }));
     expect(store.getState().ui.toolFilter).toBe("claude-code");
+  });
+
+  it("tells the shell the flyout's filters, at start and whenever one changes", async () => {
+    const report = vi.fn(async () => {});
+    const store = new AppStore(bridge({ setDashboardFilters: report }), { reportFilters: true });
+    const stop = store.start();
+    expect(report).toHaveBeenLastCalledWith("all", "all");
+    store.setToolFilter("claude-code");
+    expect(report).toHaveBeenLastCalledWith("claude-code", "all");
+    store.setProviderFilter("anthropic");
+    expect(report).toHaveBeenLastCalledWith("claude-code", "anthropic");
+    expect(report).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it("does not report filters from a window that did not ask (the history window)", async () => {
+    const report = vi.fn(async () => {});
+    const store = new AppStore(bridge({ setDashboardFilters: report }));
+    const stop = store.start();
+    store.setToolFilter("codex");
+    expect(report).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("survives a failed filter report", async () => {
+    const store = new AppStore(
+      bridge({ setDashboardFilters: () => Promise.reject(new Error("gone")) }),
+      { reportFilters: true },
+    );
+    store.setToolFilter("codex");
+    await Promise.resolve();
+    expect(store.getState().ui.toolFilter).toBe("codex");
+    expect(store.getState().error).toBe("");
+  });
+
+  it("keeps the cached records when a poll brings only live data", async () => {
+    const record = { id: "r1" } as Snapshot["records"][number];
+    current = snapshot({ records: [record], revision: 4 });
+    const store = new AppStore(bridge());
+    await store.refresh();
+    expect(store.getState().snapshot.records).toEqual([record]);
+    const live = [
+      { id: "l1", completedAt: "2026-10-06T10:00:00Z", client: "codex" },
+    ] as unknown as NonNullable<Snapshot["live"]>;
+    current = snapshot({ records: [record], revision: 4, live });
+    let sent = -1;
+    const poll = bridge().snapshot;
+    store.bridge.snapshot = async (since) => {
+      const next = await poll(since);
+      sent = next.recordsChanged ? 1 : 0;
+      return { ...next, records: next.recordsChanged ? next.records : [] };
+    };
+    await store.refresh();
+    expect(sent).toBe(0);
+    expect(store.getState().snapshot.live).toEqual(live);
+    expect(store.getState().snapshot.records).toEqual([record]);
   });
 
   it("ignores a poll that was in flight when sharing was switched off", async () => {

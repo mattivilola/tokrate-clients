@@ -58,6 +58,22 @@ public struct LiveResponse: Hashable, Sendable, Identifiable {
         self.durationSeconds = durationSeconds
     }
 
+    /// A completed primary turn that reports its response timing as one aggregate, as a live
+    /// response. Grok Build reports speed per turn only, so its live entry is the response average
+    /// of one whole turn (every model call, tools and waiting excluded), not a single response; the
+    /// turn id is the response id. Nil for subagent turns, a missing model or timing, or timing that
+    /// does not qualify as a response (`ResponseSpeed.qualifies`).
+    public init?(turn: TurnMetric) {
+        guard turn.sourceKind == "primary", let model = turn.model,
+              let tokens = turn.responseOutputTokens, let seconds = turn.responseDurationSeconds,
+              ResponseSpeed.qualifies(outputTokens: tokens, durationSeconds: seconds) else { return nil }
+        self.init(
+            id: turn.id, model: model, provider: turn.provider, client: turn.client, sourceKind: "primary",
+            metricVersion: turn.metricVersion, reasoningEffort: turn.reasoningEffort, completedAt: turn.completedAt,
+            outputTokens: tokens, durationSeconds: seconds
+        )
+    }
+
     public var tokensPerSecond: Double { Double(outputTokens) / durationSeconds }
 }
 

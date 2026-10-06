@@ -4,6 +4,7 @@
 use crate::antigravity_db::{read_database, GenerationCache};
 use crate::antigravity_turns::{finished_turns, live_calls};
 use crate::model::{ResponseMetric, ToolSurface, TurnMetric};
+use crate::monitor::{SourceChange, DISCOVERY_INTERVAL_SECONDS};
 use crate::sqlite_read::{retry_delay, DatabaseSignature, Remembered};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
@@ -18,11 +19,12 @@ const CONVERSATION_FOLDERS: [(&str, ToolSurface); 3] = [
     ("antigravity-ide/conversations", ToolSurface::Ide),
     ("antigravity-cli/conversations", ToolSurface::Cli),
 ];
+/// The names a host watches the three folders under (the watcher keys sources by name).
+const WATCH_KEYS: [&str; 3] = ["antigravity", "antigravity-ide", "antigravity-cli"];
 /// The history retention: databases untouched for longer are not opened.
 const RETENTION_DAYS: i64 = 7;
 const MAX_DISCOVERED_PATHS: usize = 100_000;
 const MAX_DATABASES: usize = 128;
-const DISCOVERY_SECONDS: i64 = 10;
 
 struct Conversation {
     id: String,
@@ -30,6 +32,8 @@ struct Conversation {
     surface: ToolSurface,
     /// The signature the last successful read saw; `None` until one succeeds.
     read_at: Option<DatabaseSignature>,
+    /// The files as last seen: refreshed by every poll and by a watcher report for this database.
+    current: Option<DatabaseSignature>,
     /// Orders re-reads: databases serviced longest ago go first.
     serviced: u64,
     /// Consecutive failed reads; a failing database waits `retry_delay(failures)` before the next try.
@@ -51,6 +55,9 @@ pub struct AntigravityMonitor {
     root: PathBuf,
     conversations: HashMap<PathBuf, Conversation>,
     last_discovery: Option<DateTime<Utc>>,
+    /// A new or vanished database, a new folder or lost events: enumerate on the next poll.
+    needs_discovery: bool,
+    root_was_present: bool,
     /// First poll time: only model calls completed after it are published live.
     started_at: Option<DateTime<Utc>>,
     ticks: u64,
@@ -66,6 +73,8 @@ impl AntigravityMonitor {
             root,
             conversations: HashMap::new(),
             last_discovery: None,
+            needs_discovery: false,
+            root_was_present: false,
             started_at: None,
             ticks: 0,
             bytes_read_last_poll: 0,
@@ -95,19 +104,31 @@ impl AntigravityMonitor {
     ) -> io::Result<Vec<TurnMetric>> {
         self.bytes_read_last_poll = 0;
         let started_at = *self.started_at.get_or_insert(now);
-        if self
-            .last_discovery
-            .is_none_or(|last| now < last || now - last >= Duration::seconds(DISCOVERY_SECONDS))
+        let root_is_present = self.root_exists();
+        if root_is_present && !self.root_was_present {
+            self.needs_discovery = true;
+        }
+        self.root_was_present = root_is_present;
+        // Enumerating is for new databases, lost events and the safety net; a poll that found
+        // nothing reported opens no file and only looks at the known databases.
+        if self.needs_discovery
+            || self.last_discovery.is_none_or(|last| {
+                now < last || now - last >= Duration::seconds(DISCOVERY_INTERVAL_SECONDS)
+            })
         {
+            self.needs_discovery = false;
             self.discover(now);
             self.last_discovery = Some(now);
         }
         let cutoff = now - Duration::days(RETENTION_DAYS);
+        for (path, conversation) in &mut self.conversations {
+            conversation.current = DatabaseSignature::of(path);
+        }
         let mut stale: Vec<(PathBuf, DatabaseSignature)> = self
             .conversations
             .iter()
             .filter_map(|(path, conversation)| {
-                let signature = DatabaseSignature::of(path)?;
+                let signature = conversation.current?;
                 (signature.modified()? >= cutoff
                     && conversation.read_at != Some(signature)
                     && conversation.retry_at.is_none_or(|retry_at| retry_at <= now))
@@ -168,6 +189,100 @@ impl AntigravityMonitor {
 
     pub fn bytes_read_last_poll(&self) -> usize {
         self.bytes_read_last_poll
+    }
+
+    /// Whether any conversation folder exists now.
+    pub fn root_exists(&self) -> bool {
+        Self::has_conversation_folder(&self.root)
+    }
+
+    /// The conversation folders a host watches, each under a name of its own, with whether it
+    /// exists now. Only these folders are watched: the rest of `~/.gemini` (a browser profile,
+    /// caches, brain files) changes constantly and holds nothing measured.
+    pub fn watch_folders(&self) -> Vec<(&'static str, PathBuf, bool)> {
+        CONVERSATION_FOLDERS
+            .iter()
+            .zip(WATCH_KEYS)
+            .map(|((folder, _), key)| {
+                let path = self.root.join(folder);
+                let exists = path.is_dir();
+                (key, path, exists)
+            })
+            .collect()
+    }
+
+    /// Marks what a folder watcher reported so the next poll reads it. Only a `<id>.db` or
+    /// `<id>.db-wal` directly inside a conversation folder (or such a folder itself) matters; every
+    /// other path is ignored. A change to a known database refreshes its signature, and a new
+    /// database, a vanished one, a folder change or a lost event triggers discovery. Paths must be
+    /// spelled under the root as the monitor was created with. Returns whether a poll has work now.
+    pub fn note_changes(&mut self, change: &SourceChange) -> bool {
+        let mut noted = change.must_rescan;
+        if change.must_rescan {
+            self.needs_discovery = true;
+        }
+        let folders: Vec<PathBuf> = CONVERSATION_FOLDERS
+            .iter()
+            .map(|(folder, _)| self.root.join(folder))
+            .collect();
+        for path in &change.paths {
+            if folders.contains(path) {
+                self.needs_discovery = true;
+                noted = true;
+                continue;
+            }
+            let Some(database) = database_of_event(path) else {
+                continue;
+            };
+            if !path
+                .parent()
+                .is_some_and(|parent| folders.iter().any(|folder| folder == parent))
+            {
+                continue;
+            }
+            match self.conversations.get_mut(&database) {
+                Some(conversation) => match DatabaseSignature::of(&database) {
+                    Some(signature) => {
+                        conversation.current = Some(signature);
+                        // A report that changed nothing (the files already read) leaves nothing
+                        // to poll for.
+                        noted |= conversation.read_at != Some(signature);
+                    }
+                    None => {
+                        self.needs_discovery = true;
+                        noted = true;
+                    }
+                },
+                None if DatabaseSignature::of(&database).is_some() => {
+                    self.needs_discovery = true;
+                    noted = true;
+                }
+                None => {}
+            }
+        }
+        noted
+    }
+
+    /// When the monitor must poll again if nothing else changes: `now` while a discovery is due or
+    /// a changed database waits to be read (including reads the per-poll cap deferred), else the
+    /// earliest retry of a database that failed to read, else `None`.
+    pub fn next_poll_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        if self.needs_discovery {
+            return Some(now);
+        }
+        let cutoff = now - Duration::days(RETENTION_DAYS);
+        self.conversations
+            .values()
+            .filter(|conversation| {
+                conversation.current.is_some_and(|current| {
+                    conversation.read_at != Some(current)
+                        && current
+                            .modified()
+                            .is_some_and(|modified| modified >= cutoff)
+                })
+            })
+            .map(|conversation| conversation.retry_at.map_or(now, |retry| retry.max(now)))
+            .min()
     }
 
     /// Qualifying model calls completed since the last call, oldest first.
@@ -235,6 +350,7 @@ impl AntigravityMonitor {
                     id: candidate.id,
                     surface: candidate.surface,
                     read_at: None,
+                    current: None,
                     serviced: 0,
                     failures: 0,
                     retry_at: None,
@@ -244,4 +360,17 @@ impl AntigravityMonitor {
                 });
         }
     }
+}
+
+/// The database a changed path belongs to: `<id>.db` is itself and `<id>.db-wal` is its log; nothing
+/// else (`.pb`, `-shm`, journals) is.
+fn database_of_event(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let id = name
+        .strip_suffix(".db")
+        .or_else(|| name.strip_suffix(".db-wal"))?;
+    if id.is_empty() || id.starts_with('.') {
+        return None;
+    }
+    Some(path.with_file_name(format!("{id}.db")))
 }

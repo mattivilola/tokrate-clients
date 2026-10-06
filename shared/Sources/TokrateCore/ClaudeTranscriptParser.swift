@@ -629,11 +629,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
 
     private func parseDate(_ value: Any?) -> Date? {
         guard let string = value as? String else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: string) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: string)
+        return TranscriptTimestamp.parse(string)
     }
 }
 
@@ -729,13 +725,30 @@ public actor ClaudeSessionMonitor {
 
     /// `liveSince` is the moment from which completed responses count as live; earlier responses are
     /// history and never reach the live stream.
-    public init(root: URL, liveSince: Date = .now) {
-        primary = JSONLSourceSessionMonitor(root: root, liveSince: liveSince) { url in
+    /// `primaryCheckpoints` and `subagentCheckpoints` are the files an earlier run read to their end,
+    /// whose records are already in the history.
+    public init(
+        root: URL, liveSince: Date = .now,
+        primaryCheckpoints: [SourceFileCheckpoint] = [], subagentCheckpoints: [SourceFileCheckpoint] = []
+    ) {
+        primary = JSONLSourceSessionMonitor(
+            root: root, liveSince: liveSince,
+            versionKey: SourceFileCheckpoint.versionKey(
+                parser: ClaudeTranscriptParser.parserVersion, metric: ClaudeTranscriptParser.primaryMetricVersion
+            ),
+            checkpoints: primaryCheckpoints
+        ) { url in
             url.pathExtension.lowercased() == "jsonl"
                 && !url.lastPathComponent.hasPrefix("agent-")
                 && !url.pathComponents.contains("subagents")
         }
-        subagents = JSONLSourceSessionMonitor(root: root, liveSince: liveSince) { url in
+        subagents = JSONLSourceSessionMonitor(
+            root: root, liveSince: liveSince,
+            versionKey: SourceFileCheckpoint.versionKey(
+                parser: ClaudeTranscriptParser.parserVersion, metric: ClaudeTranscriptParser.subagentMetricVersion
+            ),
+            checkpoints: subagentCheckpoints
+        ) { url in
             url.pathExtension.lowercased() == "jsonl" && Self.isSubagentTranscript(url)
         }
     }
@@ -774,6 +787,15 @@ public actor ClaudeSessionMonitor {
             attributor.nextDeadline(now: now)
         ].compactMap { $0 }
         return deadlines.min()
+    }
+
+    /// The files of both sets read to their end, whose records are all in the history, for a later run
+    /// to skip. Nil while the previous sets stay valid: before the first discovery, and while a primary
+    /// turn awaits its delegated total (it is not final, and skipping its file would leave it so).
+    public func checkpoints() async -> (primary: [SourceFileCheckpoint], subagents: [SourceFileCheckpoint])? {
+        guard !attributor.hasPending, let primary = await primary.checkpoints(),
+              let subagents = await subagents.checkpoints() else { return nil }
+        return (primary, subagents)
     }
 
     public func status() async -> (rootAvailable: Bool, files: Int) {

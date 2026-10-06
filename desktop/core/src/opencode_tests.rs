@@ -1,6 +1,7 @@
 //! Tests for the OpenCode adapter over synthetic databases created with the exact `session` and
 //! `message` schema OpenCode 1.18 writes (Drizzle), with JSON message data in its real shape.
 
+use crate::monitor::SourceChange;
 use crate::opencode_turns::{turn_id, version_is_measured};
 use crate::sqlite_read::read_only_uri;
 use crate::{
@@ -1474,4 +1475,158 @@ fn a_turn_re_emitted_with_its_delegated_total_replaces_the_pending_one_in_histor
     assert_eq!(history.records().len(), 1);
     assert_eq!(history.records()[0].delegated_output_tokens, Some(250));
     assert_eq!(queue.len(), 1);
+}
+
+// ---- event-driven polling ------------------------------------------------------------------------
+
+fn changed(paths: &[PathBuf]) -> SourceChange {
+    SourceChange {
+        paths: paths.iter().cloned().collect(),
+        must_rescan: false,
+    }
+}
+
+#[test]
+fn only_the_database_and_its_log_wake_a_poll() {
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    standard(&db, t0());
+    let mut monitor = fixture.monitor();
+    let at = now();
+    assert_eq!(poll(&mut monitor, at).len(), 1);
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    let root = fixture.root();
+    // A report that changed nothing leaves nothing to poll for.
+    assert!(!monitor.note_changes(&changed(&[db.path.clone()])));
+
+    // The data folder also holds snapshots, tool output, logs and the old JSON storage, which change
+    // constantly: none of them wakes a poll.
+    let unrelated = [
+        root.join("log/2026-10-06.log"),
+        root.join("snapshot/abc/HEAD"),
+        root.join("tool-output/tool_1"),
+        root.join("storage/message/x.json"),
+        root.join("auth.json"),
+        root.join("opencode.db-shm"),
+        root.join("other.db"),
+        root.join("sub/opencode.db"),
+    ];
+    assert!(!monitor.note_changes(&changed(&unrelated)));
+    assert_eq!(monitor.next_poll_deadline(at), None);
+
+    db.user("msg_user_2", SESSION, t0() + 60_000);
+    assert!(monitor.note_changes(&changed(&[db.path.clone()])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    assert!(poll(&mut monitor, at).is_empty());
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    // A write to the log counts too.
+    db.user("msg_user_3", SESSION, t0() + 61_000);
+    let wal = PathBuf::from(format!("{}-wal", db.path.display()));
+    assert!(monitor.note_changes(&changed(&[wal])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    poll(&mut monitor, at);
+    // A lost event is answered by a poll.
+    assert!(monitor.note_changes(&SourceChange {
+        paths: Default::default(),
+        must_rescan: true,
+    }));
+}
+
+#[test]
+fn deadlines_are_a_waiting_read_the_retry_time_and_the_delegation_settle() {
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    let t0 = t0();
+    standard(&db, t0);
+    subagent(&db, t0);
+    db.call(
+        &Call::new("msg_c1", "msg_child_user")
+            .session(CHILD)
+            .running(t0 + 2_000)
+            .tokens(0, 0),
+    );
+    let mut monitor = fixture.monitor();
+    let at = now();
+    // Nothing read yet, but the database exists and is stat-ed by the poll.
+    assert_eq!(poll(&mut monitor, at)[0].delegated_output_tokens, None);
+    // The turn waits for unfinished subagent work: its wait ends 30 minutes after the turn did.
+    let completed = DateTime::<Utc>::from_timestamp_millis(t0 + 16_000).unwrap();
+    assert_eq!(
+        monitor.next_poll_deadline(at),
+        Some(completed + Duration::minutes(30))
+    );
+    // A changed database comes first.
+    db.user("msg_user_2", SESSION, t0 + 60_000);
+    assert!(monitor.note_changes(&changed(&[db.path.clone()])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    poll(&mut monitor, at);
+    // The settle is final after the wait.
+    let settled = poll(&mut monitor, completed + Duration::minutes(31));
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        monitor.next_poll_deadline(completed + Duration::minutes(31)),
+        None
+    );
+
+    // An unreadable database is retried with a growing delay.
+    let broken = Fixture::new();
+    fs::create_dir_all(broken.root()).unwrap();
+    let path = broken.root().join("opencode.db");
+    fs::write(&path, b"this is not a sqlite database at all").unwrap();
+    let mut monitor = broken.monitor();
+    assert!(poll(&mut monitor, at).is_empty());
+    assert_eq!(
+        monitor.next_poll_deadline(at),
+        Some(at + Duration::seconds(10))
+    );
+    let later = at + Duration::seconds(11);
+    assert_eq!(monitor.next_poll_deadline(later), Some(later));
+    assert!(poll(&mut monitor, later).is_empty());
+    assert_eq!(
+        monitor.next_poll_deadline(later),
+        Some(later + Duration::seconds(20))
+    );
+    // A missing database has nothing to wait for.
+    let mut nothing = OpenCodeMonitor::new(broken.dir.path().join("none"));
+    assert!(poll(&mut nothing, at).is_empty());
+    assert_eq!(nothing.next_poll_deadline(at), None);
+    assert!(!nothing.root_exists());
+}
+
+#[test]
+fn source_monitor_wakes_on_the_opencode_database_only_and_watches_its_folder_shallowly() {
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    standard(&db, t0());
+    let empty = |name: &str| {
+        let path = fixture.dir.path().join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let mut monitor = SourceMonitor::new(
+        empty("codex"),
+        empty("claude"),
+        empty("grok"),
+        empty("gemini"),
+        fixture.root(),
+    );
+    let at = now();
+    assert_eq!(monitor.poll(at).unwrap().len(), 1);
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    assert!(!monitor.note_changes(&changed(&[
+        fixture.root().join("log/today.log"),
+        fixture
+            .dir
+            .path()
+            .join("gemini/antigravity/conversations/a.db"),
+    ])));
+    db.user("msg_user_2", SESSION, t0() + 60_000);
+    assert!(monitor.note_changes(&changed(&[db.path.clone()])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    // The data folder is watched without its snapshot, tool-output and log subfolders.
+    let folders = monitor.watch_folders("opencode");
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].path, fixture.root());
+    assert!(folders[0].exists && !folders[0].recursive);
+    assert_eq!(monitor.root_exists("opencode"), Some(true));
 }

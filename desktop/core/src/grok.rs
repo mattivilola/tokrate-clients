@@ -3,6 +3,7 @@ use crate::model::{
     GROK_METRIC_VERSION, GROK_PARSER_VERSION, MAX_TOKENS_PER_SECOND, RESPONSE_MAX_DURATION_SECONDS,
     RESPONSE_MIN_OUTPUT_TOKENS,
 };
+use crate::monitor::{SourceChange, DISCOVERY_INTERVAL_SECONDS};
 use crate::reader::{file_identity, FileIdentity, MAX_LINE_BYTES};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
@@ -20,6 +21,8 @@ const MAX_COMPLETED_TURNS: usize = 4_096;
 const MAX_SESSIONS_PER_POLL: usize = 8;
 const PER_FILE_BUDGET: usize = 32_768;
 const MAX_NESTED_DEPTH: u32 = 64;
+/// The files of a session folder whose changes the monitor acts on.
+const WATCHED_FILE_NAMES: [&str; 3] = ["events.jsonl", "usage.json", "summary.json"];
 
 #[derive(Clone)]
 struct Candidate {
@@ -500,6 +503,8 @@ struct UsageReader {
     refreshing: bool,
     snapshot_hash: Option<[u8; 32]>,
     snapshot: Option<UsageSnapshot>,
+    /// The last poll replaced the snapshot with different content.
+    snapshot_replaced: bool,
     bytes_read_last_poll: usize,
 }
 
@@ -514,12 +519,23 @@ impl UsageReader {
             refreshing: false,
             snapshot_hash: None,
             snapshot: None,
+            snapshot_replaced: false,
             bytes_read_last_poll: 0,
         }
     }
 
-    fn poll(&mut self, budget: usize) -> io::Result<()> {
+    /// A scan is under way: the file is read in budget-sized steps.
+    fn is_mid_read(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Reads the ledger when its identity, size or modification time changed, or a scan is under
+    /// way. `reported` says a watcher saw it written: timestamps are coarse on some file systems
+    /// and can stay unchanged when Grok rewrites the file in place, so a reported file is also
+    /// rescanned and compared by digest.
+    fn poll(&mut self, budget: usize, reported: bool) -> io::Result<()> {
         self.bytes_read_last_poll = 0;
+        self.snapshot_replaced = false;
         if budget == 0 {
             return Ok(());
         }
@@ -547,10 +563,11 @@ impl UsageReader {
             self.observed_len = Some(metadata.len());
             self.observed_modified = modified;
         } else if self.pending.is_empty() {
-            // File timestamps are coarse on some supported filesystems and can
-            // remain unchanged when Grok rewrites usage.json in place. Once a
-            // snapshot exists, rescan it incrementally under the same per-file
-            // budget and compare its digest instead of trusting metadata alone.
+            if !reported {
+                return Ok(());
+            }
+            // Once a snapshot exists, rescan it incrementally under the same per-file budget and
+            // compare its digest instead of trusting metadata alone.
             self.refreshing = self.snapshot.is_some();
         }
         let remaining = metadata.len().saturating_sub(self.pending.len() as u64);
@@ -593,10 +610,11 @@ impl UsageReader {
                 if let Some(snapshot) = UsageSnapshot::parse(&self.pending) {
                     self.snapshot = Some(snapshot);
                     self.snapshot_hash = Some(digest);
+                    self.snapshot_replaced = true;
                 }
             }
             // If parsing failed during a concurrent/incomplete write, retain the
-            // last valid snapshot and try another bounded scan on the next poll.
+            // last valid snapshot; the write changes the file, which is scanned again.
             self.pending.clear();
             self.refreshing = false;
         }
@@ -669,6 +687,10 @@ struct GrokSession {
     usage: UsageReader,
     summary: SummaryReader,
     last_emitted: HashMap<String, TurnMetric>,
+    /// Events, snapshot or effort changed since the turns were last joined with the snapshot.
+    needs_reconcile: bool,
+    #[cfg(test)]
+    reconciliations: usize,
 }
 
 impl GrokSession {
@@ -679,10 +701,23 @@ impl GrokSession {
             usage: UsageReader::new(candidate.usage_path.clone()),
             summary: SummaryReader::new(candidate.summary_path.clone()),
             last_emitted: HashMap::new(),
+            needs_reconcile: false,
+            #[cfg(test)]
+            reconciliations: 0,
         }
     }
 
+    /// More to do than a changed-file note or discovery would say: unread events or a ledger scan
+    /// still under way.
+    fn has_unread(&self) -> bool {
+        !self.events.caught_up || self.usage.is_mid_read()
+    }
+
     fn metrics(&mut self) -> Vec<TurnMetric> {
+        #[cfg(test)]
+        {
+            self.reconciliations += 1;
+        }
         let Some(snapshot) = self.usage.snapshot.as_ref() else {
             return Vec::new();
         };
@@ -777,10 +812,24 @@ impl GrokSession {
 }
 
 /// Bounded reader for Grok Build session event logs and usage snapshots.
+///
+/// Sessions are read when they change: the host reports a watcher's changes through
+/// [`GrokMonitor::note_changes`], and a full enumeration runs for new sessions, lost events and
+/// every [`DISCOVERY_INTERVAL_SECONDS`], after which every session is visited once. An idle poll
+/// opens no file.
 pub struct GrokMonitor {
     root: PathBuf,
     sessions: HashMap<String, GrokSession>,
     last_discovery: Option<DateTime<Utc>>,
+    /// A change a watcher reported needs a full enumeration (a new or vanished session, lost events).
+    needs_discovery: bool,
+    /// The root was a folder at the previous poll; its appearing triggers discovery.
+    root_was_present: bool,
+    /// Sessions a watcher reported as changed; they are serviced first.
+    changed: HashSet<String>,
+    /// Sessions not visited since the last discovery. Discovery is the safety net for a missed
+    /// event, so every session is read once after it; between discoveries only changed ones are.
+    unvisited: HashSet<String>,
     next_session_index: usize,
     bytes_read_last_poll: usize,
 }
@@ -793,9 +842,74 @@ impl GrokMonitor {
             root,
             sessions: HashMap::new(),
             last_discovery: None,
+            needs_discovery: false,
+            root_was_present: false,
+            changed: HashSet::new(),
+            unvisited: HashSet::new(),
             next_session_index: 0,
             bytes_read_last_poll: 0,
         }
+    }
+
+    pub fn root_exists(&self) -> bool {
+        self.root.is_dir()
+    }
+
+    /// Marks what a folder watcher reported so the next poll reads it: a change to a known
+    /// session's event log, ledger or summary services that session first, and a new session, a
+    /// vanished event log or lost events trigger a full enumeration. Paths must be spelled under
+    /// the root as the monitor was created with. Returns whether anything is now pending.
+    pub fn note_changes(&mut self, change: &SourceChange) -> bool {
+        let mut noted = change.must_rescan;
+        if change.must_rescan {
+            self.needs_discovery = true;
+        }
+        for path in &change.paths {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(directory) = path.parent() else {
+                continue;
+            };
+            if !WATCHED_FILE_NAMES.contains(&name) {
+                continue;
+            }
+            let key = directory.to_string_lossy().into_owned();
+            if self.sessions.contains_key(&key) {
+                if name == "events.jsonl" && !fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+                    self.needs_discovery = true;
+                }
+                self.changed.insert(key);
+                noted = true;
+            } else if matches!(name, "events.jsonl" | "usage.json")
+                && self.is_session_folder(directory)
+                && fs::metadata(path).is_ok_and(|meta| meta.is_file())
+            {
+                // Enumeration needs both files, so either one arriving can complete a session.
+                self.needs_discovery = true;
+                noted = true;
+            }
+        }
+        noted
+    }
+
+    /// A visible folder directly below the root, where enumeration looks for sessions.
+    fn is_session_folder(&self, directory: &Path) -> bool {
+        directory.parent() == Some(self.root.as_path())
+            && directory
+                .file_name()
+                .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+    }
+
+    /// `now` while a session has unread data, is yet to be visited after a discovery or was
+    /// reported changed, or a discovery is waiting; `None` when only a new write can make a poll
+    /// useful.
+    pub fn next_poll_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        (self.needs_discovery
+            || !self.changed.is_empty()
+            || !self.unvisited.is_empty()
+            || self.sessions.values().any(GrokSession::has_unread))
+        .then_some(now)
     }
 
     pub fn poll(&mut self, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
@@ -808,49 +922,98 @@ impl GrokMonitor {
         max_bytes: usize,
     ) -> io::Result<Vec<TurnMetric>> {
         self.bytes_read_last_poll = 0;
-        if self.last_discovery.map_or(true, |last| {
-            now < last || now - last >= Duration::seconds(10)
-        }) || self.sessions.is_empty()
+        let root_is_present = self.root_exists();
+        if root_is_present && !self.root_was_present {
+            self.needs_discovery = true;
+        }
+        self.root_was_present = root_is_present;
+        if self.needs_discovery
+            || self.last_discovery.map_or(true, |last| {
+                now < last || now - last >= Duration::seconds(DISCOVERY_INTERVAL_SECONDS)
+            })
         {
-            self.discover(now)?;
+            // Settled before enumerating, so a failing walk is retried by the safety net rather
+            // than on every poll.
+            self.needs_discovery = false;
             self.last_discovery = Some(now);
+            self.discover(now)?;
+            self.unvisited = self.sessions.keys().cloned().collect();
         }
         if self.sessions.is_empty() || max_bytes == 0 {
             return Ok(Vec::new());
         }
-        let mut sessions: Vec<String> = self.sessions.keys().cloned().collect();
-        sessions.sort();
-        let count = MAX_SESSIONS_PER_POLL.min(sessions.len());
+        let mut keys: Vec<String> = self.sessions.keys().cloned().collect();
+        keys.sort();
+        // Reported changes first; then sessions with unread data or yet to be visited, in round
+        // robin that only advances by the sessions it visited.
+        let rotation: Vec<&String> = (0..keys.len())
+            .map(|step| &keys[(self.next_session_index + step) % keys.len()])
+            .collect();
+        let (urgent, others): (Vec<&String>, Vec<&String>) = rotation
+            .into_iter()
+            .filter(|key| {
+                self.changed.contains(*key)
+                    || self.unvisited.contains(*key)
+                    || self.sessions[*key].has_unread()
+            })
+            .partition(|key| self.changed.contains(*key));
+        let visits: Vec<String> = urgent
+            .iter()
+            .chain(others.iter())
+            .take(MAX_SESSIONS_PER_POLL)
+            .map(|key| (*key).clone())
+            .collect();
+        let urgent_visited = visits
+            .iter()
+            .filter(|key| self.changed.contains(*key))
+            .count();
+
         let mut budget = max_bytes.min(Self::MAX_POLL_BYTES);
         let mut records = Vec::new();
-        for step in 0..count {
+        for key in &visits {
             if budget == 0 {
                 break;
             }
-            let key = &sessions[(self.next_session_index + step) % sessions.len()];
+            let reported = self.changed.remove(key);
+            self.unvisited.remove(key);
             let Some(session) = self.sessions.get_mut(key) else {
                 continue;
             };
             let per_file = PER_FILE_BUDGET.min(budget);
             let event_budget = per_file.min(per_file / 2);
+            let effort_before = session.summary.effort.clone();
             session.summary.poll(PER_FILE_BUDGET.min(budget));
             budget = budget.saturating_sub(session.summary.bytes_read_last_poll);
             self.bytes_read_last_poll += session.summary.bytes_read_last_poll;
+            session.needs_reconcile |= session.summary.effort != effort_before;
             session.events.session_effort = session.summary.effort.clone();
-            if let Ok(()) = session.events.poll(event_budget) {
-                let consumed = session.events.bytes_read_last_poll;
-                budget = budget.saturating_sub(consumed);
-                self.bytes_read_last_poll += consumed;
+            match session.events.poll(event_budget) {
+                Ok(()) => {
+                    let consumed = session.events.bytes_read_last_poll;
+                    budget = budget.saturating_sub(consumed);
+                    self.bytes_read_last_poll += consumed;
+                    session.needs_reconcile |= consumed > 0;
+                }
+                Err(error) => self.needs_discovery |= error.kind() == io::ErrorKind::NotFound,
             }
             let usage_budget = PER_FILE_BUDGET.min(budget);
-            if let Ok(()) = session.usage.poll(usage_budget) {
-                let consumed = session.usage.bytes_read_last_poll;
-                budget = budget.saturating_sub(consumed);
-                self.bytes_read_last_poll += consumed;
+            match session.usage.poll(usage_budget, reported) {
+                Ok(()) => {
+                    let consumed = session.usage.bytes_read_last_poll;
+                    budget = budget.saturating_sub(consumed);
+                    self.bytes_read_last_poll += consumed;
+                    session.needs_reconcile |= session.usage.snapshot_replaced;
+                }
+                Err(error) => self.needs_discovery |= error.kind() == io::ErrorKind::NotFound,
             }
-            records.extend(session.metrics());
+            // Joining turns with the snapshot is needed only when one of them changed.
+            if session.needs_reconcile {
+                session.needs_reconcile = false;
+                records.extend(session.metrics());
+            }
         }
-        self.next_session_index = (self.next_session_index + count) % sessions.len();
+        self.next_session_index =
+            (self.next_session_index + visits.len() - urgent_visited) % keys.len();
         records.sort_by(|left, right| {
             right
                 .completed_at
@@ -864,6 +1027,15 @@ impl GrokMonitor {
         self.bytes_read_last_poll
     }
 
+    /// How often turns were joined with a usage snapshot, over all sessions.
+    #[cfg(test)]
+    pub(crate) fn reconciliations(&self) -> usize {
+        self.sessions
+            .values()
+            .map(|session| session.reconciliations)
+            .sum()
+    }
+
     fn discover(&mut self, now: DateTime<Utc>) -> io::Result<()> {
         let cutoff = now - Duration::days(7);
         let candidates = discover_candidates(&self.root, cutoff)?;
@@ -875,6 +1047,8 @@ impl GrokMonitor {
                 .or_insert_with(|| GrokSession::new(&candidate));
         }
         self.sessions.retain(|key, _| seen.contains(key));
+        self.changed.retain(|key| seen.contains(key));
+        self.unvisited.retain(|key| seen.contains(key));
         Ok(())
     }
 }

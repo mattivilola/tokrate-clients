@@ -16,6 +16,7 @@ struct MenuBarView: View {
     @State private var contentHeight: CGFloat = MenuBarView.maximumHeight
     @AppStorage("showMenuBarSpeed") private var showMenuBarSpeed = true
     @AppStorage("showProviderBadge") private var showProviderBadge = true
+    @AppStorage("showToolChip") private var showToolChip = true
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -106,9 +107,11 @@ struct MenuBarView: View {
                 if store.isMonitoring { store.stopMonitoring() } else { store.startMonitoring() }
             }
             Toggle("Show speed in menu bar", isOn: $showMenuBarSpeed)
-                .help("Shows the live response speed of the followed model. All models shows Compare without a pooled speed.")
+                .help("Shows the response speed of the followed model. All models shows Compare without a pooled speed.")
             Toggle("Show provider badge", isOn: $showProviderBadge)
                 .help("Shows a letter badge for the model's maker before the speed in the menu bar.")
+            Toggle("Show coding tool chip", isOn: $showToolChip)
+                .help("Shows a small chip for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode) before the speed in the menu bar.")
             Divider()
             Link("Privacy details", destination: URL(string: "https://tokrate.dev/privacy")!)
             Button("Quit Tokrate") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")

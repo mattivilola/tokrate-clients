@@ -1,9 +1,9 @@
 use crate::parser::JsonlEventParser;
 use crate::{
     signed_request, GrokMonitor, History, Monitor, ReportedReasoningEffort, SharingQueue,
-    SourceMonitor, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
-    CLAUDE_SUBAGENT_METRIC_VERSION, GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION,
-    MAX_PENDING_SAMPLES,
+    SourceChange, SourceMonitor, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
+    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
+    GROK_PARSER_VERSION, MAX_PENDING_SAMPLES,
 };
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -33,6 +33,14 @@ impl TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// What a folder watcher reports for writes to `paths`.
+fn changed(paths: &[&Path]) -> SourceChange {
+    SourceChange {
+        paths: paths.iter().map(|path| path.to_path_buf()).collect(),
+        must_rescan: false,
     }
 }
 
@@ -1307,6 +1315,9 @@ fn grok_detects_same_size_incomplete_to_complete_rewrite_with_unchanged_mtime() 
     assert_eq!(rewritten.len(), original_len);
     assert_eq!(rewritten.modified().unwrap(), original_modified);
 
+    // The metadata did not change, so only the watcher's report makes the monitor read the ledger
+    // again, and then compares it by digest.
+    assert!(monitor.note_changes(&changed(&[&usage_path])));
     let mut emitted = Vec::new();
     for _ in 0..3 {
         emitted.extend(monitor.poll(now + Duration::seconds(1)).unwrap());
@@ -1569,6 +1580,8 @@ fn recent_monitor_waits_for_partial_lines_and_enforces_poll_budget() {
 
     let mut append = fs::OpenOptions::new().append(true).open(&session).unwrap();
     append.write_all(b"\n").unwrap();
+    // A caught-up file is read again once the watcher reports its write.
+    assert!(monitor.note_changes(&changed(&[&session])));
     for index in 0..10 {
         records = monitor.poll(base + Duration::seconds(30 + index)).unwrap();
         assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
@@ -1581,7 +1594,7 @@ fn recent_monitor_waits_for_partial_lines_and_enforces_poll_budget() {
 }
 
 #[test]
-fn monitor_rotates_caught_up_live_tails_so_older_open_sessions_are_serviced() {
+fn monitor_reads_an_old_caught_up_tail_only_after_the_watcher_reports_its_append() {
     let temp = TestDir::new();
     let base = Utc::now();
     let timestamp = base.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1611,13 +1624,13 @@ fn monitor_rotates_caught_up_live_tails_so_older_open_sessions_are_serviced() {
         assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
     }
 
-    // Keep the writer open, as Codex does. Holding `now` constant prevents periodic
-    // discovery from making this old session appear recent and masking starvation.
+    // Keep the writer open, as Codex does. Holding `now` constant keeps the periodic discovery
+    // from noticing the append, so only the watcher's report can get it read.
     let old_path = temp.path().join("session-00.jsonl");
     let start = (base - Duration::seconds(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let completed =
         (base - Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mut append = fs::OpenOptions::new().append(true).open(old_path).unwrap();
+    let mut append = fs::OpenOptions::new().append(true).open(&old_path).unwrap();
     append
         .write_all(&jsonl(&[
             event(
@@ -1638,18 +1651,21 @@ fn monitor_rotates_caught_up_live_tails_so_older_open_sessions_are_serviced() {
         ]))
         .unwrap();
 
-    let mut found = false;
-    for _ in 0..6 {
-        let records = monitor.poll(base).unwrap();
-        assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
-        if records.iter().any(|record| record.output_tokens == 987) {
-            found = true;
-            break;
-        }
+    for _ in 0..3 {
+        assert!(monitor.poll(base).unwrap().is_empty());
+        assert_eq!(
+            monitor.bytes_read_last_poll(),
+            0,
+            "an unreported caught-up file is not opened"
+        );
     }
+
+    assert!(monitor.note_changes(&changed(&[&old_path])));
+    let records = monitor.poll(base).unwrap();
+    assert!(monitor.bytes_read_last_poll() <= Monitor::MAX_POLL_BYTES);
     assert!(
-        found,
-        "older caught-up live tails must rotate into the poll lane"
+        records.iter().any(|record| record.output_tokens == 987),
+        "a reported append must be read by the next poll"
     );
 }
 
@@ -3612,18 +3628,26 @@ fn monitor_live_responses_come_only_from_the_recent_tail_never_history_replay() 
 // --- Auto selector ---
 
 fn at(minutes: i64) -> DateTime<Utc> {
-    time("2026-10-03T10:00:00Z") + Duration::minutes(minutes)
+    at_seconds(minutes * 60)
+}
+
+fn at_seconds(seconds: i64) -> DateTime<Utc> {
+    time("2026-10-03T10:00:00Z") + Duration::seconds(seconds)
 }
 
 fn live_for(model: &str, client: &str, minutes: i64, tokens: i64) -> crate::ResponseMetric {
+    live_for_seconds(model, client, minutes * 60, tokens)
+}
+
+fn live_for_seconds(model: &str, client: &str, seconds: i64, tokens: i64) -> crate::ResponseMetric {
     let mut response = live_response(
-        &format!("{model}-{client}-{minutes}-{tokens}"),
+        &format!("{model}-{client}-{seconds}-{tokens}"),
         "2026-10-03T10:00:00Z",
         model,
         tokens,
         tokens as f64 / 50.0,
     );
-    response.completed_at = at(minutes);
+    response.completed_at = at_seconds(seconds);
     response.client = client.into();
     response.provider = Some(
         if client == "codex" {
@@ -3646,24 +3670,24 @@ fn key(model: &str, provider: &str) -> crate::ModelKey {
 #[test]
 fn auto_selector_adopts_the_busiest_model_then_resists_flapping() {
     let mut selector = crate::AutoSelector::new();
-    let mut live = vec![live_for("claude-a", "claude-code", 1, 600)];
+    let mut live = vec![live_for_seconds("claude-a", "claude-code", 60, 600)];
     assert_eq!(
-        selector.update(at(1), &live, None),
+        selector.update(at_seconds(60), &live, None),
         Some(&key("claude-a", "anthropic"))
     );
-    // A challenger that is busier for less than two minutes does not take over.
-    live.push(live_for("gpt-b", "codex", 2, 2_000));
+    // A challenger that is busier for less than thirty seconds does not take over.
+    live.push(live_for_seconds("gpt-b", "codex", 70, 2_000));
     assert_eq!(
-        selector.update(at(2), &live, None),
+        selector.update(at_seconds(70), &live, None),
         Some(&key("claude-a", "anthropic"))
     );
     assert_eq!(
-        selector.update(at(3), &live, None),
+        selector.update(at_seconds(99), &live, None),
         Some(&key("claude-a", "anthropic"))
     );
-    // Leading continuously for two minutes: takeover.
+    // Leading continuously for thirty seconds: takeover.
     assert_eq!(
-        selector.update(at(4), &live, None),
+        selector.update(at_seconds(100), &live, None),
         Some(&key("gpt-b", "openai"))
     );
 }
@@ -3671,28 +3695,28 @@ fn auto_selector_adopts_the_busiest_model_then_resists_flapping() {
 #[test]
 fn auto_selector_restarts_the_lead_timer_when_the_leader_changes() {
     let mut selector = crate::AutoSelector::new();
-    let mut live = vec![live_for("claude-a", "claude-code", 1, 3_000)];
-    selector.update(at(1), &live, None);
-    live.push(live_for("gpt-b", "codex", 2, 4_000));
-    selector.update(at(2), &live, None);
-    // Model A becomes the leader again before B completed two minutes.
-    live.push(live_for("claude-a", "claude-code", 3, 5_000));
+    let mut live = vec![live_for_seconds("claude-a", "claude-code", 60, 3_000)];
+    selector.update(at_seconds(60), &live, None);
+    live.push(live_for_seconds("gpt-b", "codex", 70, 4_000));
+    selector.update(at_seconds(70), &live, None);
+    // Model A becomes the leader again before B led for thirty seconds.
+    live.push(live_for_seconds("claude-a", "claude-code", 80, 5_000));
     assert_eq!(
-        selector.update(at(3), &live, None),
+        selector.update(at_seconds(80), &live, None),
         Some(&key("claude-a", "anthropic"))
     );
-    // B leading anew starts a fresh two minute timer.
-    live.push(live_for("gpt-b", "codex", 5, 9_000));
+    // B leading anew starts a fresh thirty second timer.
+    live.push(live_for_seconds("gpt-b", "codex", 100, 9_000));
     assert_eq!(
-        selector.update(at(5), &live, None),
-        Some(&key("claude-a", "anthropic"))
-    );
-    assert_eq!(
-        selector.update(at(6), &live, None),
+        selector.update(at_seconds(100), &live, None),
         Some(&key("claude-a", "anthropic"))
     );
     assert_eq!(
-        selector.update(at(7), &live, None),
+        selector.update(at_seconds(129), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    assert_eq!(
+        selector.update(at_seconds(130), &live, None),
         Some(&key("gpt-b", "openai"))
     );
 }
@@ -3700,12 +3724,34 @@ fn auto_selector_restarts_the_lead_timer_when_the_leader_changes() {
 #[test]
 fn auto_selector_switches_at_once_when_the_active_model_went_quiet() {
     let mut selector = crate::AutoSelector::new();
-    let mut live = vec![live_for("claude-a", "claude-code", 0, 600)];
-    selector.update(at(1), &live, None);
-    live.push(live_for("gpt-b", "codex", 9, 300));
-    // A's only response left the ten minute window: B takes over without waiting.
+    let mut live = vec![live_for_seconds("claude-a", "claude-code", 0, 600)];
+    selector.update(at_seconds(60), &live, None);
+    live.push(live_for_seconds("gpt-b", "codex", 200, 300));
+    // A's only response left the three minute window: B takes over without waiting.
     assert_eq!(
-        selector.update(at(10), &live, None),
+        selector.update(at_seconds(210), &live, None),
+        Some(&key("gpt-b", "openai"))
+    );
+}
+
+#[test]
+fn auto_selector_keeps_a_model_that_still_has_a_response_in_the_window() {
+    let mut selector = crate::AutoSelector::new();
+    let mut live = vec![live_for_seconds("claude-a", "claude-code", 0, 300)];
+    selector.update(at_seconds(10), &live, None);
+    live.push(live_for_seconds("gpt-b", "codex", 100, 2_000));
+    // A's response is 170 s old: still in the window, so B must lead for 30 s first.
+    assert_eq!(
+        selector.update(at_seconds(170), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    assert_eq!(
+        selector.update(at_seconds(179), &live, None),
+        Some(&key("claude-a", "anthropic"))
+    );
+    // 181 s: A has left the window and B has led for 11 s; the quiet model is replaced at once.
+    assert_eq!(
+        selector.update(at_seconds(181), &live, None),
         Some(&key("gpt-b", "openai"))
     );
 }
@@ -3715,7 +3761,7 @@ fn auto_selector_falls_back_when_nothing_is_live() {
     let mut selector = crate::AutoSelector::new();
     let live = vec![live_for("claude-a", "claude-code", 0, 600)];
     assert!(selector.update(at(1), &live, None).is_some());
-    assert!(selector.update(at(11), &live, None).is_none());
+    assert!(selector.update(at(4), &live, None).is_none());
     assert!(selector.active().is_none());
 
     let mut older = metric("older", at(-120));
@@ -4485,6 +4531,7 @@ fn grok_effort_records(
             assert!(monitor.poll(now).unwrap().is_empty());
         }
         fs::write(session.join("events.jsonl"), jsonl(&events[..1])).unwrap();
+        monitor.note_changes(&changed(&[&session.join("events.jsonl")]));
         for _ in 0..2 {
             assert!(monitor.poll(now).unwrap().is_empty());
         }
@@ -4494,8 +4541,13 @@ fn grok_effort_records(
             serde_json::to_vec(&usage).unwrap(),
         )
         .unwrap();
+        monitor.note_changes(&changed(&[
+            &session.join("events.jsonl"),
+            &session.join("usage.json"),
+        ]));
     }
     write_summary(summary_at_emit);
+    monitor.note_changes(&changed(&[&session.join("summary.json")]));
     for _ in 0..3 {
         found.extend(monitor.poll(now).unwrap());
     }
@@ -5371,12 +5423,12 @@ impl ClaudeDelegation {
             .unwrap();
     }
 
-    fn append(&self, session: &str, agent: &str, lines: &[Vec<u8>]) {
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(self.subagent_path(session, agent))
-            .unwrap();
+    /// Appends and reports the write, as the host's folder watcher would.
+    fn append(&mut self, session: &str, agent: &str, lines: &[Vec<u8>]) {
+        let path = self.subagent_path(session, agent);
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(&jsonl(lines)).unwrap();
+        self.monitor.note_changes(&changed(&[&path]));
     }
 
     /// Polls until the monitors are idle at `now`; the latest version of each id wins, as in history.
@@ -5743,6 +5795,7 @@ fn backlog_file(modified_at: DateTime<Utc>) -> crate::delegation::DelegationFile
         live_pending: false,
         archive_pending: false,
         live_started_at: None,
+        skipped_through: None,
     }
 }
 
@@ -5825,6 +5878,7 @@ fn turns_are_final_after_the_settle_time_unless_a_relevant_file_has_unread_conte
         events,
         completed + Duration::seconds(5),
         blocked(&[unrelated]),
+        |_| false,
     );
     assert_eq!(final_count(&first), 0);
     // Not before the settle time, even without a relevant backlog.
@@ -5833,13 +5887,20 @@ fn turns_are_final_after_the_settle_time_unless_a_relevant_file_has_unread_conte
         vec![],
         settled - Duration::seconds(1),
         blocked(&[unrelated]),
+        |_| false,
     );
     assert_eq!(final_count(&early), 0);
     // Blocked by the relevant file, whatever else is going on.
-    let held = tracker.apply(vec![], vec![], settled, blocked(&[unrelated, related]));
+    let held = tracker.apply(
+        vec![],
+        vec![],
+        settled,
+        blocked(&[unrelated, related]),
+        |_| false,
+    );
     assert_eq!(final_count(&held), 0);
     // Final once that file has been read, with the unrelated archive still pending.
-    let done = tracker.apply(vec![], vec![], settled, blocked(&[unrelated]));
+    let done = tracker.apply(vec![], vec![], settled, blocked(&[unrelated]), |_| false);
     assert_eq!(final_count(&done), 1);
     assert_eq!(done[0].delegated_output_tokens, Some(0));
 }
@@ -6882,4 +6943,1371 @@ fn history_without_prompt_cache_fields_decodes_and_inconsistent_stored_sets_are_
     let history = History::load(&path, now).unwrap();
     assert_eq!(history.records().len(), 1);
     assert_eq!(prompt_cache(&history.records()[0]), (None, None, None));
+}
+
+// --- Change notes, discovery cadence and launch checkpoints ---
+
+/// Timestamps in the files carry whole seconds; keep expectations equal to them.
+fn whole_seconds(at: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp(at.timestamp(), 0).unwrap()
+}
+
+fn secs(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// A Codex rollout of finished turns `(turn id, start, end, output tokens)`.
+fn codex_session_file(id: &str, turns: &[(&str, DateTime<Utc>, DateTime<Utc>, i64)]) -> Vec<u8> {
+    let mut lines = Vec::new();
+    for (index, (turn, start, end, tokens)) in turns.iter().enumerate() {
+        let turn_lines = codex_turn_lines(
+            primary_codex_meta(id),
+            turn,
+            &secs(*start),
+            &secs(*end),
+            *tokens,
+        );
+        lines.extend(turn_lines.into_iter().skip(usize::from(index > 0)));
+    }
+    jsonl(&lines)
+}
+
+/// The lines of one more turn for an existing rollout (no header).
+fn codex_turn_append(turn: &str, start: DateTime<Utc>, end: DateTime<Utc>, tokens: i64) -> Vec<u8> {
+    let lines = codex_turn_lines(
+        primary_codex_meta("unused"),
+        turn,
+        &secs(start),
+        &secs(end),
+        tokens,
+    );
+    jsonl(&lines[1..])
+}
+
+fn append_to(path: &Path, bytes: &[u8]) {
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(bytes)
+        .unwrap();
+}
+
+/// Polls `count` times at `now` and collects what comes back.
+fn poll_n(monitor: &mut Monitor, now: DateTime<Utc>, count: usize) -> Vec<TurnMetric> {
+    let mut found = Vec::new();
+    for _ in 0..count {
+        found.extend(monitor.poll(now).unwrap());
+    }
+    found
+}
+
+/// Polls until nothing is pending at `now` (replay and settling done).
+fn settle(monitor: &mut Monitor, now: DateTime<Utc>) -> Vec<TurnMetric> {
+    let mut found = Vec::new();
+    for _ in 0..60 {
+        found.extend(monitor.poll(now).unwrap());
+        if monitor.next_poll_deadline(now).is_none() {
+            return found;
+        }
+    }
+    panic!("the monitor never went idle");
+}
+
+struct CodexFixture {
+    _temp: TestDir,
+    root: PathBuf,
+    session: PathBuf,
+    base: DateTime<Utc>,
+}
+
+impl CodexFixture {
+    /// One finished turn written an hour ago (by its timestamps) to a fresh rollout.
+    fn new() -> Self {
+        let temp = TestDir::new();
+        let root = temp.path().join("sessions");
+        fs::create_dir_all(&root).unwrap();
+        let base = whole_seconds(Utc::now() - Duration::hours(1));
+        let session = root.join("rollout.jsonl");
+        fs::write(
+            &session,
+            codex_session_file(
+                "session-a",
+                &[("turn-1", base, base + Duration::seconds(10), 400)],
+            ),
+        )
+        .unwrap();
+        Self {
+            _temp: temp,
+            root,
+            session,
+            base,
+        }
+    }
+
+    /// Late enough for the delegation to settle and for a checkpoint to apply.
+    fn later(&self) -> DateTime<Utc> {
+        Utc::now() + Duration::hours(1)
+    }
+}
+
+#[test]
+fn a_reported_append_is_read_at_once_and_an_unreported_one_waits_for_the_safety_net() {
+    let fixture = CodexFixture::new();
+    let now = fixture.later();
+    let mut monitor = Monitor::new(fixture.root.clone());
+    assert_eq!(settle(&mut monitor, now).len(), 1);
+
+    let second = fixture.base + Duration::seconds(60);
+    append_to(
+        &fixture.session,
+        &codex_turn_append("turn-2", second, second + Duration::seconds(10), 500),
+    );
+    // Nothing was reported: the caught-up file is not opened and the next poll deadline stays empty.
+    assert!(poll_n(&mut monitor, now + Duration::seconds(2), 3).is_empty());
+    assert_eq!(monitor.bytes_read_last_poll(), 0);
+    assert_eq!(monitor.next_poll_deadline(now), None);
+
+    assert!(monitor.note_changes(&changed(&[&fixture.session])));
+    assert_eq!(monitor.next_poll_deadline(now), Some(now));
+    let found = settle(&mut monitor, now + Duration::seconds(3));
+    assert_eq!(
+        found
+            .iter()
+            .map(|turn| turn.output_tokens)
+            .collect::<Vec<_>>(),
+        [500]
+    );
+
+    // A write the watcher missed is caught by the safety net.
+    let third = fixture.base + Duration::seconds(120);
+    append_to(
+        &fixture.session,
+        &codex_turn_append("turn-3", third, third + Duration::seconds(10), 600),
+    );
+    assert!(poll_n(&mut monitor, now + Duration::seconds(299), 3).is_empty());
+    let found = settle(&mut monitor, now + Duration::seconds(303));
+    assert_eq!(
+        found
+            .iter()
+            .map(|turn| turn.output_tokens)
+            .collect::<Vec<_>>(),
+        [600]
+    );
+}
+
+#[test]
+fn a_noted_new_file_is_discovered_and_excluded_paths_are_ignored() {
+    let fixture = CodexFixture::new();
+    let now = fixture.later();
+    let mut monitor = Monitor::new(fixture.root.clone());
+    settle(&mut monitor, now);
+
+    let hidden = fixture.root.join(".hidden");
+    fs::create_dir_all(&hidden).unwrap();
+    let ignored = [
+        fixture.root.join("notes.txt"),
+        hidden.join("rollout-hidden.jsonl"),
+        fixture.root.parent().unwrap().join("outside.jsonl"),
+        fixture.root.join("missing.jsonl"),
+    ];
+    for path in &ignored[..3] {
+        fs::write(path, b"{}\n").unwrap();
+    }
+    let paths: Vec<&Path> = ignored.iter().map(PathBuf::as_path).collect();
+    assert!(!monitor.note_changes(&changed(&paths)));
+    assert_eq!(monitor.next_poll_deadline(now), None);
+
+    let created = fixture.root.join("second.jsonl");
+    let start = fixture.base + Duration::seconds(30);
+    fs::write(
+        &created,
+        codex_session_file(
+            "session-b",
+            &[("turn-b", start, start + Duration::seconds(10), 450)],
+        ),
+    )
+    .unwrap();
+    assert!(monitor.note_changes(&changed(&[&created])));
+    let found = settle(&mut monitor, now);
+    assert_eq!(
+        found
+            .iter()
+            .map(|turn| turn.output_tokens)
+            .collect::<Vec<_>>(),
+        [450]
+    );
+}
+
+#[test]
+fn claude_primary_and_subagent_monitors_each_note_only_their_own_transcripts() {
+    let temp = TestDir::new();
+    let projects = temp.path().join("projects");
+    let primary = projects.join("project-a/session.jsonl");
+    let subagent = projects.join("project-a/session/subagents/agent-1.jsonl");
+    fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+    fs::write(&primary, b"{}\n").unwrap();
+    fs::write(&subagent, b"{}\n").unwrap();
+
+    let mut primary_monitor = Monitor::new_claude(projects.clone());
+    let mut subagent_monitor = Monitor::new_claude_subagents(projects);
+    assert!(!primary_monitor.note_changes(&changed(&[&subagent])));
+    assert!(!subagent_monitor.note_changes(&changed(&[&primary])));
+    assert!(primary_monitor.note_changes(&changed(&[&primary])));
+    assert!(subagent_monitor.note_changes(&changed(&[&subagent])));
+}
+
+#[test]
+fn a_rescan_request_triggers_discovery_of_files_nobody_reported() {
+    let fixture = CodexFixture::new();
+    let now = fixture.later();
+    let mut monitor = Monitor::new(fixture.root.clone());
+    settle(&mut monitor, now);
+
+    let start = fixture.base + Duration::seconds(30);
+    fs::write(
+        fixture.root.join("second.jsonl"),
+        codex_session_file(
+            "session-b",
+            &[("turn-b", start, start + Duration::seconds(10), 450)],
+        ),
+    )
+    .unwrap();
+    assert!(poll_n(&mut monitor, now, 3).is_empty());
+    assert!(monitor.note_changes(&SourceChange {
+        paths: HashSet::new(),
+        must_rescan: true
+    }));
+    let found = settle(&mut monitor, now);
+    assert_eq!(found.len(), 1);
+}
+
+#[test]
+fn an_empty_or_missing_root_is_not_walked_on_every_poll() {
+    let temp = TestDir::new();
+    let now = Utc::now() + Duration::hours(1);
+    let root = temp.path().join("sessions");
+    let mut monitor = Monitor::new(root.clone());
+    // A missing root fails its one discovery and then costs nothing but a stat.
+    assert_eq!(
+        monitor.poll(now).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(monitor.poll(now + Duration::seconds(2)).unwrap().is_empty());
+    assert!(!monitor.root_exists());
+    assert_eq!(monitor.next_poll_deadline(now), None);
+
+    // The root appearing is noticed by the next poll.
+    fs::create_dir_all(&root).unwrap();
+    assert!(monitor.root_exists());
+    let start = whole_seconds(Utc::now() - Duration::hours(1));
+    let rollout = root.join("rollout.jsonl");
+    fs::write(
+        &rollout,
+        codex_session_file("s", &[("t", start, start + Duration::seconds(10), 400)]),
+    )
+    .unwrap();
+    assert_eq!(settle(&mut monitor, now + Duration::seconds(4)).len(), 1);
+
+    // An empty root is walked once: a file added later is not found until the net or a note.
+    let empty = temp.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let mut monitor = Monitor::new(empty.clone());
+    assert!(poll_n(&mut monitor, now, 2).is_empty());
+    fs::write(
+        empty.join("late.jsonl"),
+        codex_session_file("s", &[("t", start, start + Duration::seconds(10), 400)]),
+    )
+    .unwrap();
+    assert!(poll_n(&mut monitor, now + Duration::seconds(100), 3).is_empty());
+    assert_eq!(monitor.next_poll_deadline(now), None);
+    assert_eq!(settle(&mut monitor, now + Duration::seconds(300)).len(), 1);
+}
+
+#[test]
+fn idle_polls_open_no_caught_up_file() {
+    let fixture = CodexFixture::new();
+    let now = fixture.later();
+    let mut monitor = Monitor::new(fixture.root.clone());
+    settle(&mut monitor, now);
+
+    // Opening the file again would fail and ask for a discovery, which the deadline would show.
+    fs::remove_file(&fixture.session).unwrap();
+    for step in 1..10 {
+        assert!(monitor
+            .poll(now + Duration::seconds(step))
+            .unwrap()
+            .is_empty());
+        assert_eq!(monitor.bytes_read_last_poll(), 0);
+        assert_eq!(monitor.next_poll_deadline(now), None);
+    }
+    // A watcher noting the vanished file prunes it by discovery.
+    assert!(monitor.note_changes(&changed(&[&fixture.session])));
+    assert_eq!(monitor.next_poll_deadline(now), Some(now));
+    assert!(monitor.poll(now).unwrap().is_empty());
+    assert_eq!(monitor.next_poll_deadline(now), None);
+}
+
+#[test]
+fn poll_deadlines_run_from_replay_to_the_settle_time_to_none() {
+    let temp = TestDir::new();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    // A rollout larger than the recent tail, so an archive reader replays it.
+    let start = whole_seconds(Utc::now() - Duration::minutes(10));
+    let end = start + Duration::seconds(10);
+    let mut contents = codex_session_file("s", &[("t", start, end, 400)]);
+    for _ in 0..8_000 {
+        contents.extend_from_slice(b"{\"type\":\"ignored_event\",\"payload\":{}}\n");
+    }
+    fs::write(root.join("rollout.jsonl"), contents).unwrap();
+
+    let now = end + Duration::seconds(5);
+    let mut monitor = Monitor::new(root);
+    monitor.poll(now).unwrap();
+    assert_eq!(
+        monitor.next_poll_deadline(now),
+        Some(now),
+        "replay is under way"
+    );
+    let mut found = Vec::new();
+    for _ in 0..40 {
+        if monitor.next_poll_deadline(now) != Some(now) {
+            break;
+        }
+        found.extend(monitor.poll(now).unwrap());
+    }
+    // The turn is read but its delegated output settles 30 s after it ended.
+    assert_eq!(
+        monitor.next_poll_deadline(now),
+        Some(end + Duration::seconds(30))
+    );
+    assert!(found
+        .iter()
+        .all(|turn| turn.delegated_output_tokens.is_none()));
+    let found = monitor.poll(end + Duration::seconds(30)).unwrap();
+    assert_eq!(found[0].delegated_output_tokens, Some(0));
+    assert_eq!(
+        monitor.next_poll_deadline(end + Duration::seconds(30)),
+        None
+    );
+}
+
+fn claude_turn(
+    session: &str,
+    id: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    tokens: i64,
+) -> Vec<Vec<u8>> {
+    let with_session = |line| with_fields(line, json!({"sessionId": session}));
+    vec![
+        with_session(claude_user(
+            &secs(start),
+            &format!("{id}-user"),
+            json!("synthetic"),
+        )),
+        with_session(assistant(
+            &secs(end),
+            &format!("{id}-call"),
+            "end_turn",
+            tokens,
+        )),
+    ]
+}
+
+#[test]
+fn a_claude_monitor_polls_once_more_after_a_read_so_its_parser_can_close_a_waiting_turn() {
+    let temp = TestDir::new();
+    let projects = temp.path().join("projects");
+    fs::create_dir_all(projects.join("project-a")).unwrap();
+    let start = whole_seconds(Utc::now() - Duration::hours(1));
+    let path = projects.join("project-a/session.jsonl");
+    fs::write(
+        &path,
+        jsonl(&claude_turn(
+            "session-1",
+            "turn-1",
+            start,
+            start + Duration::seconds(10),
+            400,
+        )),
+    )
+    .unwrap();
+
+    let now = Utc::now() + Duration::hours(1);
+    let mut monitor = Monitor::new_claude(projects);
+    for _ in 0..6 {
+        monitor.poll(now).unwrap();
+    }
+    // Everything is read, but the parser may still hold a turn it waited to close.
+    assert_eq!(
+        monitor.next_poll_deadline(now),
+        Some(now + Duration::seconds(31))
+    );
+    assert!(monitor.checkpoints().unwrap().is_empty());
+    monitor.poll(now + Duration::seconds(31)).unwrap();
+    assert_eq!(monitor.next_poll_deadline(now), None);
+    assert_eq!(monitor.checkpoints().unwrap().len(), 1);
+}
+
+#[test]
+fn launch_checkpoints_skip_a_fully_read_file_and_a_later_append_still_resolves_the_model() {
+    for large in [false, true] {
+        let fixture = CodexFixture::new();
+        if large {
+            // Past the recent tail, a launch would otherwise replay the whole file.
+            let mut filler = Vec::new();
+            for _ in 0..8_000 {
+                filler.extend_from_slice(b"{\"type\":\"ignored_event\",\"payload\":{}}\n");
+            }
+            append_to(&fixture.session, &filler);
+        }
+        let now = fixture.later();
+        let mut first = Monitor::new(fixture.root.clone());
+        // The tail and the replay reader may both report the turn; it is one turn by its id.
+        let ids: HashSet<String> = settle(&mut first, now)
+            .into_iter()
+            .map(|turn| turn.id)
+            .collect();
+        assert_eq!(ids.len(), 1);
+        let checkpoints = first.checkpoints().unwrap();
+        assert_eq!(checkpoints.len(), 1);
+
+        let mut second = Monitor::new(fixture.root.clone());
+        second.set_checkpoints(checkpoints);
+        assert!(second.poll(now).unwrap().is_empty());
+        assert_eq!(second.bytes_read_last_poll(), 0);
+        assert_eq!(second.next_poll_deadline(now), None);
+        assert_eq!(
+            second.checkpoints().unwrap().len(),
+            1,
+            "the restored file stays checkpointed"
+        );
+        assert!(poll_n(&mut second, now + Duration::seconds(2), 3).is_empty());
+        assert_eq!(second.bytes_read_last_poll(), 0);
+
+        let start = fixture.base + Duration::seconds(60);
+        append_to(
+            &fixture.session,
+            &codex_turn_append("turn-2", start, start + Duration::seconds(10), 700),
+        );
+        assert!(second.note_changes(&changed(&[&fixture.session])));
+        let found = settle(&mut second, now + Duration::seconds(5));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].output_tokens, 700);
+        assert_eq!(found[0].model.as_deref(), Some("gpt-test"));
+        assert_eq!(found[0].source_kind.as_deref(), Some("primary"));
+    }
+}
+
+#[test]
+fn launch_checkpoints_also_resume_claude_transcripts() {
+    let temp = TestDir::new();
+    let projects = temp.path().join("projects");
+    fs::create_dir_all(projects.join("project-a")).unwrap();
+    let start = whole_seconds(Utc::now() - Duration::hours(1));
+    let path = projects.join("project-a/session.jsonl");
+    fs::write(
+        &path,
+        jsonl(&claude_turn(
+            "session-1",
+            "turn-1",
+            start,
+            start + Duration::seconds(10),
+            400,
+        )),
+    )
+    .unwrap();
+
+    let now = Utc::now() + Duration::hours(1);
+    let mut first = Monitor::new_claude(projects.clone());
+    let mut found = poll_n(&mut first, now, 6);
+    found.extend(first.poll(now + Duration::seconds(31)).unwrap());
+    assert_eq!(found.len(), 1);
+    let checkpoints = first.checkpoints().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+
+    let mut second = Monitor::new_claude(projects);
+    second.set_checkpoints(checkpoints);
+    assert!(second.poll(now).unwrap().is_empty());
+    assert_eq!(second.bytes_read_last_poll(), 0);
+    assert_eq!(second.next_poll_deadline(now), None);
+
+    let next = start + Duration::seconds(60);
+    append_to(
+        &path,
+        &jsonl(&claude_turn(
+            "session-1",
+            "turn-2",
+            next,
+            next + Duration::seconds(10),
+            800,
+        )),
+    );
+    assert!(second.note_changes(&changed(&[&path])));
+    let mut found = poll_n(&mut second, now + Duration::seconds(5), 6);
+    found.extend(second.poll(now + Duration::seconds(40)).unwrap());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].output_tokens, 800);
+    assert_eq!(found[0].model.as_deref(), Some("claude-model"));
+}
+
+#[test]
+fn a_checkpoint_that_does_not_match_the_file_falls_back_to_a_full_read() {
+    #[derive(Clone, Copy, Debug)]
+    enum Mismatch {
+        Size,
+        Modified,
+        Replaced,
+        Version,
+        TooRecent,
+    }
+    for mismatch in [
+        Mismatch::Size,
+        Mismatch::Modified,
+        Mismatch::Replaced,
+        Mismatch::Version,
+        Mismatch::TooRecent,
+    ] {
+        let fixture = CodexFixture::new();
+        let now = fixture.later();
+        let mut first = Monitor::new(fixture.root.clone());
+        settle(&mut first, now);
+        let mut checkpoints = first.checkpoints().unwrap();
+        let original = fs::metadata(&fixture.session).unwrap().modified().unwrap();
+        let mut poll_at = now;
+        match mismatch {
+            Mismatch::Size => append_to(
+                &fixture.session,
+                b"{\"type\":\"ignored_event\",\"payload\":{}}\n",
+            ),
+            Mismatch::Modified => fs::OpenOptions::new()
+                .write(true)
+                .open(&fixture.session)
+                .unwrap()
+                .set_modified(original + StdDuration::from_secs(60))
+                .unwrap(),
+            Mismatch::Replaced => {
+                let copy = fixture.root.join("copy.tmp");
+                fs::copy(&fixture.session, &copy).unwrap();
+                fs::rename(&copy, &fixture.session).unwrap();
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&fixture.session)
+                    .unwrap()
+                    .set_modified(original)
+                    .unwrap();
+            }
+            Mismatch::Version => checkpoints[0].version_key.push_str("-changed"),
+            Mismatch::TooRecent => poll_at = Utc::now() + Duration::seconds(60),
+        }
+        let mut second = Monitor::new(fixture.root.clone());
+        second.set_checkpoints(checkpoints);
+        let found = settle(&mut second, poll_at);
+        assert_eq!(found.len(), 1, "{mismatch:?} must read the file again");
+        assert_eq!(found[0].output_tokens, 400, "{mismatch:?}");
+    }
+}
+
+#[test]
+fn checkpoints_keep_the_saved_set_while_a_primary_turn_waits_for_its_delegated_output() {
+    let fixture = CodexFixture::new();
+    let end = fixture.base + Duration::seconds(10);
+    let mut monitor = Monitor::new(fixture.root.clone());
+    assert!(monitor.checkpoints().is_none(), "nothing is enumerated yet");
+    // The turn ended 5 s ago: its delegated output is not final.
+    let now = end + Duration::seconds(5);
+    for _ in 0..4 {
+        monitor.poll(now).unwrap();
+    }
+    assert!(monitor.checkpoints().is_none());
+    assert!(monitor.poll(end + Duration::seconds(30)).unwrap().len() == 1);
+    let checkpoints = monitor.checkpoints().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+
+    // The Claude pair shares one tracker held by the owner, which keeps the saved set while a
+    // Claude turn is pending.
+    let temp = TestDir::new();
+    let (codex, claude, grok) = (
+        temp.path().join("c"),
+        temp.path().join("p"),
+        temp.path().join("g"),
+    );
+    fs::create_dir_all(claude.join("project-a")).unwrap();
+    let start = whole_seconds(Utc::now() - Duration::minutes(30));
+    let end = start + Duration::seconds(10);
+    fs::write(
+        claude.join("project-a/session.jsonl"),
+        jsonl(&claude_turn("session-1", "turn-1", start, end, 400)),
+    )
+    .unwrap();
+    let mut sources = SourceMonitor::new(
+        codex,
+        claude,
+        grok.clone(),
+        grok.with_file_name("gemini"),
+        grok.with_file_name("opencode"),
+    );
+    let previous = crate::SourceCheckpoints {
+        claude_primary: checkpoints.clone(),
+        ..Default::default()
+    };
+    let now = end + Duration::seconds(20);
+    for _ in 0..6 {
+        sources.poll(now).unwrap();
+    }
+    assert_eq!(sources.checkpoints(&previous).claude_primary, checkpoints);
+    assert_eq!(
+        sources.next_poll_deadline(now),
+        Some(end + Duration::seconds(30))
+    );
+    // Settled, and past the parser's flush poll.
+    for _ in 0..3 {
+        sources.poll(end + Duration::seconds(60)).unwrap();
+    }
+    let settled = sources.checkpoints(&previous);
+    assert_eq!(settled.claude_primary.len(), 1);
+    assert_ne!(settled.claude_primary, checkpoints);
+}
+
+#[test]
+fn history_round_trips_checkpoints_and_loads_files_without_them() {
+    let fixture = CodexFixture::new();
+    let now = fixture.later();
+    let mut monitor = Monitor::new(fixture.root.clone());
+    settle(&mut monitor, now);
+    let saved = crate::SourceCheckpoints {
+        codex: monitor.checkpoints().unwrap(),
+        ..Default::default()
+    };
+
+    let temp = TestDir::new();
+    let path = temp.path().join("history.json");
+    let mut history = History::default();
+    history.merge(&[metric("kept", now - Duration::minutes(5))], now);
+    history.set_checkpoints(saved.clone(), now);
+    history.save(&path).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("rollout.jsonl"),
+        "checkpoints never store source paths"
+    );
+    let loaded = History::load(&path, now).unwrap();
+    assert_eq!(loaded.records().len(), 1);
+    assert_eq!(loaded.checkpoints(), &saved);
+
+    // A file saved before checkpoints existed loads with none, and without any a save omits the key.
+    fs::write(&path, br#"{"schemaVersion":1,"records":[]}"#).unwrap();
+    let old = History::load(&path, now).unwrap();
+    assert!(old.checkpoints().is_empty());
+    old.save(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("checkpoints"));
+
+    // An unknown key does not stop a load (what an older app does with the new one).
+    let mut value: Value = serde_json::to_value(&json!({"schemaVersion":1,"records":[]})).unwrap();
+    value["futureField"] = json!(true);
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(History::load(&path, now).is_ok());
+}
+
+#[test]
+fn history_bounds_checkpoints_by_age_and_file_count() {
+    let now = Utc::now();
+    let checkpoint = |index: usize, age: Duration| -> crate::SourceFileCheckpoint {
+        serde_json::from_value(json!({
+            "pathDigest": format!("{index:064}"),
+            "identity": null,
+            "size": 1,
+            "modifiedAt": now - age,
+            "versionKey": "v",
+        }))
+        .unwrap()
+    };
+    let mut codex: Vec<_> = (0..2_100)
+        .map(|index| checkpoint(index, Duration::minutes(index as i64)))
+        .collect();
+    codex.push(checkpoint(9_999, Duration::days(8)));
+    let mut history = History::default();
+    history.set_checkpoints(
+        crate::SourceCheckpoints {
+            codex,
+            ..Default::default()
+        },
+        now,
+    );
+    let kept = &history.checkpoints().codex;
+    assert_eq!(kept.len(), 2_000);
+    assert!(kept
+        .iter()
+        .all(|entry| entry.path_digest != format!("{:064}", 9_999)));
+    assert_eq!(kept[0].path_digest, format!("{:064}", 0), "newest first");
+}
+
+fn grok_empty_usage(session_id: &str) -> Value {
+    json!({"sessionId": session_id, "updatedAt": "2026-10-03T10:00:05Z", "session": {}, "turns": []})
+}
+
+/// Polls until the Grok monitor has nothing pending at `now`.
+fn grok_settle(monitor: &mut GrokMonitor, now: DateTime<Utc>) -> Vec<TurnMetric> {
+    let mut found = Vec::new();
+    for _ in 0..40 {
+        found.extend(monitor.poll(now).unwrap());
+        if monitor.next_poll_deadline(now).is_none() {
+            return found;
+        }
+    }
+    panic!("the Grok monitor never went idle");
+}
+
+#[test]
+fn grok_idle_polls_read_nothing_and_a_noted_change_is_serviced() {
+    let temp = TestDir::new();
+    let root = temp.path();
+    let now = time("2026-10-03T10:00:06Z");
+    write_grok_session(
+        root,
+        "first",
+        &grok_turn_events("first", 0, "completed"),
+        &grok_usage("first", 0, 50),
+    );
+    let mut monitor = GrokMonitor::new(root.to_path_buf());
+    assert_eq!(grok_settle(&mut monitor, now).len(), 1);
+
+    // Nothing changed and nothing was reported: no file is opened.
+    for _ in 0..5 {
+        assert!(monitor.poll(now).unwrap().is_empty());
+        assert_eq!(monitor.bytes_read_last_poll(), 0);
+        assert_eq!(monitor.next_poll_deadline(now), None);
+    }
+
+    // A session whose ledger has no turn yet; the ledger gets its turn without a report.
+    let second = write_grok_session(
+        root,
+        "second",
+        &grok_turn_events("second", 0, "completed"),
+        &grok_empty_usage("second"),
+    );
+    assert!(monitor.note_changes(&changed(&[&second.join("events.jsonl")])));
+    assert_eq!(monitor.next_poll_deadline(now), Some(now));
+    assert!(grok_settle(&mut monitor, now).is_empty());
+    fs::write(
+        second.join("usage.json"),
+        serde_json::to_vec(&grok_usage("second", 0, 70)).unwrap(),
+    )
+    .unwrap();
+    assert!(poll_grok_n(&mut monitor, now, 3).is_empty());
+    assert_eq!(monitor.bytes_read_last_poll(), 0);
+
+    // Reported, the ledger is read and the turn joined.
+    assert!(monitor.note_changes(&changed(&[&second.join("usage.json")])));
+    let found = grok_settle(&mut monitor, now);
+    assert_eq!(
+        found
+            .iter()
+            .map(|turn| turn.output_tokens)
+            .collect::<Vec<_>>(),
+        [70]
+    );
+
+    // Changes outside the watched files or the root are not pending.
+    assert!(!monitor.note_changes(&changed(&[
+        &second.join("chat_history.jsonl"),
+        &temp.path().join("../elsewhere/events.jsonl")
+    ])));
+}
+
+fn poll_grok_n(monitor: &mut GrokMonitor, now: DateTime<Utc>, count: usize) -> Vec<TurnMetric> {
+    let mut found = Vec::new();
+    for _ in 0..count {
+        found.extend(monitor.poll(now).unwrap());
+    }
+    found
+}
+
+#[test]
+fn grok_reconciles_a_snapshot_once_and_discovery_visits_every_session_once() {
+    let temp = TestDir::new();
+    let root = temp.path();
+    let now = time("2026-10-03T10:00:06Z");
+    let session = write_grok_session(
+        root,
+        "only",
+        &grok_turn_events("only", 0, "completed"),
+        &grok_usage("only", 0, 50),
+    );
+    let mut monitor = GrokMonitor::new(root.to_path_buf());
+    assert_eq!(grok_settle(&mut monitor, now).len(), 1);
+    let reconciled = monitor.reconciliations();
+    assert!(reconciled >= 1);
+
+    // Idle polls and a report of an unchanged ledger do not join the turns again.
+    poll_grok_n(&mut monitor, now, 4);
+    assert!(monitor.note_changes(&changed(&[&session.join("usage.json")])));
+    assert!(grok_settle(&mut monitor, now).is_empty());
+    assert_eq!(monitor.reconciliations(), reconciled);
+
+    // A new session found by discovery is visited once, whatever the report said.
+    let late = write_grok_session(
+        root,
+        "late",
+        &grok_turn_events("late", 0, "completed"),
+        &grok_usage("late", 0, 60),
+    );
+    assert!(poll_grok_n(&mut monitor, now + Duration::seconds(10), 3).is_empty());
+    assert!(monitor.note_changes(&changed(&[&late.join("usage.json")])));
+    let found = grok_settle(&mut monitor, now);
+    assert_eq!(
+        found
+            .iter()
+            .map(|turn| turn.output_tokens)
+            .collect::<Vec<_>>(),
+        [60]
+    );
+    // The 300 s safety net visits every session once and reads nothing that did not change.
+    let after_net = now + Duration::seconds(301);
+    let before = monitor.reconciliations();
+    assert!(grok_settle(&mut monitor, after_net).is_empty());
+    assert_eq!(monitor.reconciliations(), before);
+}
+
+#[test]
+fn source_monitor_routes_notes_and_deadlines_to_each_source() {
+    let temp = TestDir::new();
+    let (codex, claude, grok) = (
+        temp.path().join("c"),
+        temp.path().join("p"),
+        temp.path().join("g"),
+    );
+    for directory in [&codex, &claude, &grok] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let session = write_grok_session(
+        &grok,
+        "only",
+        &grok_turn_events("only", 0, "completed"),
+        &grok_usage("only", 0, 50),
+    );
+    let now = time("2026-10-03T10:00:06Z");
+    let mut sources = SourceMonitor::new(
+        codex.clone(),
+        claude,
+        grok.clone(),
+        grok.with_file_name("gemini"),
+        grok.with_file_name("opencode"),
+    );
+    let mut found = Vec::new();
+    for _ in 0..10 {
+        found.extend(sources.poll(now).unwrap());
+    }
+    assert_eq!(found.len(), 1);
+    assert_eq!(sources.next_poll_deadline(now), None);
+    assert_eq!(sources.root_exists("codex"), Some(true));
+    assert_eq!(sources.root_exists("unknown"), None);
+
+    // Each path reaches the monitor whose root holds it.
+    assert!(sources.note_changes(&changed(&[&session.join("usage.json")])));
+    assert_eq!(sources.next_poll_deadline(now), Some(now));
+    for _ in 0..3 {
+        sources.poll(now).unwrap();
+    }
+    assert_eq!(sources.next_poll_deadline(now), None);
+    assert!(!sources.note_changes(&changed(&[&temp.path().join("other/events.jsonl")])));
+    fs::write(codex.join("rollout.jsonl"), b"{}\n").unwrap();
+    assert!(sources.note_changes(&changed(&[&codex.join("rollout.jsonl")])));
+}
+
+// --- Live responses from Grok turns and the tray reading ---
+
+fn grok_turn(id: &str, at: DateTime<Utc>, response: Option<(i64, f64)>) -> TurnMetric {
+    let mut turn = TurnMetric::new_observed(
+        id.into(),
+        at,
+        Some("grok-4".into()),
+        1_200,
+        20.0,
+        None,
+        None,
+        Some("primary".into()),
+        Some("unknown".into()),
+        None,
+        GROK_CLIENT,
+        GROK_PARSER_VERSION,
+        GROK_METRIC_VERSION,
+    );
+    if let Some((tokens, seconds)) = response {
+        turn.response_output_tokens = Some(tokens);
+        turn.response_duration_seconds = Some(seconds);
+        turn.response_count = Some(1);
+    }
+    turn
+}
+
+#[test]
+fn a_completed_grok_turn_becomes_a_live_response_only_when_it_qualifies() {
+    let at = time("2026-10-03T10:00:00Z");
+    let turn = grok_turn("grok-turn", at, Some((900, 12.0)));
+    let response = crate::ResponseMetric::from_grok_turn(&turn).unwrap();
+    assert_eq!(response.id, "grok-turn");
+    assert_eq!(response.completed_at, at);
+    assert_eq!(response.model.as_deref(), Some("grok-4"));
+    assert_eq!(response.client, GROK_CLIENT);
+    assert_eq!(response.source_kind.as_deref(), Some("primary"));
+    assert_eq!(
+        (response.output_tokens, response.duration_seconds),
+        (900, 12.0)
+    );
+    assert_eq!(response.speed(), 75.0);
+
+    let mut live = crate::LiveResponses::new(at - Duration::minutes(1));
+    assert!(live.push(vec![response.clone()], at));
+    assert!(!live.push(vec![response], at), "the turn id deduplicates");
+
+    let rejected = |change: &dyn Fn(&mut TurnMetric)| {
+        let mut turn = grok_turn("grok-turn", at, Some((900, 12.0)));
+        change(&mut turn);
+        crate::ResponseMetric::from_grok_turn(&turn).is_none()
+    };
+    assert!(rejected(&|turn| turn.model = None));
+    assert!(rejected(&|turn| turn.source_kind = Some("subagent".into())));
+    assert!(rejected(&|turn| turn.source_kind = None));
+    assert!(rejected(&|turn| turn.response_output_tokens = Some(199)));
+    assert!(rejected(
+        &|turn| turn.response_duration_seconds = Some(601.0)
+    ));
+    assert!(rejected(&|turn| turn.response_duration_seconds = Some(0.1)));
+    assert!(rejected(&|turn| turn.response_output_tokens = None));
+    assert!(rejected(&|turn| turn.client = crate::CODEX_CLIENT.into()));
+    assert!(crate::ResponseMetric::from_grok_turn(&grok_turn("none", at, None)).is_none());
+}
+
+fn scoped_turn(
+    id: &str,
+    at: DateTime<Utc>,
+    client: &str,
+    model: &str,
+    provider: &str,
+    response_speed: Option<f64>,
+    tokens: i64,
+) -> TurnMetric {
+    let mut turn = metric(id, at);
+    turn.client = client.into();
+    turn.model = Some(model.into());
+    turn.provider = Some(provider.into());
+    turn.output_tokens = tokens;
+    turn.turn_throughput_tps = tokens as f64 / 10.0;
+    if let Some(speed) = response_speed {
+        turn.response_output_tokens = Some((speed * 4.0) as i64);
+        turn.response_duration_seconds = Some(4.0);
+        turn.response_count = Some(1);
+    }
+    turn
+}
+
+#[test]
+fn the_tray_reading_follows_the_dashboard_hero_precedence_and_filters() {
+    use crate::{tray_reading, SelectionMode, TrayReadingKind};
+    let now = time("2026-10-03T12:00:00Z");
+    let minutes_ago = |minutes: i64| now - Duration::minutes(minutes);
+    // Newest first.
+    let turns = vec![
+        scoped_turn(
+            "a-new",
+            minutes_ago(5),
+            CLAUDE_CLIENT,
+            "claude-a",
+            "anthropic",
+            None,
+            400,
+        ),
+        scoped_turn(
+            "a-old",
+            minutes_ago(30),
+            CLAUDE_CLIENT,
+            "claude-a",
+            "anthropic",
+            Some(80.0),
+            400,
+        ),
+        scoped_turn(
+            "b",
+            minutes_ago(60),
+            "codex",
+            "gpt-b",
+            "openai",
+            Some(40.0),
+            400,
+        ),
+        scoped_turn(
+            "tiny",
+            minutes_ago(90),
+            "codex",
+            "gpt-c",
+            "openai",
+            None,
+            10,
+        ),
+        scoped_turn(
+            "old",
+            now - Duration::days(8),
+            "codex",
+            "gpt-b",
+            "openai",
+            Some(10.0),
+            400,
+        ),
+    ];
+    let auto = SelectionMode::Auto { tool: None };
+    let active = key("claude-a", "anthropic");
+
+    // Live median of the active model first, with the coding tool of its responses.
+    let mut stream = crate::LiveResponses::new(minutes_ago(20));
+    let mut first = live_for_seconds("claude-a", "claude-code", 0, 600);
+    first.completed_at = minutes_ago(2);
+    let mut second = first.clone();
+    second.id = "second".into();
+    second.completed_at = minutes_ago(1);
+    second.output_tokens = 1_200;
+    second.duration_seconds = 8.0;
+    stream.push(vec![first, second], now);
+    let reading = tray_reading(&auto, &stream, Some(&active), &turns, None, None, now).unwrap();
+    assert_eq!(reading.kind, TrayReadingKind::Live);
+    assert_eq!(reading.speed, (50.0 + 150.0) / 2.0);
+    assert_eq!(reading.client, CLAUDE_CLIENT);
+    assert_eq!(reading.model.as_deref(), Some("claude-a"));
+    assert_eq!(reading.provider.as_deref(), Some("anthropic"));
+
+    // No live response: the newest turn of the active model that has response timing, not the
+    // newer one without it.
+    let empty = crate::LiveResponses::new(minutes_ago(20));
+    let reading = tray_reading(&auto, &empty, Some(&active), &turns, None, None, now).unwrap();
+    assert_eq!(
+        (reading.kind, reading.speed),
+        (TrayReadingKind::LatestResponse, 80.0)
+    );
+    assert_eq!(reading.client, CLAUDE_CLIENT);
+
+    // No active model: the newest turn with response timing leads, within the tool when given.
+    let reading = tray_reading(&auto, &empty, None, &turns, None, None, now).unwrap();
+    assert_eq!(reading.model.as_deref(), Some("claude-a"));
+    let in_codex = SelectionMode::Auto {
+        tool: Some("codex".into()),
+    };
+    let reading = tray_reading(&in_codex, &empty, None, &turns, None, None, now).unwrap();
+    assert_eq!(
+        (reading.model.as_deref(), reading.speed),
+        (Some("gpt-b"), 40.0)
+    );
+    assert_eq!(reading.client, "codex");
+    // An active model of another tool has no records in that tool: nothing to show.
+    assert!(tray_reading(&in_codex, &empty, Some(&active), &turns, None, None, now).is_none());
+
+    // A model without response timing falls back to the newest turn long enough for a throughput.
+    let timed_out = vec![turns[0].clone(), turns[3].clone()];
+    let reading = tray_reading(&auto, &empty, Some(&active), &timed_out, None, None, now).unwrap();
+    assert_eq!(
+        (reading.kind, reading.speed),
+        (TrayReadingKind::TurnFallback, 40.0)
+    );
+    let tiny = key("gpt-c", "openai");
+    assert!(tray_reading(&auto, &empty, Some(&tiny), &timed_out, None, None, now).is_none());
+
+    // The dashboard's tool and provider filters narrow the turns.
+    let reading = tray_reading(&auto, &empty, None, &turns, Some("codex"), None, now).unwrap();
+    assert_eq!(reading.model.as_deref(), Some("gpt-b"));
+    let reading = tray_reading(&auto, &empty, None, &turns, None, Some("openai"), now).unwrap();
+    assert_eq!(reading.model.as_deref(), Some("gpt-b"));
+    assert!(tray_reading(&auto, &empty, None, &turns, Some("grok-build"), None, now).is_none());
+
+    // A pinned model ignores the live active model; turns older than a week never count.
+    let pinned = SelectionMode::parse(r#"model:["gpt-b","openai"]"#).unwrap();
+    let reading = tray_reading(&pinned, &empty, Some(&active), &turns, None, None, now).unwrap();
+    assert_eq!(
+        (reading.model.as_deref(), reading.speed),
+        (Some("gpt-b"), 40.0)
+    );
+    let only_old = vec![turns[4].clone()];
+    assert!(tray_reading(&pinned, &empty, None, &only_old, None, None, now).is_none());
+
+    // A pinned cohort reads that exact cohort; one that left the window behaves like Auto.
+    let cohort = |turn: &TurnMetric| {
+        serde_json::to_string(&json!([
+            turn.client,
+            turn.client_version,
+            turn.parser_version,
+            turn.metric_version,
+            turn.model,
+            turn.provider,
+            turn.provider_region,
+            turn.reasoning_effort,
+            turn.source_kind
+        ]))
+        .unwrap()
+    };
+    let pinned_cohort = SelectionMode::parse(&cohort(&turns[2])).unwrap();
+    let reading = tray_reading(
+        &pinned_cohort,
+        &empty,
+        Some(&active),
+        &turns,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+    assert_eq!(
+        (reading.model.as_deref(), reading.speed),
+        (Some("gpt-b"), 40.0)
+    );
+    let gone = SelectionMode::parse(&cohort(&scoped_turn(
+        "x", now, "codex", "gone", "openai", None, 400,
+    )))
+    .unwrap();
+    let reading = tray_reading(&gone, &empty, Some(&active), &turns, None, None, now).unwrap();
+    assert_eq!(reading.model.as_deref(), Some("claude-a"));
+
+    // "All" follows the active model without a tool restriction, like the tray always did.
+    let reading = tray_reading(
+        &SelectionMode::All,
+        &empty,
+        Some(&active),
+        &turns,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+    assert_eq!(reading.speed, 80.0);
+    assert!(tray_reading(&auto, &empty, None, &[], None, None, now).is_none());
+}
+
+// --- Launch checkpoints and delegated output already settled ---
+
+fn set_modified(path: &Path, at: DateTime<Utc>) {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(SystemTime::from(at))
+        .unwrap();
+}
+
+/// A launch from checkpoints skips the unchanged child file but replays a primary file that grew.
+/// The replayed old turn is re-emitted without the work in the skipped file, so it must not settle
+/// to a lower total than the history already holds.
+#[test]
+fn a_replayed_turn_keeps_the_delegated_total_settled_before_the_checkpoint() {
+    let temp = TestDir::new();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let origin = whole_seconds(Utc::now() - Duration::hours(2));
+    let at = |seconds: i64| origin + Duration::seconds(seconds);
+    let root = sessions.join("rollout-root.jsonl");
+    let child = sessions.join("rollout-child.jsonl");
+    let mut root_lines = codex_turn_lines(
+        primary_codex_meta("root-1"),
+        "old-turn",
+        &secs(at(0)),
+        &secs(at(60)),
+        500,
+    );
+    fs::write(&root, jsonl(&root_lines)).unwrap();
+    fs::write(
+        &child,
+        jsonl(&codex_turn_lines(
+            thread_spawn_meta("child-1", Some("root-1"), "root-1"),
+            "child-turn",
+            &secs(at(20)),
+            &secs(at(50)),
+            300,
+        )),
+    )
+    .unwrap();
+    for path in [&root, &child] {
+        set_modified(path, at(180));
+    }
+    let now = Utc::now() + Duration::hours(1);
+
+    let mut history = History::default();
+    let mut first = Monitor::new(sessions.clone());
+    history.merge(&settle(&mut first, now), now);
+    let old_turn = |history: &History| {
+        let found: Vec<_> = history
+            .records()
+            .iter()
+            .filter(|record| record.output_tokens == 500)
+            .collect();
+        assert_eq!(found.len(), 1);
+        found[0].delegated_output_tokens
+    };
+    assert_eq!(old_turn(&history), Some(300));
+    let checkpoints = first.checkpoints().unwrap();
+    assert_eq!(checkpoints.len(), 2);
+
+    // The session continues: the primary file grows, the child file does not.
+    root_lines = codex_turn_lines(
+        primary_codex_meta("root-1"),
+        "new-turn",
+        &secs(at(900)),
+        &secs(at(960)),
+        800,
+    );
+    append_to(&root, &jsonl(&root_lines[1..]));
+    set_modified(&root, at(1_000));
+
+    let mut second = Monitor::new(sessions);
+    second.set_checkpoints(checkpoints);
+    let replayed = settle(&mut second, now);
+    assert!(
+        replayed
+            .iter()
+            .all(|record| record.output_tokens != 500 || record.delegated_output_tokens.is_none()),
+        "the replayed turn is not finalized from the work this run did not read"
+    );
+    history.merge(&replayed, now);
+    assert_eq!(
+        old_turn(&history),
+        Some(300),
+        "the settled total survives the replay"
+    );
+    // A turn that started after the skipped file was last modified is unaffected.
+    let new_turn = history
+        .records()
+        .iter()
+        .find(|record| record.output_tokens == 800)
+        .unwrap();
+    assert_eq!(new_turn.delegated_output_tokens, Some(0));
+}
+
+/// The same for Claude Code, where the owner of the monitor pair holds the delegation state.
+#[test]
+fn a_replayed_claude_turn_keeps_the_delegated_total_settled_before_the_checkpoint() {
+    let temp = TestDir::new();
+    let (codex, claude, grok) = (
+        temp.path().join("codex"),
+        temp.path().join("claude-projects"),
+        temp.path().join("grok-sessions"),
+    );
+    let project = claude.join("project-a");
+    for directory in [&codex, &grok, &project] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let origin = whole_seconds(Utc::now() - Duration::hours(2));
+    let at = |seconds: i64| origin + Duration::seconds(seconds);
+    let primary = project.join(format!("{DELEGATION_SESSION}.jsonl"));
+    fs::write(
+        &primary,
+        jsonl(&claude_turn(DELEGATION_SESSION, "old", at(0), at(60), 500)),
+    )
+    .unwrap();
+    let subagent_dir = project.join(DELEGATION_SESSION).join("subagents");
+    fs::create_dir_all(&subagent_dir).unwrap();
+    let subagent = subagent_dir.join("agent-child.jsonl");
+    fs::write(
+        &subagent,
+        jsonl(&finished_subagent(
+            DELEGATION_SESSION,
+            "child",
+            &secs(at(20)),
+            &secs(at(50)),
+            300,
+        )),
+    )
+    .unwrap();
+    for path in [&primary, &subagent] {
+        set_modified(path, at(180));
+    }
+
+    // Polls until the monitors need nothing at `now`, following their own deadlines.
+    let run = |sources: &mut SourceMonitor, history: &mut History| {
+        let mut now = Utc::now() + Duration::hours(1);
+        let mut found = Vec::new();
+        for _ in 0..60 {
+            found.extend(sources.poll(now).unwrap());
+            match sources.next_poll_deadline(now) {
+                Some(deadline) => now = now.max(deadline),
+                None => break,
+            }
+        }
+        history.merge(&found, now);
+    };
+    let old_turn = |history: &History| {
+        let found: Vec<_> = history
+            .records()
+            .iter()
+            .filter(|record| record.output_tokens == 500)
+            .collect();
+        assert_eq!(found.len(), 1);
+        found[0].delegated_output_tokens
+    };
+
+    let mut history = History::default();
+    let mut first = SourceMonitor::new(
+        codex.clone(),
+        claude.clone(),
+        grok.clone(),
+        grok.with_file_name("gemini"),
+        grok.with_file_name("opencode"),
+    );
+    run(&mut first, &mut history);
+    assert_eq!(old_turn(&history), Some(300));
+    let checkpoints = first.checkpoints(&crate::SourceCheckpoints::default());
+    assert_eq!(checkpoints.claude_subagents.len(), 1);
+
+    append_to(
+        &primary,
+        &jsonl(&claude_turn(
+            DELEGATION_SESSION,
+            "new",
+            at(900),
+            at(960),
+            800,
+        )),
+    );
+    set_modified(&primary, at(1_000));
+
+    let mut second = SourceMonitor::new(
+        codex,
+        claude,
+        grok.clone(),
+        grok.with_file_name("gemini"),
+        grok.with_file_name("opencode"),
+    );
+    second.set_checkpoints(checkpoints);
+    run(&mut second, &mut history);
+    assert_eq!(old_turn(&history), Some(300));
+    let new_turn = history
+        .records()
+        .iter()
+        .find(|record| record.output_tokens == 800)
+        .unwrap();
+    assert_eq!(new_turn.delegated_output_tokens, Some(0));
+}
+
+#[test]
+fn history_keeps_a_settled_delegated_total_when_the_same_turn_arrives_without_one() {
+    let now = time("2026-10-03T12:00:00Z");
+    let mut settled = metric("turn", now - Duration::minutes(10));
+    settled.delegated_output_tokens = Some(300);
+    let mut provisional = settled.clone();
+    provisional.delegated_output_tokens = None;
+    provisional.output_tokens = 777;
+
+    let mut history = History::default();
+    history.merge(&[settled.clone()], now);
+    history.merge(&[provisional.clone()], now);
+    assert_eq!(history.records()[0].delegated_output_tokens, Some(300));
+    assert_eq!(
+        history.records()[0].output_tokens,
+        777,
+        "the rest is replaced"
+    );
+    // A final total replaces another, and a turn never settled stays so.
+    let mut corrected = settled;
+    corrected.delegated_output_tokens = Some(400);
+    history.merge(&[corrected], now);
+    assert_eq!(history.records()[0].delegated_output_tokens, Some(400));
+    let mut fresh = History::default();
+    fresh.merge(&[provisional], now);
+    assert_eq!(fresh.records()[0].delegated_output_tokens, None);
 }

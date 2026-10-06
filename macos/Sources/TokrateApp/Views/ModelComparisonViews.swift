@@ -159,7 +159,7 @@ struct ModelSelectionItems: View {
     }
 
     private func chipLabel(_ title: String, tool: CodingTool) -> some View {
-        Label { Text(title) } icon: { Image(nsImage: ToolChip.image(chip: tool.chip)) }
+        Label { Text(title) } icon: { Image(nsImage: ToolChip.image(chip: tool.chip)).renderingMode(.template) }
     }
 }
 

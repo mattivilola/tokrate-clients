@@ -3,6 +3,7 @@ use crate::delegation::{extend_bounded, DelegationEvent};
 use crate::model::{ResponseMetric, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 pub(crate) const MAX_LINE_BYTES: usize = 1_048_576;
 const DEFAULT_TAIL_BYTES: u64 = 262_144;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct FileIdentity(String);
 
 pub(crate) fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
@@ -60,6 +61,9 @@ pub(crate) struct IncrementalReader {
     bytes_read_last_poll: usize,
     is_caught_up: bool,
     tail_bytes: Option<u64>,
+    /// Where a previous run read this file to. Until the file grows past it the reader reads
+    /// nothing; then it recovers the header and continues from here instead of from a recent tail.
+    resume_at: Option<u64>,
     /// Recent-tail readers keep the responses they complete; replay readers discard them.
     collect_responses: bool,
     responses: Vec<ResponseMetric>,
@@ -110,6 +114,23 @@ impl IncrementalReader {
         )
     }
 
+    /// A live reader for a file a previous run consumed up to `offset` (a line boundary): it reads
+    /// nothing until the file grows, then recovers the header and context as a recent tail does and
+    /// continues from `offset`. A file that shrank or was replaced is read as a fresh recent tail.
+    pub fn resumed(path: PathBuf, offset: u64) -> Self {
+        Self::resume(Self::recent_tail(path), offset)
+    }
+
+    pub fn resumed_claude(path: PathBuf, offset: u64) -> Self {
+        Self::resume(Self::recent_tail_claude(path), offset)
+    }
+
+    fn resume(mut reader: Self, offset: u64) -> Self {
+        reader.resume_at = Some(offset);
+        reader.is_caught_up = true;
+        reader
+    }
+
     fn new(
         path: PathBuf,
         startup: Startup,
@@ -134,6 +155,7 @@ impl IncrementalReader {
             bytes_read_last_poll: 0,
             is_caught_up: false,
             tail_bytes,
+            resume_at: None,
             collect_responses: tail_bytes.is_some(),
             responses: Vec::new(),
             delegation_events: Vec::new(),
@@ -174,7 +196,7 @@ impl IncrementalReader {
         let metadata = File::open(&self.path)?.metadata()?;
         let current_size = metadata.len();
         let current_identity = file_identity(&metadata);
-        if current_size < self.offset
+        if current_size < self.resume_at.unwrap_or(self.offset)
             || (self.identity.is_some()
                 && current_identity.is_some()
                 && self.identity != current_identity)
@@ -192,12 +214,14 @@ impl IncrementalReader {
             self.is_caught_up = true;
             return Ok(Vec::new());
         }
-        if current_size <= self.offset {
-            self.is_caught_up =
-                self.startup == Startup::Ready || self.startup == Startup::Beginning;
+        if current_size <= self.resume_at.unwrap_or(self.offset) {
+            self.is_caught_up = self.resume_at.is_some()
+                || self.startup == Startup::Ready
+                || self.startup == Startup::Beginning;
             return Ok(Vec::new());
         }
         if self.startup == Startup::Header {
+            self.is_caught_up = false;
             self.prepare_recent_tail(current_size, max_bytes)?;
             return Ok(Vec::new());
         }
@@ -231,6 +255,16 @@ impl IncrementalReader {
     }
 
     fn prepare_recent_tail(&mut self, current_size: u64, max_bytes: usize) -> io::Result<()> {
+        if self.tail_header == TailHeader::AnyTypedEvent {
+            if let Some(resume_at) = self.resume_at.take() {
+                // Claude records carry their own context, and a parser that has seen nothing takes
+                // the next prompt as the start of a turn. A header read would only open a turn
+                // from the file's first prompt that the resumed records could wrongly continue.
+                self.offset = resume_at;
+                self.startup = Startup::Alignment;
+                return Ok(());
+            }
+        }
         let count = usize::try_from((current_size - self.offset).min(max_bytes as u64))
             .unwrap_or(max_bytes);
         let bytes = self.read_at(self.offset, count)?;
@@ -284,7 +318,9 @@ impl IncrementalReader {
             self.is_caught_up = true;
             return Ok(());
         }
-        let tail_start = current_size.saturating_sub(self.tail_bytes.unwrap_or(DEFAULT_TAIL_BYTES));
+        let tail_start = self.resume_at.take().unwrap_or_else(|| {
+            current_size.saturating_sub(self.tail_bytes.unwrap_or(DEFAULT_TAIL_BYTES))
+        });
         self.offset = header_end.max(tail_start);
         self.startup = if self.offset > header_end {
             self.parser.begin_mid_file();
@@ -355,6 +391,7 @@ impl IncrementalReader {
         self.offset = 0;
         self.pending.clear();
         self.dropping_oversized_line = false;
+        self.resume_at = None;
         self.identity = identity;
         self.parser.reset(self.path.to_string_lossy().into_owned());
         self.startup = if self.tail_bytes.is_some() {
@@ -371,6 +408,24 @@ impl IncrementalReader {
 
     pub fn is_caught_up(&self) -> bool {
         self.is_caught_up
+    }
+
+    /// Where a later run can resume this reader: the end of what it has consumed, when it is
+    /// caught up, holds no partial line and is positioned (or has not yet been touched since it
+    /// was resumed). `None` while it still has reading or recovering to do.
+    pub fn checkpoint_offset(&self) -> Option<u64> {
+        if !self.is_caught_up || !self.pending.is_empty() || self.dropping_oversized_line {
+            return None;
+        }
+        match self.startup {
+            Startup::Ready | Startup::Beginning => Some(self.offset),
+            Startup::Header => self.resume_at,
+            Startup::Alignment | Startup::Unavailable => None,
+        }
+    }
+
+    pub fn identity(&self) -> Option<&FileIdentity> {
+        self.identity.as_ref()
     }
 
     pub fn excludes_session(&self) -> bool {

@@ -365,10 +365,6 @@ public struct CodexEventParser: Sendable {
 
     private func parseDate(_ value: Any?) -> Date? {
         guard let string = value as? String else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: string) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: string)
+        return TranscriptTimestamp.parse(string)
     }
 }

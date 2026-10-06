@@ -439,30 +439,42 @@ enum EfficiencyCopy {
 
 // MARK: - Menu-bar readout
 
-/// What the menu-bar item shows: the live response speed of the followed model and its maker.
+/// What the menu-bar item shows: the speed of the followed model, its maker and its coding tool. The
+/// value is the same hero reading as the popover gauge: the live median while responses finish,
+/// otherwise the model's latest turn.
 struct MenuBarReadout: Equatable, Sendable {
     let speedText: String
     let group: ResponseGroupKey?
     let maker: ModelMaker?
+    /// The coding tool the value comes from, shown as a chip.
+    let tool: CodingTool?
     let accessibilityLabel: String
 
-    static let unavailable = MenuBarReadout(speedText: "— tok/s", group: nil, maker: nil, accessibilityLabel: "Tokrate, response speed: unavailable")
+    static let unavailable = MenuBarReadout(speedText: "— tok/s", group: nil, maker: nil, tool: nil, accessibilityLabel: "Tokrate, response speed: unavailable")
 
-    static func make(isMonitoring: Bool, selection: DashboardSelection, group: ResponseGroupKey?, liveSpeed: LiveSpeed?) -> MenuBarReadout {
+    static func make(isMonitoring: Bool, selection: DashboardSelection, reading: HeroReading) -> MenuBarReadout {
         guard isMonitoring else { return .unavailable }
         if selection.isAllModels {
-            return MenuBarReadout(speedText: "Compare", group: nil, maker: nil, accessibilityLabel: "Tokrate, model comparison")
+            return MenuBarReadout(speedText: "Compare", group: nil, maker: nil, tool: nil, accessibilityLabel: "Tokrate, model comparison")
         }
+        let group = reading.group
         let maker = group.map { ModelMaker($0) }
-        let provider = maker.map { $0 == .unknown ? "" : "\($0.title), " } ?? ""
-        guard let liveSpeed else {
-            return MenuBarReadout(speedText: "— tok/s", group: group, maker: maker, accessibilityLabel: "Tokrate, \(provider)response speed: unavailable")
+        let tool = reading.client.map(CodingTool.named)
+        let who = [maker.flatMap { $0 == .unknown ? nil : $0.title }, tool?.title].compactMap { $0 }.map { "\($0), " }.joined()
+        guard let value = reading.value else {
+            return MenuBarReadout(speedText: "— tok/s", group: group, maker: maker, tool: tool, accessibilityLabel: "Tokrate, \(who)response speed: unavailable")
+        }
+        let measure = switch reading.kind {
+        case .live, .empty: "response speed"
+        case .latestTurnResponse: "response speed of the latest turn"
+        case .turnFallback: "turn speed of the latest turn"
         }
         return MenuBarReadout(
-            speedText: String(format: "%.1f tok/s", liveSpeed.medianTPS),
+            speedText: String(format: "%.1f tok/s", value),
             group: group,
             maker: maker,
-            accessibilityLabel: String(format: "Tokrate, %@response speed: %.1f tokens per second", provider, liveSpeed.medianTPS)
+            tool: tool,
+            accessibilityLabel: String(format: "Tokrate, %@%@: %.1f tokens per second", who, measure, value)
         )
     }
 }

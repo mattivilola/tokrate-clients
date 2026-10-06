@@ -2,8 +2,9 @@
 //! integrations), which keeps all sessions in one SQLite database under its data folder.
 
 use crate::model::{ResponseMetric, TurnMetric};
+use crate::monitor::SourceChange;
 use crate::opencode_db::{read_database, MessageScope};
-use crate::opencode_turns::{live_response, Index};
+use crate::opencode_turns::{live_response, Index, DELEGATION_MAX_WAIT_MS};
 use crate::sqlite_read::{retry_delay, DatabaseSignature, Remembered};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
@@ -26,12 +27,21 @@ struct Emitted {
     completed_at: DateTime<Utc>,
 }
 
+impl Emitted {
+    /// When a turn with unfinished delegated work stops waiting for it.
+    fn settles_at(&self) -> DateTime<Utc> {
+        self.completed_at + Duration::milliseconds(DELEGATION_MAX_WAIT_MS)
+    }
+}
+
 /// Bounded reader for OpenCode's database, with an in-memory index of the last seven days.
 pub struct OpenCodeMonitor {
     root: PathBuf,
     index: Index,
     /// The signature the last successful read started from.
     read_at: Option<DatabaseSignature>,
+    /// The files as last seen: refreshed by every poll and by a watcher report for the database.
+    current: Option<DatabaseSignature>,
     last_full_read: Option<DateTime<Utc>>,
     failures: u32,
     retry_at: Option<DateTime<Utc>>,
@@ -51,6 +61,7 @@ impl OpenCodeMonitor {
             root,
             index: Index::default(),
             read_at: None,
+            current: None,
             last_full_read: None,
             failures: 0,
             retry_at: None,
@@ -89,7 +100,8 @@ impl OpenCodeMonitor {
         let cutoff = now - Duration::days(RETENTION_DAYS);
         let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        let signature = DatabaseSignature::of(&path);
+        self.current = DatabaseSignature::of(&path);
+        let signature = self.current;
         let changed = signature.is_some_and(|signature| {
             signature
                 .modified()
@@ -158,12 +170,12 @@ impl OpenCodeMonitor {
         self.emitted
             .retain(|_, emitted| emitted.completed_at >= cutoff);
 
-        // Turns still waiting for their delegated output are evaluated every poll: the wait
-        // ends with time, not with a database change.
+        // A turn still waiting for its delegated output is evaluated again when its wait runs out:
+        // that ends with time, not with a database change (a change reaches it as a dirty session).
         dirty.extend(
             self.emitted
                 .values()
-                .filter(|emitted| !emitted.delegated_final)
+                .filter(|emitted| !emitted.delegated_final && emitted.settles_at() <= now)
                 .map(|emitted| emitted.session_id.clone()),
         );
         let mut records = Vec::new();
@@ -199,6 +211,56 @@ impl OpenCodeMonitor {
 
     pub fn bytes_read_last_poll(&self) -> usize {
         self.bytes_read_last_poll
+    }
+
+    /// Whether the data folder exists now.
+    pub fn root_exists(&self) -> bool {
+        self.root.is_dir()
+    }
+
+    /// Marks what a folder watcher reported so the next poll reads it. Only `opencode.db` and
+    /// `opencode.db-wal` directly in the data folder matter; the folder also holds snapshots, tool
+    /// output and logs that change constantly and must not wake a poll. Paths must be spelled
+    /// under the root as the monitor was created with. Returns whether a poll has work now.
+    pub fn note_changes(&mut self, change: &SourceChange) -> bool {
+        let database = Self::database_path(&self.root);
+        let log = crate::sqlite_read::wal_path(&database);
+        if !change.must_rescan
+            && !change
+                .paths
+                .iter()
+                .any(|path| *path == database || *path == log)
+        {
+            return false;
+        }
+        self.current = DatabaseSignature::of(&database);
+        // A lost event is answered by a poll, which looks at the files itself.
+        change.must_rescan
+            || self
+                .current
+                .is_some_and(|current| self.read_at != Some(current))
+    }
+
+    /// When the monitor must poll again if nothing else changes: `now` while a changed database
+    /// waits to be read, the retry time after a failed read, else the earliest moment a turn stops
+    /// waiting for unfinished subagent messages; `None` when nothing is pending.
+    pub fn next_poll_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let waiting = self
+            .emitted
+            .values()
+            .filter(|emitted| !emitted.delegated_final);
+        let settle = waiting.map(Emitted::settles_at).min();
+        let cutoff = now - Duration::days(RETENTION_DAYS);
+        let read = self
+            .current
+            .filter(|current| {
+                self.read_at != Some(*current)
+                    && current
+                        .modified()
+                        .is_some_and(|modified| modified >= cutoff)
+            })
+            .map(|_| self.retry_at.map_or(now, |retry| retry.max(now)));
+        [settle, read].into_iter().flatten().min()
     }
 
     /// Qualifying assistant messages completed since the last call, oldest first.

@@ -3,6 +3,7 @@
 
 use crate::antigravity_db::{read_database, GenerationCache};
 use crate::antigravity_turns::turn_id;
+use crate::monitor::SourceChange;
 use crate::protobuf::{Malformed, Message};
 use crate::sqlite_read::read_only_uri;
 use crate::{
@@ -1420,4 +1421,181 @@ fn unreadable_database_retry_delay_doubles_up_to_five_minutes() {
         .map(|failures| crate::sqlite_read::retry_delay(failures).num_seconds())
         .collect();
     assert_eq!(seconds, [10, 20, 40, 80, 160, 300, 300, 300]);
+}
+
+// ---- event-driven polling ------------------------------------------------------------------------
+
+fn changed(paths: &[&Path]) -> SourceChange {
+    SourceChange {
+        paths: paths.iter().map(|path| path.to_path_buf()).collect(),
+        must_rescan: false,
+    }
+}
+
+#[test]
+fn only_a_conversation_database_change_wakes_a_poll() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    finished_execution(&db, now() - Duration::seconds(120), 4);
+    let mut monitor = fixture.monitor();
+    let at = now();
+    assert_eq!(poll(&mut monitor, at).len(), 1);
+    // Everything is read: nothing to do, and a report that changed nothing leaves nothing to poll.
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    assert!(!monitor.note_changes(&changed(&[&db.path])));
+    assert_eq!(monitor.next_poll_deadline(at), None);
+
+    // Neither the rest of the data folder nor a conversation folder's other files wake a poll.
+    let root = fixture.root();
+    let folder = db.path.parent().unwrap();
+    let unrelated = [
+        root.join("antigravity-browser-profile/Default/Cookies"),
+        root.join("config/settings.json"),
+        root.join("antigravity/brain/notes.md"),
+        folder.join("legacy.pb"),
+        folder.join(format!("{CONVERSATION}.db-shm")),
+        folder.join(format!("{CONVERSATION}.db-journal")),
+        folder.join(".hidden.db"),
+        root.join("antigravity-ide/conversations/nested/other.db"),
+    ];
+    let paths: Vec<&Path> = unrelated.iter().map(PathBuf::as_path).collect();
+    assert!(!monitor.note_changes(&changed(&paths)));
+    assert_eq!(monitor.next_poll_deadline(at), None);
+
+    // A write to the database, or to its write-ahead log, does.
+    db.step(&StepSpec::new(9, "later-execution").created(now()));
+    assert!(monitor.note_changes(&changed(&[&db.path])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    assert!(poll(&mut monitor, at).is_empty());
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    let wal = PathBuf::from(format!("{}-wal", db.path.display()));
+    db.step(&StepSpec::new(10, "later-execution").created(now()));
+    assert!(monitor.note_changes(&changed(&[&wal])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    poll(&mut monitor, at);
+
+    // A lost event is answered by a poll.
+    assert!(monitor.note_changes(&SourceChange {
+        paths: Default::default(),
+        must_rescan: true,
+    }));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+}
+
+#[test]
+fn a_new_database_is_found_when_reported_and_otherwise_by_the_five_minute_safety_net() {
+    let fixture = Fixture::new();
+    let first = fixture.primary();
+    finished_execution(&first, now() - Duration::seconds(120), 4);
+    let mut monitor = fixture.monitor();
+    let at = now();
+    assert_eq!(poll(&mut monitor, at).len(), 1);
+
+    // A second conversation appears. An idle poll does not enumerate, so it is not found yet.
+    let second = fixture.database("antigravity-cli", "second-conversation");
+    finished_execution(&second, now() - Duration::seconds(100), 4);
+    assert!(poll(&mut monitor, at + Duration::minutes(1)).is_empty());
+    assert_eq!(monitor.bytes_read_last_poll(), 0);
+    // The report of the new file wakes a poll that enumerates.
+    assert!(monitor.note_changes(&changed(&[&second.path])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    let turns = poll(&mut monitor, at + Duration::minutes(1));
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].surface, Some(ToolSurface::Cli));
+
+    // Without any report the safety net finds it.
+    let third = fixture.database("antigravity-ide", "third-conversation");
+    finished_execution(&third, now() - Duration::seconds(90), 4);
+    assert!(poll(&mut monitor, at + Duration::minutes(2)).is_empty());
+    let turns = poll(&mut monitor, at + Duration::minutes(7));
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].surface, Some(ToolSurface::Ide));
+}
+
+#[test]
+fn the_deadline_is_now_for_deferred_reads_and_the_retry_time_for_a_failing_database() {
+    let fixture = Fixture::new();
+    let t0 = now() - Duration::seconds(120);
+    for name in ["one", "two"] {
+        let db = fixture.database("antigravity", name);
+        finished_execution(&db, t0, 4);
+    }
+    let mut monitor = fixture.monitor();
+    let at = now();
+    // Only one database is read when the budget is used up by it; the other is deferred.
+    assert_eq!(monitor.poll_with_budget(at, 1).unwrap().len(), 1);
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    assert_eq!(monitor.poll_with_budget(at, 1).unwrap().len(), 1);
+    assert_eq!(monitor.next_poll_deadline(at), None);
+
+    // A database that cannot be read is retried after a delay, not on every poll.
+    let broken = fixture.root().join("antigravity/conversations/broken.db");
+    fs::write(&broken, b"this is not a sqlite database at all").unwrap();
+    assert!(monitor.note_changes(&changed(&[&broken])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+    assert!(poll(&mut monitor, at).is_empty());
+    assert_eq!(
+        monitor.next_poll_deadline(at),
+        Some(at + Duration::seconds(10))
+    );
+    // Once the delay is over the retry is due; a second failure doubles it.
+    let later = at + Duration::seconds(11);
+    assert_eq!(monitor.next_poll_deadline(later), Some(later));
+    assert!(poll(&mut monitor, later).is_empty());
+    assert_eq!(
+        monitor.next_poll_deadline(later),
+        Some(later + Duration::seconds(20))
+    );
+}
+
+#[test]
+fn source_monitor_routes_changes_by_root_wakes_on_them_and_watches_only_the_conversation_folders() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    finished_execution(&db, now() - Duration::seconds(120), 4);
+    let empty = |name: &str| {
+        let path = fixture.dir.path().join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let mut monitor = SourceMonitor::new(
+        empty("codex"),
+        empty("claude"),
+        empty("grok"),
+        fixture.root(),
+        empty("opencode"),
+    );
+    let at = now();
+    assert_eq!(monitor.poll(at).unwrap().len(), 1);
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    // A path of another root, or noise below the Antigravity root, wakes nothing.
+    assert!(!monitor.note_changes(&changed(&[
+        &fixture.dir.path().join("codex/rollout.jsonl"),
+        &fixture.root().join("antigravity-browser-profile/x"),
+    ])));
+    assert_eq!(monitor.next_poll_deadline(at), None);
+    db.step(&StepSpec::new(9, "later-execution").created(now()));
+    assert!(monitor.note_changes(&changed(&[&db.path])));
+    assert_eq!(monitor.next_poll_deadline(at), Some(at));
+
+    // Only the three conversation folders are watched, each on its own and not below them.
+    let folders = monitor.watch_folders("antigravity");
+    let names: Vec<_> = folders.iter().map(|folder| folder.name).collect();
+    assert_eq!(names, ["antigravity", "antigravity-ide", "antigravity-cli"]);
+    assert!(folders.iter().all(|folder| !folder.recursive));
+    assert_eq!(
+        folders
+            .iter()
+            .map(|folder| folder.exists)
+            .collect::<Vec<_>>(),
+        [true, false, false]
+    );
+    assert_eq!(
+        folders[0].path,
+        fixture.root().join("antigravity/conversations")
+    );
+    assert_eq!(monitor.root_exists("antigravity"), Some(true));
+    // The other tools are watched whole from their root.
+    assert!(monitor.watch_folders("codex")[0].recursive);
+    assert!(monitor.watch_folders("unknown").is_empty());
 }
