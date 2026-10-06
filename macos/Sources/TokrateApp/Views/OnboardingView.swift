@@ -54,10 +54,13 @@ struct OnboardingView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel("Coding tools on this Mac")
-                SourceStatusList(statuses: store.sourceStatuses, showsPaths: false)
-                    .padding(.horizontal, 14).padding(.vertical, 2)
-                    .background(DashboardStyle.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(DashboardStyle.line, lineWidth: 1) }
+                ViewThatFits(in: .vertical) {
+                    sourceList
+                    ScrollView { sourceList }.scrollIndicators(.automatic)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(DashboardStyle.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(DashboardStyle.line, lineWidth: 1) }
                 Text("Tokrate reads timing and token counts from their session files, on this Mac only. Prompts, responses and code are never retained.")
                     .font(DashboardStyle.Typography.caption).foregroundStyle(DashboardStyle.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -66,16 +69,25 @@ struct OnboardingView: View {
         }
     }
 
+    private var sourceList: some View {
+        SourceStatusList(statuses: store.sourceStatuses, showsPaths: false)
+            .padding(.horizontal, 14).padding(.vertical, 2)
+    }
+
     // MARK: Step 2
 
     private var sharing: some View {
-        ScrollView {
-            ConsentDisclosureView(preferences: store.sharingPreferences, spacious: true) {
-                step = .menuBar
+        VStack(spacing: 0) {
+            ScrollView {
+                ConsentDisclosureView(preferences: store.sharingPreferences, spacious: true, showsChoices: false)
+                    .padding(.vertical, 2)
             }
-            .padding(.vertical, 2)
+            .scrollIndicators(.automatic)
+            Divider().overlay(DashboardStyle.line)
+            ConsentChoiceButtons(preferences: store.sharingPreferences) { step = .menuBar }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 14)
         }
-        .scrollIndicators(.automatic)
     }
 
     // MARK: Step 3

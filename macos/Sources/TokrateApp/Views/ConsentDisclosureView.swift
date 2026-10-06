@@ -7,6 +7,8 @@ import TokrateCore
 struct ConsentDisclosureView: View {
     let preferences: SharingPreferences
     var spacious = false
+    /// Hosts that pin the choice buttons outside a scroll area pass false and render `ConsentChoiceButtons` themselves.
+    var showsChoices = true
     /// Called after either choice has been recorded.
     var onDecision: (() -> Void)?
     @State private var showsPayload = false
@@ -45,21 +47,10 @@ struct ConsentDisclosureView: View {
             Text("You can turn sharing off any time. Tokrate stops new contributions and cancels unsent samples; local monitoring continues, and measurements already sent may remain in community data.")
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             payloadDisclosure
-            HStack(spacing: 12) {
-                Button("Yes, let's contribute") {
-                    preferences.consentToShare()
-                    onDecision?()
-                }
-                .buttonStyle(ConsentChoiceButtonStyle())
-                .accessibilityHint("Starts sharing new turn measurements with the community")
-                Button("Only for local use") {
-                    preferences.chooseLocalOnly()
-                    onDecision?()
-                }
-                .buttonStyle(ConsentChoiceButtonStyle())
-                .accessibilityHint("Keeps every measurement on this Mac")
+            if showsChoices {
+                ConsentChoiceButtons(preferences: preferences, onDecision: onDecision)
+                    .padding(.top, 2)
             }
-            .padding(.top, 2)
             ConsentLinks()
         }
     }
@@ -86,6 +77,30 @@ struct ConsentDisclosureView: View {
                 .foregroundStyle(DashboardStyle.accent)
         }
         .tint(DashboardStyle.accent)
+    }
+}
+
+/// The two consent choices; each records the decision on `SharingPreferences`, then calls `onDecision`.
+struct ConsentChoiceButtons: View {
+    let preferences: SharingPreferences
+    /// Called after either choice has been recorded.
+    var onDecision: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button("Yes, let's contribute") {
+                preferences.consentToShare()
+                onDecision?()
+            }
+            .buttonStyle(ConsentChoiceButtonStyle())
+            .accessibilityHint("Starts sharing new turn measurements with the community")
+            Button("Only for local use") {
+                preferences.chooseLocalOnly()
+                onDecision?()
+            }
+            .buttonStyle(ConsentChoiceButtonStyle())
+            .accessibilityHint("Keeps every measurement on this Mac")
+        }
     }
 }
 
