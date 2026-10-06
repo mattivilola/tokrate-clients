@@ -44,9 +44,21 @@ pub(crate) struct DelegationFileBacklog {
     pub archive_pending: bool,
     /// Poll time at which the live reader was created and positioned; `None` while it is not.
     pub live_started_at: Option<DateTime<Utc>>,
+    /// The file was resumed from a launch checkpoint: its content up to this modification time was
+    /// not read in this run, so the work items in it are not in memory. `None` for a file read from
+    /// its start.
+    pub skipped_through: Option<DateTime<Utc>>,
 }
 
 impl DelegationFileBacklog {
+    /// True when a file resumed from a checkpoint could hold work started at or after `work_start`
+    /// that this run never read, so a total for a turn that began then would be incomplete.
+    pub fn skipped_work_since(&self, work_start: DateTime<Utc>) -> bool {
+        let earliest = work_start - Duration::milliseconds(BACKLOG_TOLERANCE_MILLISECONDS);
+        self.skipped_through
+            .is_some_and(|through| through >= earliest)
+    }
+
     /// True when this file could still hold unread work started at or after `work_start`.
     ///
     /// A work item's start record is written at or after the start of the turn that began it, so
@@ -134,12 +146,18 @@ impl DelegationTracker {
     /// `backlog(start)` tells whether the delegated source may still hold unread work that
     /// started at or after `start`: a turn is not final then, since its work may not have been
     /// seen yet. It is asked per pending turn with that turn's start.
+    ///
+    /// `skipped(start)` tells whether a file resumed from a launch checkpoint could hold work
+    /// started at or after `start`. That work was attributed by the run that wrote the checkpoint,
+    /// whose total is already in the history, and a total summed without it would replace that one:
+    /// such a turn is forgotten without a total, and the history keeps the one it has.
     pub fn apply(
         &mut self,
         mut records: Vec<TurnMetric>,
         events: Vec<DelegationEvent>,
         now: DateTime<Utc>,
         backlog: impl Fn(DateTime<Utc>) -> bool,
+        skipped: impl Fn(DateTime<Utc>) -> bool,
     ) -> Vec<TurnMetric> {
         let mut turns: HashMap<String, (String, DateTime<Utc>)> = HashMap::new();
         for event in events {
@@ -187,7 +205,7 @@ impl DelegationTracker {
         }
         self.prune(cutoff);
 
-        let finals = self.finalize(now, &backlog);
+        let finals = self.finalize(now, &backlog, &skipped);
         if !finals.is_empty() {
             let positions: HashMap<String, usize> = records
                 .iter()
@@ -297,11 +315,61 @@ impl DelegationTracker {
         }
     }
 
+    /// True while a primary turn still waits for its delegated output to settle.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// The earliest moment a pending turn can change state through time alone: its settle time,
+    /// or, while open work holds it, the end of the maximum wait. A turn held only by an unread
+    /// file contributes nothing: reading that file is what moves it.
+    pub fn next_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.pending
+            .values()
+            .filter_map(|turn| {
+                let settled = turn.completed_at + Duration::seconds(DELEGATION_SETTLE_SECONDS);
+                if now < settled {
+                    Some(settled)
+                } else if self.delegated_total(turn).1 {
+                    Some(turn.completed_at + Duration::seconds(DELEGATION_MAX_WAIT_SECONDS))
+                } else {
+                    None
+                }
+            })
+            .min()
+    }
+
+    /// The finished delegated output tokens of the work that started inside `turn`, and whether
+    /// any of that work is still open.
+    fn delegated_total(&self, turn: &PendingTurn) -> (i64, bool) {
+        let mut total = 0_i64;
+        let mut open = false;
+        let work = self
+            .by_root
+            .get(&turn.root_session)
+            .into_iter()
+            .flatten()
+            .filter_map(|work_id| self.items.get(work_id))
+            .filter(|item| {
+                turn.started_at <= item.started_at && item.started_at <= turn.completed_at
+            });
+        for item in work {
+            match item.state {
+                WorkState::Open => open = true,
+                WorkState::Finished(tokens) => total = total.saturating_add(tokens),
+                WorkState::Discarded => {}
+            }
+        }
+        (total, open)
+    }
+
     fn finalize(
         &mut self,
         now: DateTime<Utc>,
         backlog: &impl Fn(DateTime<Utc>) -> bool,
+        skipped: &impl Fn(DateTime<Utc>) -> bool,
     ) -> Vec<TurnMetric> {
+        self.pending.retain(|_, turn| !skipped(turn.started_at));
         let settle = Duration::seconds(DELEGATION_SETTLE_SECONDS);
         let max_wait = Duration::seconds(DELEGATION_MAX_WAIT_SECONDS);
         let mut ready: Vec<(String, i64)> = Vec::new();
@@ -309,24 +377,7 @@ impl DelegationTracker {
             if now < turn.completed_at + settle || backlog(turn.started_at) {
                 continue;
             }
-            let mut total = 0_i64;
-            let mut open = false;
-            let work = self
-                .by_root
-                .get(&turn.root_session)
-                .into_iter()
-                .flatten()
-                .filter_map(|work_id| self.items.get(work_id))
-                .filter(|item| {
-                    turn.started_at <= item.started_at && item.started_at <= turn.completed_at
-                });
-            for item in work {
-                match item.state {
-                    WorkState::Open => open = true,
-                    WorkState::Finished(tokens) => total = total.saturating_add(tokens),
-                    WorkState::Discarded => {}
-                }
-            }
+            let (total, open) = self.delegated_total(turn);
             // Open work is awaited until the maximum wait, then ignored.
             if open && now < turn.completed_at + max_wait {
                 continue;

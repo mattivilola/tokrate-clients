@@ -21,6 +21,7 @@ const kind: WindowKind = native
     : "flyout";
 const store = new AppStore(native ? tauriBridge : createPreviewBridge(params), {
   initialView: !native && params.view === "settings" ? "settings" : "home",
+  reportFilters: kind === "flyout",
 });
 createRoot(document.getElementById("app")!).render(
   createElement(StrictMode, null, createElement(App, { store, kind })),

@@ -151,7 +151,7 @@ export function SettingsView() {
           <SwitchRow
             id="show-speed"
             label="Show speed in tray"
-            hint="Response speed: the median of your last 5 responses from the past 10 minutes. Shown in the tray tooltip and menu; adjacent tray text only on supported desktops. It shows — when nothing responded recently."
+            hint="The response speed of the model you are using, as in the dashboard: the median of its last 5 responses from the past 10 minutes while responses finish, otherwise the response speed of its latest turn. Shown in the tray tooltip and menu; adjacent tray text only on supported desktops. It shows — when nothing has been measured yet or monitoring is paused."
             checked={settings.showSpeed}
             onChange={(showSpeed) => void store.patch({ showSpeed })}
           />
@@ -161,6 +161,13 @@ export function SettingsView() {
             hint="A filled circle with the provider's letter (A Anthropic, O OpenAI, X xAI) next to the model: in the tray icon where the desktop allows icon updates, and in this window."
             checked={settings.showProviderBadge}
             onChange={(showProviderBadge) => void store.patch({ showProviderBadge })}
+          />
+          <SwitchRow
+            id="show-tool-chip"
+            label="Show coding tool chip"
+            hint="Two letters for the coding tool (CX Codex, CC Claude Code, GB Grok Build) before the speed in the tray text, where the desktop shows adjacent text. The tray tooltip always names the tool."
+            checked={settings.showToolChip}
+            onChange={(showToolChip) => void store.patch({ showToolChip })}
           />
           <SwitchRow
             id="monitoring"

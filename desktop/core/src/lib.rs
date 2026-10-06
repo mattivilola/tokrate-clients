@@ -28,16 +28,16 @@ pub use model::{
     GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION, RESPONSE_MAX_DURATION_SECONDS,
     RESPONSE_METRIC_VERSION, RESPONSE_MIN_OUTPUT_TOKENS,
 };
-pub use monitor::Monitor;
+pub use monitor::{Monitor, SourceChange, SourceFileCheckpoint};
 pub use selector::{
-    fallback_model, AutoSelector, ModelKey, SelectionMode, AUTO_LEAD_MINUTES, AUTO_QUIET_MINUTES,
-    AUTO_WINDOW_MINUTES,
+    fallback_model, tray_reading, AutoSelector, ModelKey, SelectionMode, TrayReading,
+    TrayReadingKind, AUTO_LEAD_SECONDS, AUTO_WINDOW_MINUTES,
 };
 pub use sharing::{
     signed_request, SharedSample, SharedSampleEnvelope, SharingQueue, SignedRequest, APP_VERSION,
     MAX_PENDING_SAMPLES,
 };
-pub use sources::SourceMonitor;
+pub use sources::{SourceCheckpoints, SourceMonitor};
 
 /// Errors produced while validating or encoding a public sharing request.
 #[derive(Debug)]

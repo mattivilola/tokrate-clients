@@ -2,7 +2,9 @@
 mod badge;
 mod flyout;
 mod runtime;
+mod schedule;
 mod updater_state;
+mod watcher;
 use flyout::{Area, FlyoutState};
 use runtime::{Runtime, SettingsPatch, Snapshot};
 use serde::Serialize;
@@ -45,6 +47,18 @@ fn record_sharing_consent(
         runtime::restart_sharing(&app);
     }
     Ok(state.lock().unwrap().snapshot(None))
+}
+/// The flyout's coding-tool and provider filters ("all" or an id), which the tray value follows.
+#[tauri::command]
+fn set_dashboard_filters(
+    state: State<Shared>,
+    tool: String,
+    provider: String,
+) -> Result<(), String> {
+    state
+        .lock()
+        .unwrap()
+        .set_dashboard_filters(&tool, &provider)
 }
 #[tauri::command]
 fn retry_sharing(app: tauri::AppHandle, state: State<Shared>) -> Snapshot {
@@ -158,8 +172,19 @@ async fn install_update(
     }
     Ok(())
 }
+/// Writes the local history and its checkpoints before the app goes away, so the files read since
+/// the last write are not read again at the next launch.
+fn save_history_on_exit(app: &tauri::AppHandle) {
+    if let Some(runtime) = app.try_state::<Shared>() {
+        if let Ok(mut runtime) = runtime.lock() {
+            runtime.save_on_exit();
+        }
+    }
+}
 #[tauri::command]
 fn restart_after_update(app: tauri::AppHandle) {
+    // A restart ends the process without the exit event.
+    save_history_on_exit(&app);
     app.restart();
 }
 #[tauri::command]
@@ -250,6 +275,7 @@ fn main() {
             snapshot,
             update_settings,
             record_sharing_consent,
+            set_dashboard_filters,
             retry_sharing,
             update_preferences,
             set_automatic_update_checks,
@@ -393,6 +419,11 @@ fn main() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("Tokrate could not start");
+        .build(tauri::generate_context!())
+        .expect("Tokrate could not start")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                save_history_on_exit(app);
+            }
+        });
 }

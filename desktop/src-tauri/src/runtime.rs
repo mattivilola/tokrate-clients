@@ -1,4 +1,9 @@
-use crate::{badge, flyout, Shared};
+use crate::{
+    badge, flyout,
+    schedule::{self, PollSignal, Woken},
+    watcher::{WatchTarget, Watchers},
+    Shared,
+};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rand::RngCore;
@@ -10,12 +15,37 @@ use std::{
 };
 use tauri::Manager;
 use tokrate_core::{
-    fallback_model, signed_request, AutoSelector, History, LiveResponses, LiveScope, ModelKey,
-    ProviderBadge, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TurnMetric,
+    signed_request, tray_reading, AutoSelector, History, LiveResponses, ModelKey, ProviderBadge,
+    ResponseMetric, SelectionMode, SharingQueue, SourceChange, SourceCheckpoints, SourceMonitor,
+    TrayReadingKind, TurnMetric,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
 pub const SHARING_NOTICE_VERSION: &str = "2026-10-06-v4";
+/// While records keep arriving, local history is written at most this often. What is not written
+/// yet is safe: the checkpoints are saved with the records they belong to, so after a crash the
+/// files behind the unwritten records are read again.
+const HISTORY_SAVE_INTERVAL_SECONDS: i64 = 10;
+/// Retention pruning looks at most this often.
+const HISTORY_PRUNE_INTERVAL_SECONDS: i64 = 600;
+/// How long the core keeps turns (`History`'s retention).
+const HISTORY_RETENTION_DAYS: i64 = 7;
+/// The coding tools the app reads: recorded id, display title and the two-letter chip the tray text
+/// and the model picker use (the UI's `CODING_TOOLS`, the Mac app's `CodingTool.known`).
+const CODING_TOOLS: [(&str, &str, &str); 3] = [
+    ("codex", "Codex", "CX"),
+    ("claude-code", "Claude Code", "CC"),
+    ("grok-build", "Grok Build", "GB"),
+];
+/// The inference routes of the provider filter (the UI's `ProviderFilter`).
+const PROVIDER_FILTERS: [&str; 6] = [
+    "openai",
+    "anthropic",
+    "amazon-bedrock",
+    "google-vertex",
+    "xai",
+    "unknown",
+];
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +78,7 @@ pub struct Settings {
     pub show_speed: bool,
     pub selection: String,
     pub show_provider_badge: bool,
+    pub show_tool_chip: bool,
     pub days: u8,
     pub root: String,
     pub claude_root: String,
@@ -74,6 +105,7 @@ impl Default for Settings {
             show_speed: true,
             selection: "auto".into(),
             show_provider_badge: true,
+            show_tool_chip: true,
             days: 1,
             root: codex_home.join("sessions").to_string_lossy().into(),
             claude_root: claude_home.join("projects").to_string_lossy().into(),
@@ -97,6 +129,7 @@ pub struct SettingsPatch {
     pub show_speed: Option<bool>,
     pub selection: Option<String>,
     pub show_provider_badge: Option<bool>,
+    pub show_tool_chip: Option<bool>,
     pub days: Option<u8>,
 }
 /// Detected state of one coding-tool log folder, for the Sources settings and first-run welcome.
@@ -127,8 +160,17 @@ pub struct Snapshot {
     sources: Vec<SourceStatus>,
     smoke: bool,
 }
+/// The dashboard's coding-tool and provider filters (`None` is "all"). They live in the flyout's
+/// webview; the host needs them to show the same value as the hero. Not persisted: the webview
+/// starts with "all" and reports its filters again.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct DashboardFilters {
+    tool: Option<String>,
+    provider: Option<String>,
+}
 pub struct Runtime {
     settings: Settings,
+    filters: DashboardFilters,
     consent_prompt_required: bool,
     history: History,
     live: LiveResponses,
@@ -146,7 +188,22 @@ pub struct Runtime {
     sharing_active: bool,
     smoke: bool,
     history_read_error: bool,
-    last_history_maintenance: std::time::Instant,
+    /// Wakes the poll task: watchers report source changes, settings changes ask for a poll.
+    signal: Arc<PollSignal>,
+    /// Records or pruning changed the history since it was last written.
+    history_unsaved: bool,
+    last_history_save: Option<DateTime<Utc>>,
+    last_history_prune: Option<DateTime<Utc>>,
+    /// The previous poll found data left to read (a replay under way).
+    was_busy: bool,
+}
+/// What one poll leaves for the poll task.
+pub struct Polled {
+    pub tray: TrayState,
+    /// When the next poll is due if nothing wakes it earlier; `None` when nothing is pending.
+    pub deadline: Option<DateTime<Utc>>,
+    /// When the poll ended.
+    pub at: DateTime<Utc>,
 }
 impl Runtime {
     pub fn load(dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
@@ -195,13 +252,17 @@ impl Runtime {
         let loaded_history = History::load(&dir.join("history.json"), Utc::now());
         let history_read_error = loaded_history.is_err();
         let history = loaded_history.unwrap_or_default();
+        let mut monitor = SourceMonitor::new(
+            PathBuf::from(&settings.root),
+            PathBuf::from(&settings.claude_root),
+            PathBuf::from(&settings.grok_root),
+        );
+        // Files already read to their end by the run that saved this history are not read again.
+        monitor.set_checkpoints(history.checkpoints().clone());
         Ok(Self {
-            monitor: SourceMonitor::new(
-                PathBuf::from(&settings.root),
-                PathBuf::from(&settings.claude_root),
-                PathBuf::from(&settings.grok_root),
-            ),
+            monitor,
             settings,
+            filters: DashboardFilters::default(),
             consent_prompt_required,
             history,
             live: LiveResponses::new(Utc::now()),
@@ -218,7 +279,11 @@ impl Runtime {
             sharing_active: false,
             smoke: false,
             history_read_error,
-            last_history_maintenance: std::time::Instant::now(),
+            signal: Arc::new(PollSignal::default()),
+            history_unsaved: false,
+            last_history_save: None,
+            last_history_prune: None,
+            was_busy: false,
         })
     }
     pub fn load_smoke(dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
@@ -311,6 +376,9 @@ impl Runtime {
     pub fn show_provider_badge(&self) -> bool {
         self.settings.show_provider_badge
     }
+    pub fn signal(&self) -> Arc<PollSignal> {
+        self.signal.clone()
+    }
     fn save_settings(&self, settings: &Settings) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(settings).map_err(|_| "Settings invalid")?;
         std::fs::write(self.dir.join("settings.json"), bytes)
@@ -346,6 +414,9 @@ impl Runtime {
         if let Some(v) = p.show_provider_badge {
             next.show_provider_badge = v
         }
+        if let Some(v) = p.show_tool_chip {
+            next.show_tool_chip = v
+        }
         if let Some(v) = p.days {
             if ![1, 7].contains(&v) {
                 return Err("Unsupported range".into());
@@ -356,6 +427,27 @@ impl Runtime {
         self.settings = next;
         if p.sharing == Some(false) {
             self.stop_sharing();
+        }
+        // The tray, the monitoring state or the selection may have changed.
+        self.signal.request();
+        Ok(())
+    }
+    /// Sets the dashboard's filters, "all" or a tool or provider id, for the tray value.
+    pub fn set_dashboard_filters(&mut self, tool: &str, provider: &str) -> Result<(), String> {
+        let tool = match tool {
+            "all" => None,
+            tool if CODING_TOOLS.iter().any(|(id, ..)| *id == tool) => Some(tool.to_owned()),
+            _ => return Err("Choose a supported source".into()),
+        };
+        let provider = match provider {
+            "all" => None,
+            provider if PROVIDER_FILTERS.contains(&provider) => Some(provider.to_owned()),
+            _ => return Err("Choose a supported provider".into()),
+        };
+        let next = DashboardFilters { tool, provider };
+        if next != self.filters {
+            self.filters = next;
+            self.signal.request();
         }
         Ok(())
     }
@@ -427,27 +519,61 @@ impl Runtime {
         self.monitor
             .set_root(source, root)
             .map_err(|_| "Could not start the selected monitor")?;
+        // The folder is watched and read from the new place.
+        self.signal.request();
         Ok(())
     }
     fn valid(&self, g: u64) -> bool {
         self.settings.sharing_authorized() && self.generation == g
     }
-    fn poll_monitor(&mut self) -> TrayState {
-        let now = Utc::now();
+    /// Applies what the folder watchers and settings changes reported since the last call to the
+    /// monitors. True when a poll is due because of it. A change that arrives while monitoring is
+    /// paused stays noted in the monitors and is read when monitoring resumes.
+    pub fn absorb_signal(&mut self) -> bool {
+        let wake = self.signal.take();
+        let pending = self.monitor.note_changes(&wake.change);
+        (pending && self.settings.monitoring) || wake.requested
+    }
+    /// The source folders to watch, as the monitors read them.
+    pub fn watch_targets(&self) -> Vec<WatchTarget> {
+        CODING_TOOLS
+            .iter()
+            .filter_map(|&(source, ..)| {
+                Some(WatchTarget {
+                    source,
+                    root: self.monitor.root(source)?.clone(),
+                    exists: self.monitor.root_exists(source)?,
+                })
+            })
+            .collect()
+    }
+    fn poll_monitor(&mut self) -> Polled {
+        let mut polled = self.poll_monitor_at(Utc::now());
+        polled.at = Utc::now();
+        polled
+    }
+    fn poll_monitor_at(&mut self, now: DateTime<Utc>) -> Polled {
+        self.absorb_signal();
         let mut records = Vec::new();
+        let mut failed = false;
         if self.settings.monitoring {
             match self.monitor.poll(now) {
                 Ok(found) => {
-                    records = found;
-                    let responses = self.monitor.take_live_responses();
+                    let mut responses = self.monitor.take_live_responses();
+                    // Grok Build reports speed per turn only: each of its turns is one live
+                    // response, and only turns completed since launch count (`push` drops others).
+                    responses.extend(found.iter().filter_map(ResponseMetric::from_grok_turn));
                     self.live.push(responses, now);
-                    if self.monitor.had_source_error() {
+                    records = found;
+                    failed = self.monitor.had_source_error();
+                    if failed {
                         self.monitor_status = "A source folder could not be read. Other available monitors remain active.".into();
                     } else {
                         self.monitor_status = self.source_status();
                     }
                 }
                 Err(_) => {
+                    failed = true;
                     self.monitor_status =
                         "A selected source folder is unavailable. Choose an existing sessions or projects folder."
                             .into()
@@ -456,6 +582,10 @@ impl Runtime {
         } else {
             self.monitor_status = "Monitoring paused".into();
         }
+        self.ingest(records, failed, now)
+    }
+    /// Takes in what a poll found: the active model, sharing, history, saving and the tray.
+    fn ingest(&mut self, records: Vec<TurnMetric>, failed: bool, now: DateTime<Utc>) -> Polled {
         self.active = match SelectionMode::parse(&self.settings.selection) {
             Some(SelectionMode::Auto { tool }) => self
                 .selector
@@ -463,23 +593,34 @@ impl Runtime {
                 .cloned(),
             _ => None,
         };
-        let new_records = !records.is_empty();
         if self.sharing_active {
             self.queue.enqueue(&records, now);
         }
-        if new_records || self.last_history_maintenance.elapsed() >= Duration::from_secs(60) {
-            let previous_count = self.history.records().len();
+        let previous_count = self.history.records().len();
+        if !records.is_empty() {
             self.history.merge(&records, now);
-            self.last_history_maintenance = std::time::Instant::now();
-            if new_records || previous_count != self.history.records().len() {
+            self.last_history_prune = Some(now);
+            self.revision += 1;
+            self.history_unsaved = true;
+        } else if self.prune_is_due(now) {
+            self.history.merge(&[], now);
+            self.last_history_prune = Some(now);
+            if previous_count != self.history.records().len() {
                 self.revision += 1;
-                if !self.history_read_error
-                    && self.history.save(self.dir.join("history.json")).is_err()
-                {
-                    self.monitor_status = "Could not save local history. Check disk access.".into();
-                }
+                self.history_unsaved = true;
             }
         }
+        let deadline = if self.settings.monitoring {
+            self.monitor.next_poll_deadline(now)
+        } else {
+            None
+        };
+        // Data left to read means a replay is under way; the checkpoints it advances are written
+        // when it ends, not with every step.
+        let busy = deadline.is_some_and(|deadline| deadline <= now);
+        let replay_finished = self.was_busy && !busy;
+        self.was_busy = busy;
+        self.persist_history(now, replay_finished);
         if self.history_read_error {
             self.monitor_status="Monitoring in memory. Saved history is unreadable and preserved; back it up and repair it before restarting.".into();
         }
@@ -493,11 +634,93 @@ impl Runtime {
             let evidence = serde_json::json!({"records": self.history.records().len(), "sources": sources, "sharing": self.settings.sharing, "monitorStatus": self.monitor_status});
             let _ = std::fs::write(self.dir.join("smoke-state.json"), evidence.to_string());
         }
-        self.tray_state(now)
+        Polled {
+            tray: self.tray_state(now),
+            // A failed poll is retried at the normal cadence, and a throttled save is written
+            // when it is due.
+            deadline: [deadline, failed.then_some(now), self.save_due_at(now)]
+                .into_iter()
+                .flatten()
+                .min(),
+            at: now,
+        }
+    }
+    /// Expired turns are pruned when the oldest has crossed the retention, and then at most every
+    /// ten minutes: `History::merge` rebuilds the whole history.
+    fn prune_is_due(&self, now: DateTime<Utc>) -> bool {
+        let cutoff = now - chrono::Duration::days(HISTORY_RETENTION_DAYS);
+        // Newest first: the last record is the oldest.
+        self.history
+            .records()
+            .last()
+            .is_some_and(|oldest| oldest.completed_at < cutoff)
+            && self.last_history_prune.map_or(true, |last| {
+                now < last
+                    || now - last >= chrono::Duration::seconds(HISTORY_PRUNE_INTERVAL_SECONDS)
+            })
+    }
+    fn save_is_due(&self, now: DateTime<Utc>) -> bool {
+        self.history_unsaved
+            && self.last_history_save.map_or(true, |last| {
+                now < last || now - last >= chrono::Duration::seconds(HISTORY_SAVE_INTERVAL_SECONDS)
+            })
+    }
+    /// When a throttled save falls due.
+    fn save_due_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        (self.history_unsaved && !self.history_read_error).then(|| {
+            self.last_history_save.map_or(now, |last| {
+                last + chrono::Duration::seconds(HISTORY_SAVE_INTERVAL_SECONDS)
+            })
+        })
+    }
+    /// What the monitors have read to the end by now, as it is saved with the history.
+    fn fresh_checkpoints(&self, now: DateTime<Utc>) -> SourceCheckpoints {
+        self.monitor
+            .checkpoints(self.history.checkpoints())
+            .retained(now)
+    }
+    /// Writes the history, and with it the checkpoints of the files the monitors have read into it.
+    fn save_history(&mut self, checkpoints: SourceCheckpoints, now: DateTime<Utc>) {
+        self.history.set_checkpoints(checkpoints, now);
+        // A failing disk is tried again after the interval, not at every poll.
+        self.last_history_save = Some(now);
+        if self.history.save(self.dir.join("history.json")).is_ok() {
+            self.history_unsaved = false;
+        } else {
+            self.monitor_status = "Could not save local history. Check disk access.".into();
+        }
+    }
+    /// Writes the history when it is due, and when a replay has just ended with checkpoints the
+    /// saved ones lack. Unreadable history is preserved, never overwritten.
+    fn persist_history(&mut self, now: DateTime<Utc>, replay_finished: bool) {
+        if self.history_read_error {
+            return;
+        }
+        let due = self.save_is_due(now);
+        if !due && !replay_finished {
+            return;
+        }
+        let checkpoints = self.fresh_checkpoints(now);
+        if due || checkpoints != *self.history.checkpoints() {
+            self.save_history(checkpoints, now);
+        }
+    }
+    /// Writes what the next launch needs when the app quits, so the files read since the last
+    /// write are not read again.
+    pub fn save_on_exit(&mut self) {
+        if self.history_read_error {
+            return;
+        }
+        let now = Utc::now();
+        let checkpoints = self.fresh_checkpoints(now);
+        if self.history_unsaved || checkpoints != *self.history.checkpoints() {
+            self.save_history(checkpoints, now);
+        }
     }
     fn tray_state(&self, now: DateTime<Utc>) -> TrayState {
         tray_state(
             &self.settings,
+            &self.filters,
             &self.live,
             self.active.as_ref(),
             self.history.records(),
@@ -541,80 +764,91 @@ impl TrayState {
             badge_model_known: false,
         }
     }
-}
-/// The model whose live speed the tray shows, plus the coding tool it is restricted to.
-fn tray_scope(
-    selection: &str,
-    active: Option<&ModelKey>,
-    turns: &[TurnMetric],
-) -> Option<(ModelKey, Option<String>)> {
-    match SelectionMode::parse(selection).unwrap_or(SelectionMode::Auto { tool: None }) {
-        SelectionMode::Auto { tool } => active
-            .cloned()
-            .or_else(|| fallback_model(turns, tool.as_deref()))
-            .map(|key| (key, tool)),
-        SelectionMode::All => active
-            .cloned()
-            .or_else(|| fallback_model(turns, None))
-            .map(|key| (key, None)),
-        SelectionMode::Model(key) => Some((key, None)),
-        SelectionMode::Cohort(parts) => {
-            let parts = serde_json::from_str::<Vec<serde_json::Value>>(&parts).ok()?;
-            let text = |index: usize| parts[index].as_str().map(str::to_owned);
-            Some((
-                ModelKey {
-                    model: text(4),
-                    provider: text(5),
-                },
-                text(0),
-            ))
+    /// No value: monitoring is paused or nothing was measured in scope.
+    fn without_value(detail: &str) -> Self {
+        Self {
+            title: "—".into(),
+            detail: format!("Tokrate · Response speed — · {detail}"),
+            ..Self::idle()
         }
     }
 }
+fn coding_tool(client: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    CODING_TOOLS.iter().find(|(id, ..)| *id == client)
+}
+/// "Claude Code" for `claude-code`; a tool this build does not know is a generic "Coding tool".
+fn tool_title(client: &str) -> &'static str {
+    coding_tool(client).map_or("Coding tool", |(_, title, _)| title)
+}
+/// The two-letter chip of a coding tool; an unknown id is chipped by its first two letters.
+fn tool_chip(client: &str) -> String {
+    coding_tool(client).map_or_else(
+        || client.chars().take(2).collect::<String>().to_uppercase(),
+        |(_, _, chip)| (*chip).to_owned(),
+    )
+}
+fn speed_text(speed: f64) -> String {
+    if speed < 100.0 {
+        format!("{speed:.1} tok/s")
+    } else {
+        format!("{speed:.0} tok/s")
+    }
+}
+/// What the tray shows. The value is the dashboard hero's reading (`tray_reading`, one function
+/// for both), so the tray never shows a dash while the flyout has a value. "—" means no
+/// measurement in scope, or paused monitoring. The tooltip names the measurement like the Mac
+/// menu bar's accessibility label, with the provider and the coding tool; the text beside the
+/// icon, where the desktop has one, is led by the coding-tool chip.
 fn tray_state(
     settings: &Settings,
+    filters: &DashboardFilters,
     live: &LiveResponses,
     active: Option<&ModelKey>,
     turns: &[TurnMetric],
     now: DateTime<Utc>,
 ) -> TrayState {
-    if !settings.monitoring || !settings.show_speed {
+    if !settings.show_speed {
         return TrayState::idle();
     }
-    let Some((key, client)) = tray_scope(&settings.selection, active, turns) else {
-        return TrayState {
-            title: "—".into(),
-            detail: "Tokrate · Response speed — · no model yet".into(),
-            ..TrayState::idle()
-        };
+    if !settings.monitoring {
+        return TrayState::without_value("monitoring paused");
+    }
+    let selection =
+        SelectionMode::parse(&settings.selection).unwrap_or(SelectionMode::Auto { tool: None });
+    let Some(reading) = tray_reading(
+        &selection,
+        live,
+        active,
+        turns,
+        filters.tool.as_deref(),
+        filters.provider.as_deref(),
+        now,
+    ) else {
+        return TrayState::without_value("no measurement yet");
     };
-    let badge = ProviderBadge::of(key.model.as_deref(), key.provider.as_deref());
-    let scope = LiveScope {
-        model: key.model.clone(),
-        provider: key.provider.clone(),
-        client,
+    let badge = ProviderBadge::of(reading.model.as_deref(), reading.provider.as_deref());
+    let speed = speed_text(reading.speed);
+    let measure = match reading.kind {
+        TrayReadingKind::Live => "Response speed",
+        TrayReadingKind::LatestResponse => "Response speed of the latest turn",
+        TrayReadingKind::TurnFallback => "Turn speed of the latest turn",
     };
-    let (title, detail) = match live.value(now, &scope) {
-        Some(value) => {
-            let title = if value.speed < 100.0 {
-                format!("{:.1} tok/s", value.speed)
-            } else {
-                format!("{:.0} tok/s", value.speed)
-            };
-            let detail = format!(
-                "{title} · Response speed · {} · {}",
-                key.model.as_deref().unwrap_or("Unknown model"),
-                badge.label()
-            );
-            (title, detail)
-        }
-        None => (
-            "—".into(),
-            format!(
-                "Tokrate · Response speed — · {}",
-                key.model.as_deref().unwrap_or("no model yet")
-            ),
-        ),
+    let provider = (badge != ProviderBadge::Unknown).then(|| badge.label());
+    let detail = [
+        Some(speed.as_str()),
+        Some(measure),
+        Some(reading.model.as_deref().unwrap_or("Unknown model")),
+        provider,
+        Some(tool_title(&reading.client)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let title = if settings.show_tool_chip {
+        format!("{} {speed}", tool_chip(&reading.client))
+    } else {
+        speed
     };
     TrayState {
         title,
@@ -654,46 +888,89 @@ fn authorized_effect<T>(authorized: bool, effect: impl FnOnce() -> T) -> Option<
 }
 
 pub fn start_monitor(app: tauri::AppHandle, speed: tauri::menu::MenuItem<tauri::Wry>) {
+    let shared = app.state::<Shared>().inner().clone();
+    let signal = shared.lock().unwrap().signal();
     tauri::async_runtime::spawn(async move {
+        let watchers = Arc::new(Mutex::new(Watchers::default()));
         // The badge, theme and enabled state last applied to the tray icon (`None`: default icon).
         let mut applied_icon: Option<(ProviderBadge, bool)> = None;
         loop {
-            let shared = app.state::<Shared>().inner().clone();
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                let mut runtime = shared.lock().unwrap();
-                let state = runtime.poll_monitor();
-                (state, runtime.show_provider_badge())
-            })
-            .await;
-            if let Ok((state, show_badge)) = result {
-                let _ = speed.set_text(&state.detail);
-                if let Some(tray) = app.tray_by_id(flyout::TRAY_ID) {
-                    let _ = tray.set_tooltip(Some(&state.detail));
-                    #[cfg(not(target_os = "windows"))]
+            let result = {
+                let (shared, watchers, signal) = (shared.clone(), watchers.clone(), signal.clone());
+                tauri::async_runtime::spawn_blocking(move || {
+                    // Before the poll, so a file written once a watcher exists is either reported
+                    // by it or already visible to the poll. Starting a recursive watcher walks the
+                    // folder, which is why this runs without the runtime lock.
+                    let targets = shared.lock().unwrap().watch_targets();
                     {
-                        let _ = tray.set_title(Some(&state.title));
-                    }
-                    let dark = app
-                        .get_webview_window(flyout::MAIN)
-                        .and_then(|window| window.theme().ok())
-                        == Some(tauri::Theme::Dark);
-                    let wanted =
-                        (show_badge && state.badge_model_known).then_some((state.badge, dark));
-                    if wanted != applied_icon {
-                        let icon = match wanted {
-                            Some((badge, dark)) => {
-                                let (rgba, width, height) = badge::render_badge(badge, dark);
-                                Ok(tauri::image::Image::new_owned(rgba, width, height))
-                            }
-                            None => badge::default_icon(),
-                        };
-                        if icon.is_ok_and(|icon| tray.set_icon(Some(icon)).is_ok()) {
-                            applied_icon = wanted;
+                        let mut watchers = watchers.lock().unwrap();
+                        watchers.sync(&targets, &signal);
+                        if watchers.fallback_rescan_due() {
+                            signal.report(SourceChange {
+                                must_rescan: true,
+                                ..SourceChange::default()
+                            });
                         }
                     }
+                    let mut runtime = shared.lock().unwrap();
+                    let polled = runtime.poll_monitor();
+                    (polled, runtime.show_provider_badge())
+                })
+                .await
+            };
+            let (last_poll, deadline) = match result {
+                Ok((polled, show_badge)) => {
+                    let state = &polled.tray;
+                    let _ = speed.set_text(&state.detail);
+                    if let Some(tray) = app.tray_by_id(flyout::TRAY_ID) {
+                        let _ = tray.set_tooltip(Some(&state.detail));
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let _ = tray.set_title(Some(&state.title));
+                        }
+                        let dark = app
+                            .get_webview_window(flyout::MAIN)
+                            .and_then(|window| window.theme().ok())
+                            == Some(tauri::Theme::Dark);
+                        let wanted =
+                            (show_badge && state.badge_model_known).then_some((state.badge, dark));
+                        if wanted != applied_icon {
+                            let icon = match wanted {
+                                Some((badge, dark)) => {
+                                    let (rgba, width, height) = badge::render_badge(badge, dark);
+                                    Ok(tauri::image::Image::new_owned(rgba, width, height))
+                                }
+                                None => badge::default_icon(),
+                            };
+                            if icon.is_ok_and(|icon| tray.set_icon(Some(icon)).is_ok()) {
+                                applied_icon = wanted;
+                            }
+                        }
+                    }
+                    (polled.at, polled.deadline)
+                }
+                // A poll that could not run is tried again at the minimum spacing.
+                Err(_) => (Utc::now(), Some(Utc::now())),
+            };
+            // Sleep until the next poll is due, or until a watcher or a settings change reports
+            // something a poll must read (observing the minimum spacing either way).
+            loop {
+                let delay = schedule::poll_delay(Utc::now(), last_poll, deadline);
+                if signal.wait(delay).await == Woken::Due {
+                    break;
+                }
+                let shared = shared.clone();
+                let due = tauri::async_runtime::spawn_blocking(move || {
+                    shared.lock().unwrap().absorb_signal()
+                })
+                .await
+                .unwrap_or(true);
+                if due {
+                    let now = Utc::now();
+                    tokio::time::sleep(schedule::poll_delay(now, last_poll, Some(now))).await;
+                    break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
 }
@@ -1372,6 +1649,25 @@ mod tests {
         live.push(responses, now);
         live
     }
+    fn no_filters() -> DashboardFilters {
+        DashboardFilters::default()
+    }
+    fn filters(tool: Option<&str>, provider: Option<&str>) -> DashboardFilters {
+        DashboardFilters {
+            tool: tool.map(str::to_owned),
+            provider: provider.map(str::to_owned),
+        }
+    }
+    fn state_with(
+        settings: Settings,
+        filters: &DashboardFilters,
+        live: &LiveResponses,
+        active: Option<&ModelKey>,
+        turns: &[TurnMetric],
+        now: DateTime<Utc>,
+    ) -> TrayState {
+        tray_state(&settings, filters, live, active, turns, now)
+    }
     fn state(
         selection: &str,
         live: &LiveResponses,
@@ -1383,13 +1679,30 @@ mod tests {
             selection: selection.into(),
             ..Settings::default()
         };
-        tray_state(&settings, live, active, turns, now)
+        state_with(settings, &no_filters(), live, active, turns, now)
     }
+    /// A model without a known route, as the selector reports it.
     fn key(model: &str) -> ModelKey {
         ModelKey {
             model: Some(model.into()),
-            provider: None,
+            provider: Some("unknown".into()),
         }
+    }
+    /// A turn with response timing: `tokens` over `seconds` of the model responding.
+    fn timed_turn(
+        id: &str,
+        client: &str,
+        model: &str,
+        provider: Option<&str>,
+        at: DateTime<Utc>,
+        response: (i64, f64),
+    ) -> TurnMetric {
+        let mut turn = turn(id, client, model, at);
+        turn.provider = provider.map(str::to_owned);
+        turn.response_output_tokens = Some(response.0);
+        turn.response_duration_seconds = Some(response.1);
+        turn.response_count = Some(1);
+        turn
     }
     #[test]
     fn tray_shows_the_median_of_the_newest_five_responses() {
@@ -1411,10 +1724,10 @@ mod tests {
             .collect();
         let live = live_at(started, responses, now);
         let shown = state("auto", &live, Some(&key("claude-opus-4")), &[], now);
-        assert_eq!(shown.title, "40.0 tok/s");
+        assert_eq!(shown.title, "CC 40.0 tok/s");
         assert_eq!(
             shown.detail,
-            "40.0 tok/s · Response speed · claude-opus-4 · Anthropic"
+            "40.0 tok/s · Response speed · claude-opus-4 · Anthropic · Claude Code"
         );
         assert_eq!(shown.badge, ProviderBadge::Anthropic);
         assert!(shown.badge_model_known);
@@ -1426,11 +1739,52 @@ mod tests {
         );
         assert_eq!(
             state("model:[\"gpt-5\",null]", &fast, None, &[], now).title,
-            "123 tok/s"
+            "CX 123 tok/s"
         );
     }
     #[test]
-    fn tray_shows_a_dash_when_the_newest_response_is_older_than_ten_minutes() {
+    fn the_tool_chip_leads_the_tray_text_unless_it_is_switched_off() {
+        let now = Utc::now();
+        let live = live_at(
+            now - chrono::Duration::hours(1),
+            vec![
+                response("a", now, "gpt-5", "codex", 40),
+                response("b", now, "grok-4", "grok-build", 40),
+            ],
+            now,
+        );
+        let shown = |client: &str, chip: bool| {
+            let live = live_at(
+                now - chrono::Duration::hours(1),
+                vec![response("a", now, "some-model", client, 40)],
+                now,
+            );
+            let settings = Settings {
+                show_tool_chip: chip,
+                ..Settings::default()
+            };
+            state_with(
+                settings,
+                &no_filters(),
+                &live,
+                Some(&key("some-model")),
+                &[],
+                now,
+            )
+        };
+        assert_eq!(shown("codex", true).title, "CX 40.0 tok/s");
+        assert_eq!(shown("claude-code", true).title, "CC 40.0 tok/s");
+        assert_eq!(shown("grok-build", true).title, "GB 40.0 tok/s");
+        // A tool this build does not know is chipped by its first two letters.
+        assert_eq!(shown("vim-agent", true).title, "VI 40.0 tok/s");
+        // Off: the text is the speed alone, and the tooltip still names the tool.
+        let off = shown("codex", false);
+        assert_eq!(off.title, "40.0 tok/s");
+        assert!(off.detail.ends_with("· Codex"), "{}", off.detail);
+        let _ = live;
+    }
+    #[test]
+    fn tray_shows_the_latest_turn_when_the_newest_live_response_is_older_than_ten_minutes() {
         let now = Utc::now();
         let started = now - chrono::Duration::hours(1);
         let stale = response(
@@ -1441,15 +1795,46 @@ mod tests {
             50,
         );
         let live = live_at(started, vec![stale], now);
-        let shown = state("auto", &live, Some(&key("gpt-5")), &[], now);
-        assert_eq!(shown.title, "—");
-        assert_eq!(shown.detail, "Tokrate · Response speed — · gpt-5");
-        assert_eq!(shown.badge, ProviderBadge::OpenAi);
-        assert!(shown.badge_model_known);
-        // No model at all yet.
+        // Nothing measured at all: a dash and no badge.
+        let none = state("auto", &live, Some(&key("gpt-5")), &[], now);
+        assert_eq!(none.title, "—");
+        assert_eq!(
+            none.detail,
+            "Tokrate · Response speed — · no measurement yet"
+        );
+        assert!(!none.badge_model_known);
         let empty = state("auto", &LiveResponses::new(started), None, &[], now);
-        assert_eq!(empty.detail, "Tokrate · Response speed — · no model yet");
-        assert!(!empty.badge_model_known);
+        assert_eq!(empty.title, "—");
+        // The model's latest turn with response timing: 900 tokens in 12 s.
+        let turns = [timed_turn(
+            "t",
+            "codex",
+            "gpt-5",
+            None,
+            now - chrono::Duration::minutes(30),
+            (900, 12.0),
+        )];
+        let latest = state("auto", &live, Some(&key("gpt-5")), &turns, now);
+        assert_eq!(latest.title, "CX 75.0 tok/s");
+        assert_eq!(
+            latest.detail,
+            "75.0 tok/s · Response speed of the latest turn · gpt-5 · OpenAI · Codex"
+        );
+        assert_eq!(latest.badge, ProviderBadge::OpenAi);
+        assert!(latest.badge_model_known);
+        // Without response timing anywhere: the whole-turn speed, named as such.
+        let plain = [turn(
+            "p",
+            "codex",
+            "gpt-5",
+            now - chrono::Duration::minutes(30),
+        )];
+        let fallback = state("auto", &live, Some(&key("gpt-5")), &plain, now);
+        assert_eq!(fallback.title, "CX 20.0 tok/s");
+        assert_eq!(
+            fallback.detail,
+            "20.0 tok/s · Turn speed of the latest turn · gpt-5 · OpenAI · Codex"
+        );
     }
     #[test]
     fn auto_follows_the_active_model_then_falls_back_to_the_latest_turn() {
@@ -1466,10 +1851,14 @@ mod tests {
         let turns = [turn("t", "codex", "gpt-5", now)];
         assert_eq!(
             state("auto", &live, Some(&key("claude-opus-4")), &turns, now).title,
-            "80.0 tok/s"
+            "CC 80.0 tok/s"
         );
-        assert_eq!(state("auto", &live, None, &turns, now).title, "30.0 tok/s");
-        // Auto within a tool restricts the scope to that tool.
+        assert_eq!(
+            state("auto", &live, None, &turns, now).title,
+            "CX 30.0 tok/s"
+        );
+        // Auto within a tool restricts the scope to that tool: Claude Code has no live gpt-5
+        // response, so its latest turn answers.
         let tool = state(
             "auto:claude-code",
             &live,
@@ -1477,14 +1866,17 @@ mod tests {
             &[turn("c", "claude-code", "gpt-5", now)],
             now,
         );
-        assert_eq!(tool.title, "—");
-        assert_eq!(tool.detail, "Tokrate · Response speed — · gpt-5");
+        assert_eq!(tool.title, "CC 20.0 tok/s");
+        assert!(tool.detail.contains("Turn speed of the latest turn"));
         // "All" behaves like Auto without a tool.
         assert_eq!(
             state("all", &live, Some(&key("claude-opus-4")), &turns, now).title,
-            "80.0 tok/s"
+            "CC 80.0 tok/s"
         );
-        assert_eq!(state("all", &live, None, &turns, now).title, "30.0 tok/s");
+        assert_eq!(
+            state("all", &live, None, &turns, now).title,
+            "CX 30.0 tok/s"
+        );
     }
     #[test]
     fn pinned_model_and_cohort_ignore_the_active_model() {
@@ -1501,9 +1893,10 @@ mod tests {
         );
         let active = key("claude-opus-4");
         let pinned = state("model:[\"gpt-5\",null]", &live, Some(&active), &[], now);
-        assert_eq!(pinned.title, "60.0 tok/s");
-        assert!(pinned.detail.ends_with("gpt-5 · OpenAI"));
-        // A pinned cohort is the UI's nine-part identity; the tray only needs tool, model, provider.
+        // The median of 30 and 90, attributed to the tool of the newest of them.
+        assert_eq!(pinned.title, "CC 60.0 tok/s");
+        assert!(pinned.detail.ends_with("gpt-5 · OpenAI · Claude Code"));
+        // A pinned cohort is the UI's nine-part identity: its tool, model and provider.
         let cohort = serde_json::json!([
             "codex",
             null,
@@ -1516,31 +1909,268 @@ mod tests {
             "primary"
         ])
         .to_string();
-        let cohort_state = state(&cohort, &live, Some(&active), &[], now);
-        assert_eq!(cohort_state.title, "30.0 tok/s");
+        let mut pinned_turn = turn("t", "codex", "gpt-5", now);
+        pinned_turn.parser_version = "codex-rollout-v2".into();
+        pinned_turn.metric_version = "turn-v1".into();
+        pinned_turn.reasoning_effort = Some("high".into());
+        pinned_turn.source_kind = Some("primary".into());
+        let cohort_state = state(&cohort, &live, Some(&active), &[pinned_turn], now);
+        assert_eq!(cohort_state.title, "CX 30.0 tok/s");
         assert_eq!(cohort_state.badge, ProviderBadge::OpenAi);
     }
+    /// The tray reads like the hero: each case is a situation of the dashboard's hero
+    /// (`buildDashboard` in `ui/model/dashboard.ts`) with the value it shows.
     #[test]
-    fn paused_or_hidden_speed_keeps_the_plain_tray() {
+    fn the_tray_shows_what_the_hero_shows_for_live_latest_fallback_and_nothing() {
         let now = Utc::now();
-        let live = LiveResponses::new(now);
-        for settings in [
+        let started = now - chrono::Duration::hours(2);
+        let minutes = |count: i64| now - chrono::Duration::minutes(count);
+        let live = live_at(
+            started,
+            vec![
+                response("l1", minutes(3), "claude-opus-4", "claude-code", 30),
+                response("l2", minutes(2), "claude-opus-4", "claude-code", 50),
+                response("l3", minutes(1), "claude-opus-4", "claude-code", 70),
+            ],
+            now,
+        );
+        let none = LiveResponses::new(started);
+        let turns = [
+            // Newest first, as the history keeps them.
+            timed_turn(
+                "g",
+                "grok-build",
+                "grok-4",
+                Some("xai"),
+                minutes(20),
+                (1_200, 16.0),
+            ),
+            timed_turn(
+                "c",
+                "claude-code",
+                "claude-opus-4",
+                Some("anthropic"),
+                minutes(30),
+                (500, 5.0),
+            ),
+            turn("x", "codex", "gpt-5", minutes(40)),
+        ];
+        let claude = key("claude-opus-4");
+        // (selection, filters, live, active) -> (title, measure).
+        type Case<'a> = (
+            &'a str,
+            DashboardFilters,
+            &'a LiveResponses,
+            Option<&'a ModelKey>,
+            &'a str,
+            &'a str,
+        );
+        let cases: [Case; 9] = [
+            // Live: the median of the live responses (30, 50, 70).
+            (
+                "auto",
+                no_filters(),
+                &live,
+                Some(&claude),
+                "CC 50.0 tok/s",
+                "Response speed",
+            ),
+            // The live stream is not narrowed by the dashboard's filters, as in the hero.
+            (
+                "auto",
+                filters(Some("codex"), None),
+                &live,
+                Some(&claude),
+                "CC 50.0 tok/s",
+                "Response speed",
+            ),
+            (
+                "auto",
+                filters(None, Some("openai")),
+                &live,
+                Some(&claude),
+                "CC 50.0 tok/s",
+                "Response speed",
+            ),
+            // Latest turn: the newest turn with response timing of the followed model.
+            (
+                "auto",
+                no_filters(),
+                &none,
+                None,
+                "GB 75.0 tok/s",
+                "Response speed of the latest turn",
+            ),
+            // A filter narrows the turns the fallback picks from.
+            (
+                "auto",
+                filters(Some("claude-code"), None),
+                &none,
+                None,
+                "CC 100 tok/s",
+                "Response speed of the latest turn",
+            ),
+            (
+                "auto:claude-code",
+                no_filters(),
+                &none,
+                None,
+                "CC 100 tok/s",
+                "Response speed of the latest turn",
+            ),
+            (
+                "auto",
+                filters(None, Some("anthropic")),
+                &none,
+                None,
+                "CC 100 tok/s",
+                "Response speed of the latest turn",
+            ),
+            // Turn fallback: no response timing in scope, so the whole-turn speed.
+            (
+                "auto",
+                filters(Some("codex"), None),
+                &none,
+                None,
+                "CX 20.0 tok/s",
+                "Turn speed of the latest turn",
+            ),
+            // Nothing in scope.
+            (
+                "auto",
+                filters(Some("claude-code"), Some("openai")),
+                &none,
+                None,
+                "—",
+                "",
+            ),
+        ];
+        for (selection, filters, live, active, title, measure) in cases {
+            let settings = Settings {
+                selection: selection.into(),
+                ..Settings::default()
+            };
+            let shown = state_with(settings, &filters, live, active, &turns, now);
+            assert_eq!(shown.title, title, "{selection} {filters:?}");
+            assert!(shown.detail.contains(measure), "{}", shown.detail);
+        }
+    }
+    #[test]
+    fn paused_monitoring_shows_a_dash_and_hidden_speed_keeps_the_plain_tray() {
+        let now = Utc::now();
+        let live = live_at(
+            now - chrono::Duration::hours(1),
+            vec![response("a", now, "gpt-5", "codex", 40)],
+            now,
+        );
+        let paused = state_with(
             Settings {
                 monitoring: false,
                 ..Settings::default()
             },
+            &no_filters(),
+            &live,
+            Some(&key("gpt-5")),
+            &[],
+            now,
+        );
+        assert_eq!(paused.title, "—");
+        assert_eq!(
+            paused.detail,
+            "Tokrate · Response speed — · monitoring paused"
+        );
+        assert!(!paused.badge_model_known);
+        let hidden = state_with(
             Settings {
                 show_speed: false,
                 ..Settings::default()
             },
-        ] {
-            let shown = tray_state(&settings, &live, Some(&key("gpt-5")), &[], now);
-            assert_eq!(
-                (shown.title.as_str(), shown.detail.as_str()),
-                ("Tokrate", "Tokrate")
-            );
-            assert!(!shown.badge_model_known);
+            &no_filters(),
+            &live,
+            Some(&key("gpt-5")),
+            &[],
+            now,
+        );
+        assert_eq!(
+            (hidden.title.as_str(), hidden.detail.as_str()),
+            ("Tokrate", "Tokrate")
+        );
+        assert!(!hidden.badge_model_known);
+    }
+    #[test]
+    fn tool_chip_defaults_on_loads_when_absent_and_is_patchable() {
+        assert!(Settings::default().show_tool_chip);
+        let dir = temporary();
+        let mut settings = saved_settings(false, None);
+        settings.as_object_mut().unwrap().remove("showToolChip");
+        write_settings(&dir, settings);
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(runtime.settings.show_tool_chip);
+        let patch = serde_json::from_value(serde_json::json!({"showToolChip": false})).unwrap();
+        runtime.update(patch).unwrap();
+        assert!(!runtime.settings.show_tool_chip);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["showToolChip"], false);
+        assert!(!Runtime::load(dir.clone()).unwrap().settings.show_tool_chip);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn dashboard_filters_are_validated_and_ask_for_a_poll_only_when_they_change() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        assert_eq!(runtime.filters, no_filters());
+        runtime
+            .set_dashboard_filters("claude-code", "anthropic")
+            .unwrap();
+        assert_eq!(
+            runtime.filters,
+            filters(Some("claude-code"), Some("anthropic"))
+        );
+        assert!(runtime.signal.take().requested);
+        runtime
+            .set_dashboard_filters("claude-code", "anthropic")
+            .unwrap();
+        assert!(!runtime.signal.take().requested);
+        runtime.set_dashboard_filters("all", "all").unwrap();
+        assert_eq!(runtime.filters, no_filters());
+        for (tool, provider) in [("vim", "all"), ("all", "mystery"), ("", "all")] {
+            assert!(runtime.set_dashboard_filters(tool, provider).is_err());
         }
+        assert_eq!(runtime.filters, no_filters());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_tray_follows_the_filters_the_flyout_reported() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let now = Utc::now();
+        let minutes = |count: i64| now - chrono::Duration::minutes(count);
+        runtime.history.merge(
+            &[
+                timed_turn(
+                    "a",
+                    "codex",
+                    "gpt-5",
+                    Some("openai"),
+                    minutes(5),
+                    (900, 12.0),
+                ),
+                timed_turn(
+                    "b",
+                    "claude-code",
+                    "claude-opus-4",
+                    Some("anthropic"),
+                    minutes(10),
+                    (500, 5.0),
+                ),
+            ],
+            now,
+        );
+        assert_eq!(runtime.tray_state(now).title, "CX 75.0 tok/s");
+        runtime.set_dashboard_filters("claude-code", "all").unwrap();
+        assert_eq!(runtime.tray_state(now).title, "CC 100 tok/s");
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn snapshot_exposes_live_responses_and_the_active_model_without_touching_the_revision() {
@@ -1556,6 +2186,338 @@ mod tests {
         let json = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(json["live"][0]["id"], "a");
         assert_eq!(json["active"]["model"], "gpt-5");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn records_are_sent_again_only_when_the_history_changed() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let now = Utc::now();
+        runtime.ingest(vec![turn("t1", "codex", "gpt-5", now)], false, now);
+        assert_eq!(runtime.revision, 1);
+        let first = runtime.snapshot(None);
+        assert!(first.records_changed);
+        assert_eq!(first.records.len(), 1);
+        // New live data and an idle poll move the live fields, not the revision.
+        assert!(runtime
+            .live
+            .push(vec![response("a", now, "gpt-5", "codex", 40)], now));
+        runtime.ingest(Vec::new(), false, now + chrono::Duration::seconds(30));
+        let polled = runtime.snapshot(Some(first.revision));
+        assert!(!polled.records_changed);
+        assert!(polled.records.is_empty());
+        assert_eq!(polled.live.len(), 1);
+        assert_eq!(runtime.revision, 1);
+        // A different revision gets the records.
+        assert_eq!(runtime.snapshot(Some(0)).records.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Deletes `history.json` and says whether it was there: a save happened since the last look.
+    fn history_was_saved(dir: &std::path::Path) -> bool {
+        std::fs::remove_file(dir.join("history.json")).is_ok()
+    }
+    #[test]
+    fn history_is_saved_at_most_every_ten_seconds_while_records_keep_arriving() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let base = Utc::now();
+        let mut saves = Vec::new();
+        for step in 0..30 {
+            let now = base + chrono::Duration::seconds(2 * step);
+            let found = vec![turn(&format!("t{step}"), "codex", "gpt-5", now)];
+            let polled = runtime.ingest(found, false, now);
+            if history_was_saved(&dir) {
+                saves.push(2 * step);
+            }
+            // Every poll with new records is a revision for the webview, saved or not.
+            assert_eq!(runtime.revision, step as u64 + 1);
+            // The unsaved remainder is written when its interval ends, not at the idle cadence.
+            if runtime.history_unsaved {
+                let last = *saves.last().unwrap();
+                assert!(polled.deadline.unwrap() <= base + chrono::Duration::seconds(last + 10));
+            } else {
+                assert_eq!(polled.deadline, None);
+            }
+        }
+        // The first record is written at once; then one write per ten seconds, never closer.
+        assert_eq!(saves, [0, 10, 20, 30, 40, 50]);
+        // The records after the last write are written by the next poll once the interval is over,
+        // and with nothing new nothing is written again.
+        let quiet = base + chrono::Duration::seconds(300);
+        runtime.ingest(Vec::new(), false, quiet);
+        assert!(history_was_saved(&dir));
+        runtime.ingest(Vec::new(), false, quiet + chrono::Duration::seconds(30));
+        assert!(!history_was_saved(&dir));
+        // Unsaved records are written on exit, and only then.
+        runtime.ingest(vec![turn("last", "codex", "gpt-5", quiet)], false, quiet);
+        assert!(!history_was_saved(&dir));
+        runtime.save_on_exit();
+        assert!(history_was_saved(&dir));
+        runtime.save_on_exit();
+        assert!(!history_was_saved(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn retention_pruning_runs_only_when_something_expired_and_at_most_every_ten_minutes() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(6);
+        runtime.ingest(
+            vec![turn("old", "codex", "gpt-5", old)],
+            false,
+            old + chrono::Duration::days(6),
+        );
+        assert_eq!(runtime.history.records().len(), 1);
+        let revision = runtime.revision;
+        // Idle polls change nothing while the oldest turn is inside the window.
+        for minutes in [1, 61, 600] {
+            runtime.ingest(Vec::new(), false, now + chrono::Duration::minutes(minutes));
+        }
+        assert_eq!(runtime.revision, revision);
+        assert_eq!(runtime.history.records().len(), 1);
+        // Once it has expired the next poll removes it, with a revision for the webview.
+        history_was_saved(&dir);
+        let later = now + chrono::Duration::days(2);
+        runtime.ingest(Vec::new(), false, later);
+        assert!(runtime.history.records().is_empty());
+        assert_eq!(runtime.revision, revision + 1);
+        assert!(history_was_saved(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_failed_poll_is_retried_at_the_minimum_spacing() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let now = Utc::now();
+        let polled = runtime.ingest(Vec::new(), true, now);
+        assert_eq!(polled.deadline, Some(now));
+        assert_eq!(
+            schedule::poll_delay(now, now, polled.deadline),
+            schedule::MIN_POLL_SPACING
+        );
+        let idle = runtime.ingest(Vec::new(), false, now);
+        assert_eq!(idle.deadline, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn only_changes_the_monitors_care_about_make_a_poll_due() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let codex = PathBuf::from(&runtime.settings.root);
+        // A poll runs discovery once; after it an idle monitor has nothing pending.
+        runtime.poll_monitor_at(Utc::now());
+        assert!(!runtime.absorb_signal());
+        let rollout = codex.join("rollout.jsonl");
+        std::fs::write(&rollout, b"{}\n").unwrap();
+        let change = |paths: &[&std::path::Path], must_rescan| tokrate_core::SourceChange {
+            paths: paths.iter().map(|path| path.to_path_buf()).collect(),
+            must_rescan,
+        };
+        runtime.signal.report(change(&[&rollout], false));
+        assert!(runtime.absorb_signal(), "a new session file needs a poll");
+        runtime.poll_monitor_at(Utc::now());
+        assert!(!runtime.absorb_signal());
+        // A file the monitors do not read, and a path outside every root, do not.
+        let noise = codex.join("notes.txt");
+        std::fs::write(&noise, b"x").unwrap();
+        runtime
+            .signal
+            .report(change(&[&noise, &dir.join("elsewhere.jsonl")], false));
+        assert!(!runtime.absorb_signal());
+        // Lost events and a settings change do.
+        runtime.signal.report(change(&[], true));
+        assert!(runtime.absorb_signal());
+        runtime.poll_monitor_at(Utc::now());
+        runtime
+            .update(serde_json::from_value(serde_json::json!({"showSpeed": false})).unwrap())
+            .unwrap();
+        assert!(runtime.absorb_signal());
+        // While monitoring is paused a change waits for it instead of waking the poll.
+        runtime
+            .update(serde_json::from_value(serde_json::json!({"monitoring": false})).unwrap())
+            .unwrap();
+        runtime.absorb_signal();
+        runtime.signal.report(change(&[], true));
+        assert!(!runtime.absorb_signal());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_watch_targets_follow_the_monitor_roots() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let targets = runtime.watch_targets();
+        let sources: Vec<_> = targets.iter().map(|target| target.source).collect();
+        assert_eq!(sources, ["codex", "claude-code", "grok-build"]);
+        assert!(targets.iter().all(|target| target.exists));
+        let custom = dir.join("custom-codex");
+        std::fs::create_dir_all(&custom).unwrap();
+        runtime.set_source_root("codex", custom.clone()).unwrap();
+        assert_eq!(runtime.watch_targets()[0].root, custom);
+        std::fs::remove_dir_all(&custom).unwrap();
+        assert!(!runtime.watch_targets()[0].exists);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A Codex rollout of `count` quick turns, the last one finished `end_minutes_ago` minutes ago.
+    fn write_rollout(path: &std::path::Path, count: i64, end_minutes_ago: i64) {
+        let end = Utc::now() - chrono::Duration::minutes(end_minutes_ago);
+        let stamp = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut lines = vec![serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": "fixture-session", "cli_version": "0.159.2", "source": "cli", "model_provider": "openai"}
+        })];
+        for index in 0..count {
+            let finished = end - chrono::Duration::seconds(3 * (count - 1 - index));
+            let turn = format!("turn-{index}");
+            lines.push(serde_json::json!({
+                "type": "event_msg", "timestamp": stamp(finished - chrono::Duration::seconds(2)),
+                "payload": {"type": "task_started", "turn_id": turn}
+            }));
+            lines.push(serde_json::json!({
+                "type": "turn_context",
+                "payload": {"turn_id": turn, "model": "fixture-model", "effort": "high"}
+            }));
+            lines.push(serde_json::json!({
+                "type": "token_usage_record",
+                "payload": {"turn_id": turn, "turn_token_usage": {"output_tokens": 200}}
+            }));
+            lines.push(serde_json::json!({
+                "type": "event_msg", "timestamp": stamp(finished),
+                "payload": {"type": "task_complete", "turn_id": turn, "duration_ms": 2000, "time_to_first_token_ms": 500}
+            }));
+        }
+        let text: String = lines.iter().map(|line| line.to_string() + "\n").collect();
+        std::fs::write(path, text).unwrap();
+    }
+    fn saved_codex_checkpoints(dir: &std::path::Path) -> usize {
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("history.json")).unwrap()).unwrap();
+        saved["checkpoints"]["codex"].as_array().map_or(0, Vec::len)
+    }
+    #[test]
+    fn a_replay_is_saved_when_it_ends_and_the_next_launch_skips_what_it_covered() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let rollout = std::path::Path::new(&runtime.settings.root).join("rollout.jsonl");
+        write_rollout(&rollout, 700, 30);
+        // Quiet for long enough that a later launch applies the checkpoint.
+        std::fs::File::options()
+            .write(true)
+            .open(&rollout)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(20 * 60))
+            .unwrap();
+        let base = Utc::now();
+        let mut polls = 0;
+        let mut saves = 0;
+        loop {
+            let now = base + chrono::Duration::seconds(2 * polls);
+            runtime.poll_monitor_at(now);
+            saves += history_was_saved_keeping(&dir) as usize;
+            polls += 1;
+            assert!(polls < 60, "the replay never ended");
+            if !runtime.was_busy {
+                break;
+            }
+        }
+        assert!(
+            polls > 3,
+            "the fixture was read in {polls} polls: no replay to speak of"
+        );
+        // At most one write per ten seconds during the replay, and one when it ended.
+        assert!(
+            saves >= 1 && saves as i64 <= 2 * polls / 10 + 2,
+            "{saves} saves in {polls} polls"
+        );
+        assert_eq!(
+            saved_codex_checkpoints(&dir),
+            1,
+            "the replay's end was not saved"
+        );
+        let records = runtime.history.records().len();
+        assert_eq!(records, 700);
+        drop(runtime);
+
+        // A new launch hands the saved checkpoints to the monitors and reads nothing again.
+        let mut restarted = Runtime::load_smoke(dir.clone()).unwrap();
+        assert_eq!(restarted.history.records().len(), records);
+        assert_eq!(restarted.history.checkpoints().codex.len(), 1);
+        let polled = restarted.poll_monitor_at(Utc::now());
+        assert_eq!(restarted.monitor.bytes_read_last_poll(), 0);
+        assert!(!restarted.was_busy);
+        assert_eq!(restarted.history.records().len(), records);
+        assert_eq!(polled.deadline, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// Whether history.json was written since the last look, without removing it.
+    fn history_was_saved_keeping(dir: &std::path::Path) -> bool {
+        thread_local!(static LAST: std::cell::Cell<Option<std::time::SystemTime>> = const { std::cell::Cell::new(None) });
+        let modified = std::fs::metadata(dir.join("history.json"))
+            .and_then(|meta| meta.modified())
+            .ok();
+        LAST.with(|last| {
+            let changed = modified.is_some() && modified != last.get();
+            last.set(modified);
+            changed
+        })
+    }
+    #[test]
+    fn grok_turns_completed_after_launch_become_live_responses() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let launched = Utc::now();
+        let session = std::path::Path::new(&runtime.settings.grok_root).join("grok-session");
+        std::fs::create_dir_all(&session).unwrap();
+        let stamp = |seconds: i64| {
+            (launched + chrono::Duration::seconds(seconds))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+        let events: Vec<serde_json::Value> = vec![
+            serde_json::json!({"type": "turn_started", "schema_version": "1.0", "ts": stamp(1), "session_id": "grok-session", "turn_number": 0, "model_id": "grok-4", "session_relationship": "primary"}),
+            serde_json::json!({"type": "loop_started", "ts": stamp(2), "loop_index": 0}),
+            serde_json::json!({"type": "turn_ended", "ts": stamp(22), "outcome": "completed"}),
+        ];
+        std::fs::write(
+            session.join("events.jsonl"),
+            events
+                .iter()
+                .map(|event| event.to_string() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+        std::fs::write(
+            session.join("usage.json"),
+            serde_json::json!({
+                "sessionId": "grok-session",
+                "updatedAt": stamp(22),
+                "session": {},
+                "turns": [{
+                    "turnNumber": 1, "endedAt": stamp(22), "outputTokens": 1500, "reasoningTokens": 10,
+                    "modelCalls": 1, "usageIsIncomplete": false, "primaryModelId": "grok-4",
+                    "modelUsage": {"grok-4": {"outputTokens": 1500}}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let now = launched + chrono::Duration::seconds(60);
+        let polled = runtime.poll_monitor_at(now);
+        let live = runtime.live.responses();
+        assert_eq!(live.len(), 1, "{:?}", runtime.history.records());
+        assert_eq!(live[0].client, "grok-build");
+        // 1,500 tokens over the 20 s the model call took.
+        assert_eq!(live[0].speed(), 75.0);
+        // The tray (and the flyout's hero) read it as a live value, with the tool's chip.
+        assert_eq!(polled.tray.title, "GB 75.0 tok/s");
+        assert_eq!(
+            runtime.active.as_ref().and_then(|key| key.model.as_deref()),
+            Some("grok-4")
+        );
+        // Polling again does not count the turn twice.
+        runtime.poll_monitor_at(now + chrono::Duration::seconds(2));
+        assert_eq!(runtime.live.len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

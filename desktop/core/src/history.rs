@@ -1,4 +1,5 @@
 use crate::model::TurnMetric;
+use crate::sources::SourceCheckpoints;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,12 +17,18 @@ const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
 struct PersistedHistory {
     schema_version: u8,
     records: Vec<TurnMetric>,
+    /// Where the monitors finished reading, saved with the records they produced so a launch can
+    /// skip those files. Absent in files from before checkpoints; an older app ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoints: Option<SourceCheckpoints>,
 }
 
-/// Deduplicated seven-day turn history, capped at 50,000 normalized metrics.
+/// Deduplicated seven-day turn history, capped at 50,000 normalized metrics, and the launch
+/// checkpoints that belong to it.
 #[derive(Clone, Debug, Default)]
 pub struct History {
     records: Vec<TurnMetric>,
+    checkpoints: SourceCheckpoints,
 }
 
 impl History {
@@ -49,7 +56,9 @@ impl History {
                 "unsupported local history schema",
             ));
         }
-        Ok(Self::from_records(persisted.records, now))
+        let mut history = Self::from_records(persisted.records, now);
+        history.checkpoints = persisted.checkpoints.unwrap_or_default().retained(now);
+        Ok(history)
     }
 
     pub fn merge(&mut self, records: &[TurnMetric], now: DateTime<Utc>) {
@@ -62,7 +71,15 @@ impl History {
             .collect();
         for record in records {
             if record.completed_at >= cutoff && record.completed_at <= now {
-                by_id.insert(record.id.clone(), record.clone());
+                let mut record = record.clone();
+                // A record whose delegated output is not final (a replay, before its total
+                // settles) must not erase a total that is: it is the same turn.
+                if record.delegated_output_tokens.is_none() {
+                    record.delegated_output_tokens = by_id
+                        .get(&record.id)
+                        .and_then(|known| known.delegated_output_tokens);
+                }
+                by_id.insert(record.id.clone(), record);
             }
         }
         self.records = by_id.into_values().collect();
@@ -79,6 +96,7 @@ impl History {
         let data = serde_json::to_vec(&PersistedHistory {
             schema_version: SCHEMA_VERSION,
             records: self.records.clone(),
+            checkpoints: (!self.checkpoints.is_empty()).then(|| self.checkpoints.clone()),
         })
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
         if data.len() as u64 > MAX_HISTORY_BYTES {
@@ -96,6 +114,18 @@ impl History {
 
     pub fn records(&self) -> &[TurnMetric] {
         &self.records
+    }
+
+    /// The saved launch checkpoints: pass them to the monitors before their first poll.
+    pub fn checkpoints(&self) -> &SourceCheckpoints {
+        &self.checkpoints
+    }
+
+    /// Replaces the checkpoints to be saved with the next [`History::save`], so they reach the
+    /// disk together with the records the monitors produced up to them. Entries older than the
+    /// retention are dropped, and each source keeps at most the monitors' file cap.
+    pub fn set_checkpoints(&mut self, checkpoints: SourceCheckpoints, now: DateTime<Utc>) {
+        self.checkpoints = checkpoints.retained(now);
     }
 
     fn from_records(records: Vec<TurnMetric>, now: DateTime<Utc>) -> Self {
@@ -123,6 +153,7 @@ impl History {
         }
         let mut history = Self {
             records: by_id.into_values().collect(),
+            checkpoints: SourceCheckpoints::default(),
         };
         history.sort_and_cap();
         history

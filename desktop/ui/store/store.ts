@@ -31,6 +31,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     monitoring: true,
     showSpeed: true,
     showProviderBadge: true,
+    showToolChip: true,
     selection: "auto",
     days: 1,
     root: "",
@@ -51,6 +52,11 @@ const EMPTY_SNAPSHOT: Snapshot = {
 export interface StoreOptions {
   initialView?: View;
   initialSelection?: string;
+  /**
+   * Tells the native shell this window's coding-tool and provider filters, so the tray shows the
+   * value of the hero. Only the flyout does: the history window has its own, unrelated filters.
+   */
+  reportFilters?: boolean;
 }
 
 /**
@@ -66,7 +72,7 @@ export class AppStore {
 
   constructor(
     readonly bridge: Bridge,
-    options: StoreOptions = {},
+    private readonly options: StoreOptions = {},
   ) {
     this.state = {
       snapshot: EMPTY_SNAPSHOT,
@@ -118,6 +124,8 @@ export class AppStore {
   /** Idempotent: React StrictMode mounts effects twice in development. */
   start = () => {
     if (this.started++ > 0) return this.stop;
+    // A reloaded webview starts with "all" while the shell may still hold the old filters.
+    this.reportFilters();
     void this.refresh();
     const onVisible = () => {
       if (!document.hidden) void this.refresh();
@@ -165,12 +173,20 @@ export class AppStore {
   /** Changing a filter returns to Auto (most active), the default selection. */
   setToolFilter = (toolFilter: ToolFilter) => {
     this.setUi({ toolFilter });
+    this.reportFilters();
     void this.patch({ selection: "auto" });
   };
   setProviderFilter = (providerFilter: ProviderFilter) => {
     this.setUi({ providerFilter });
+    this.reportFilters();
     void this.patch({ selection: "auto" });
   };
+  /** The tray follows the filters; a failed report only leaves the tray on its previous value. */
+  private reportFilters() {
+    if (!this.options.reportFilters) return;
+    const { toolFilter, providerFilter } = this.state.ui;
+    this.bridge.setDashboardFilters(toolFilter, providerFilter).catch(() => {});
+  }
 
   // --- commands -----------------------------------------------------------
   private async action(fn: () => Promise<Snapshot | void>) {

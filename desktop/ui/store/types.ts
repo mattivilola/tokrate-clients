@@ -8,6 +8,8 @@ export interface Settings {
   showSpeed: boolean;
   /** Letter badge for the model's provider in the tray icon and the window. */
   showProviderBadge: boolean;
+  /** Two-letter coding-tool chip before the speed in the tray text (the tooltip always names the tool). */
+  showToolChip: boolean;
   /** `auto`, `auto:<tool>`, `all`, `model:[model,provider]` or a pinned nine-part cohort. */
   selection: string;
   days: number;
@@ -80,7 +82,13 @@ export interface Snapshot {
 export type SettingsPatch = Partial<
   Pick<
     Settings,
-    "sharing" | "monitoring" | "showSpeed" | "showProviderBadge" | "selection" | "days"
+    | "sharing"
+    | "monitoring"
+    | "showSpeed"
+    | "showProviderBadge"
+    | "showToolChip"
+    | "selection"
+    | "days"
   >
 >;
 
@@ -111,6 +119,8 @@ export interface Bridge {
   snapshot(sinceRevision: number | null): Promise<Snapshot>;
   updateSettings(patch: SettingsPatch): Promise<Snapshot>;
   recordSharingConsent(accepted: boolean, noticeVersion: string): Promise<Snapshot>;
+  /** The flyout's coding-tool and provider filters, which the tray value follows. */
+  setDashboardFilters(tool: ToolFilter, provider: ProviderFilter): Promise<void>;
   retrySharing(): Promise<Snapshot>;
   chooseFolder(source: SourceId): Promise<Snapshot>;
   resetFolder(source: SourceId): Promise<Snapshot>;

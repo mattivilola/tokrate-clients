@@ -299,6 +299,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     monitoring: true,
     showSpeed: true,
     showProviderBadge: true,
+    showToolChip: true,
     selection: params.view === "compare" ? "all" : "auto",
     days: 1,
     root: "",
@@ -376,6 +377,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
       };
       return read(null);
     },
+    setDashboardFilters: async () => {},
     retrySharing: async () => read(null),
     chooseFolder: async (source) => {
       custom[source] = "~/Example/log-folder";

@@ -14,6 +14,8 @@ export const tauriBridge: Bridge = {
   updateSettings: (patch) => invoke<Snapshot>("update_settings", { patch }),
   recordSharingConsent: (accepted, noticeVersion) =>
     invoke<Snapshot>("record_sharing_consent", { accepted, noticeVersion }),
+  setDashboardFilters: (tool, provider) =>
+    invoke("set_dashboard_filters", { tool, provider }),
   retrySharing: () => invoke<Snapshot>("retry_sharing"),
   chooseFolder: (source) => invoke<Snapshot>("choose_folder", { source }),
   resetFolder: (source) => invoke<Snapshot>("reset_folder", { source }),
