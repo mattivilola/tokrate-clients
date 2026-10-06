@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { ChevronDown, Info } from "lucide-react";
+import { toolChip } from "../metrics";
 import { BADGE_LABEL, BADGE_LETTER, badgeFamily } from "../response";
 import { useStore, type AppStore } from "../store/store";
 
@@ -89,6 +90,18 @@ export function ProviderBadge({
         </text>
       )}
     </svg>
+  );
+}
+
+/**
+ * Two bold letters in a thin outline for a coding tool (CX, CC, GB). Neutral on purpose: the
+ * maker badge carries the colour. Decorative: the tool's name is in the option or label text.
+ */
+export function ToolChip({ tool }: { tool: string }) {
+  return (
+    <span className="tool-chip" aria-hidden="true">
+      {toolChip(tool)}
+    </span>
   );
 }
 

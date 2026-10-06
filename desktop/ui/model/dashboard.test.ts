@@ -8,7 +8,7 @@ import {
   type LiveResponse,
   type Metric,
 } from "../metrics";
-import { pickerLabel } from "../components/Header";
+import { pickerAccessibleLabel, pickerLabel } from "../components/Header";
 import { heroCaption } from "../components/Hero";
 import { chartCopy } from "../components/Trend";
 import { buildDashboard, communityLine } from "./dashboard";
@@ -257,11 +257,13 @@ describe("response speed hero", () => {
   it("restricts Auto to one coding tool and labels it", () => {
     const d = buildDashboard(input(records, { selection: "auto:codex", active: null }));
     expect(d.activeKey?.model).toBe("model-a");
-    expect(pickerLabel(d)).toBe("Auto in Codex · model-a");
+    expect(pickerLabel(d)).toBe("Auto · model-a");
+    expect(pickerAccessibleLabel(d)).toBe("Auto in Codex · model-a");
     const live = [liveResponse("c", 1, 80)];
     const claude = buildDashboard(input(records, { selection: "auto:claude-code", live, active: { model: "claude-opus-5-5", provider: "anthropic" } }));
     expect(claude.hero.source).toBe("live");
-    expect(pickerLabel(claude)).toBe("Auto in Claude Code · claude-opus-5-5");
+    expect(pickerLabel(claude)).toBe("Auto · claude-opus-5-5");
+    expect(pickerAccessibleLabel(claude)).toBe("Auto in Claude Code · claude-opus-5-5");
   });
   it("pins a model across tools and a cohort exactly", () => {
     const pinned = buildDashboard(input(records, { selection: 'model:["model-a","openai"]' }));

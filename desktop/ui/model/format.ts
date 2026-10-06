@@ -1,4 +1,4 @@
-import { PROVIDER_LABELS, client, clientLabel, type Metric } from "../metrics";
+import { CODING_TOOLS, PROVIDER_LABELS, client, clientLabel, type Metric } from "../metrics";
 import type { SourceId } from "../store/types";
 
 /** One decimal by default; an em dash when there is no value. */
@@ -33,11 +33,9 @@ export const signedPercent = (percent: number) => {
   return value > 0 ? `+${value}%` : value < 0 ? `−${Math.abs(value)}%` : "0%";
 };
 
-export const SOURCE_TITLES: Record<SourceId, string> = {
-  codex: "Codex",
-  "claude-code": "Claude Code",
-  "grok-build": "Grok Build",
-};
+export const SOURCE_TITLES = Object.fromEntries(
+  Object.entries(CODING_TOOLS).map(([id, { title }]) => [id, title]),
+) as Record<SourceId, string>;
 
 /** Provider filter options in picker order: every attributable provider, then the unknown route. */
 export const PROVIDER_TITLES: Record<string, string> = {

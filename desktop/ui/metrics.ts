@@ -1,3 +1,5 @@
+import type { SourceId } from "./store/types";
+
 export interface Metric {
   id: string;
   completedAt: string;
@@ -78,11 +80,18 @@ export const responseSpeed = (m: Metric): number | null => {
     ? tokens / seconds
     : null;
 };
+/** The one table of supported coding tools: display title and the two-letter picker chip. */
+export const CODING_TOOLS: Record<SourceId, { title: string; chip: string }> = {
+  codex: { title: "Codex", chip: "CX" },
+  "claude-code": { title: "Claude Code", chip: "CC" },
+  "grok-build": { title: "Grok Build", chip: "GB" },
+};
+const codingTool = (id: string): (typeof CODING_TOOLS)[SourceId] | undefined =>
+  CODING_TOOLS[id as SourceId];
 /** Coding-tool name from its id ("claude-code" gives "Claude Code"). */
-export const toolLabel = (id: string) =>
-  ({ codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build" })[
-    id
-  ] ?? "Coding tool";
+export const toolLabel = (id: string) => codingTool(id)?.title ?? "Coding tool";
+/** Two-letter chip of a coding tool; the first two letters of an id missing from the table. */
+export const toolChip = (id: string) => codingTool(id)?.chip ?? id.slice(0, 2).toUpperCase();
 export const clientLabel = (m: Metric) => toolLabel(client(m));
 /** Short note beside a Grok Build response speed: its value is a whole-turn average. */
 export const GROK_RESPONSE_NOTE = "Grok Build: average over all model calls in a turn";

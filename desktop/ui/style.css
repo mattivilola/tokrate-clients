@@ -322,6 +322,26 @@ time,
   font-size: 12px;
   font-weight: 650;
 }
+.picker-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+.picker-more:hover,
+.picker-more:focus-visible {
+  background: var(--surface-2);
+}
 .picker-option {
   display: flex;
   align-items: center;
@@ -346,6 +366,7 @@ time,
 }
 .picker-option-text {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
 }
@@ -560,6 +581,21 @@ time,
 }
 
 /* ---- chips --------------------------------------------------------------- */
+.tool-chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 18px;
+  padding: 0 3px;
+  border: 1px solid var(--muted);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
 .chip {
   display: inline-flex;
   align-items: center;
