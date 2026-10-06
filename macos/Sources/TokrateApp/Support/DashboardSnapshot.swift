@@ -52,6 +52,25 @@ enum ResponseComparisonSort: String, CaseIterable, Identifiable {
     var title: String { self == .recent ? "Most recent" : "Faster response speed" }
 }
 
+/// A coding tool the app reads: its recorded id, display title and the two-letter chip shown in
+/// the model picker. Adding a tool is one entry in `known`.
+struct CodingTool: Equatable, Sendable {
+    let id: String
+    let title: String
+    let chip: String
+
+    private static let known = [
+        CodingTool(id: "codex", title: "Codex", chip: "CX"),
+        CodingTool(id: "claude-code", title: "Claude Code", chip: "CC"),
+        CodingTool(id: "grok-build", title: "Grok Build", chip: "GB")
+    ]
+
+    /// The tool for a recorded client id; an unknown id is shown as recorded, chipped by its first two letters.
+    static func named(_ id: String) -> CodingTool {
+        known.first { $0.id == id } ?? CodingTool(id: id, title: id, chip: String(id.prefix(2)).uppercased())
+    }
+}
+
 /// The exact local comparison dimensions. Missing fields stay distinct from explicit values.
 struct ModelCohort: Hashable, Identifiable, Sendable {
     let model: String?
@@ -106,12 +125,7 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         Self.clientTitle(client)
     }
     static func clientTitle(_ client: String) -> String {
-        switch client {
-        case "codex": "Codex"
-        case "claude-code": "Claude Code"
-        case "grok-build": "Grok Build"
-        default: client
-        }
+        CodingTool.named(client).title
     }
     /// Display name for an inference provider value; unknown values are shown as recorded.
     /// "us-gov" is shown as "US GovCloud", other regions in upper case ("EU", "APAC"), and "unknown" as is.

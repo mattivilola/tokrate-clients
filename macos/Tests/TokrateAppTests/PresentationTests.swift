@@ -154,8 +154,94 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(ModelPickerGrouping.label(selection: .all, resolved: codex, cohorts: [codex]), "All models")
         XCTAssertEqual(ModelPickerGrouping.label(selection: .auto, resolved: nil, cohorts: []), "Auto")
         XCTAssertEqual(ModelPickerGrouping.label(selection: .auto, resolved: claude, cohorts: [claude]), "Auto · opus")
-        XCTAssertEqual(ModelPickerGrouping.label(selection: .autoTool("codex"), resolved: codex, cohorts: [codex]), "Auto in Codex · gpt")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .autoTool("codex"), resolved: codex, cohorts: [codex]), "Auto · gpt")
+        XCTAssertEqual(ModelPickerGrouping.label(selection: .autoTool("codex"), resolved: nil, cohorts: []), "Auto")
         XCTAssertEqual(ModelPickerGrouping.label(selection: .cohort(claude), resolved: codex, cohorts: [codex, claude]), "opus")
+    }
+
+    // MARK: Recent models and coding tools
+
+    private func claudeMetric(_ id: String, secondsAgo: Double = 60, model: String? = "opus", effort: String? = "high", version: String? = "1.0",
+                              provider: String? = "anthropic", subagent: Bool = false) -> TurnMetric {
+        metric(id, secondsAgo: secondsAgo, model: model, rate: 1, client: "claude-code", parser: "claude-transcript-v2",
+               metricVersion: subagent ? "claude-observed-subagent-turn-v1" : "claude-observed-turn-v1",
+               sourceKind: subagent ? "subagent" : nil, effort: effort, version: version, provider: provider)
+    }
+
+    func testRecentEntriesMergeVersionsAndKeepTheNewestCohort() {
+        let newest = ModelCohort(claudeMetric("1", version: "2.1.0"))
+        let older = ModelCohort(claudeMetric("2", version: "2.0.0"))
+        let low = ModelCohort(claudeMetric("3", effort: "low", version: "2.0.0"))
+        let recent = ModelPickerGrouping.recentEntries(cohorts: [newest, low, older])
+        XCTAssertEqual(recent.map(\.cohort), [newest, low])
+        XCTAssertEqual(recent.map(\.menuTitle), ["opus · high", "opus · low"])
+    }
+
+    func testRecentEntriesAreLimitedAndSkipUnknownModels() {
+        let cohorts = (1...7).map { ModelCohort(metric("m\($0)", model: "model-\($0)", rate: 1)) }
+        XCTAssertEqual(ModelPickerGrouping.recentEntries(cohorts: cohorts).map(\.title), (1...5).map { "model-\($0)" })
+        XCTAssertEqual(ModelPickerGrouping.recentEntries(cohorts: cohorts, limit: 2).count, 2)
+        let unknown = ModelCohort(metric("u", model: nil, rate: 1))
+        XCTAssertEqual(ModelPickerGrouping.recentEntries(cohorts: [unknown] + cohorts, limit: 1).map(\.title), ["model-1"])
+    }
+
+    func testRecentEntriesQualifyOnlyWhenProviderDiffers() {
+        let direct = ModelCohort(claudeMetric("1", version: "2.0.0", provider: "anthropic"))
+        let bedrock = ModelCohort(claudeMetric("2", version: "2.1.0", provider: "amazon-bedrock"))
+        let other = ModelCohort(claudeMetric("3", model: "sonnet", version: "2.0.0"))
+        let recent = ModelPickerGrouping.recentEntries(cohorts: [direct, bedrock, other])
+        // The versions differ too, yet only the provider is named.
+        XCTAssertEqual(recent.map(\.menuTitle), ["opus · high · Anthropic", "opus · high · Amazon Bedrock", "sonnet · high"])
+        XCTAssertEqual(recent.map(\.cohort), [direct, bedrock, other])
+    }
+
+    func testRecentEntriesKeepSubagentRowsSeparateFromPrimary() {
+        let primary = ModelCohort(claudeMetric("1"))
+        let subagent = ModelCohort(claudeMetric("2", subagent: true))
+        let recent = ModelPickerGrouping.recentEntries(cohorts: [subagent, primary])
+        XCTAssertEqual(recent.map(\.menuTitle), ["opus · high · Subagent", "opus · high"])
+    }
+
+    func testToolEntriesNameTheLatestModelPerTool() {
+        let records = [
+            claudeMetric("c1", secondsAgo: 600, model: "opus"),
+            claudeMetric("c2", secondsAgo: 60, model: "sonnet"),
+            metric("x1", model: "gpt", rate: 1, client: "codex"),
+            metric("n1", model: nil, rate: 1, client: "grok-build", parser: "grok-session-v1", metricVersion: "grok-observed-work-turn-v1")
+        ]
+        let entries = ModelPickerGrouping.toolEntries(clients: ["grok-build", "codex", "claude-code"], records: records, selection: .auto, resolved: nil)
+        XCTAssertEqual(entries.map(\.title), ["Claude Code · sonnet", "Codex · gpt", "Grok Build"])
+        XCTAssertEqual(entries.map(\.id), ["claude-code", "codex", "grok-build"])
+    }
+
+    func testToolEntryForTheSelectedToolUsesTheResolvedCohort() {
+        let records = [claudeMetric("c1", secondsAgo: 600, model: "opus"), claudeMetric("c2", secondsAgo: 60, model: "sonnet")]
+        let resolved = ModelCohort(records[0])
+        let selected = ModelPickerGrouping.toolEntries(clients: ["claude-code"], records: records, selection: .autoTool("claude-code"), resolved: resolved)
+        XCTAssertEqual(selected.map(\.title), ["Claude Code · opus"])
+        let other = ModelPickerGrouping.toolEntries(clients: ["claude-code"], records: records, selection: .autoTool("codex"), resolved: resolved)
+        XCTAssertEqual(other.map(\.title), ["Claude Code · sonnet"])
+    }
+
+    func testChipToolFollowsTheSelection() {
+        let claude = ModelCohort(claudeMetric("1"))
+        XCTAssertEqual(ModelPickerGrouping.chipTool(selection: .autoTool("codex"))?.chip, "CX")
+        XCTAssertEqual(ModelPickerGrouping.chipTool(selection: .cohort(claude))?.chip, "CC")
+        XCTAssertNil(ModelPickerGrouping.chipTool(selection: .auto))
+        XCTAssertNil(ModelPickerGrouping.chipTool(selection: .all))
+    }
+
+    func testCodingToolTableAndUnknownFallback() {
+        XCTAssertEqual(CodingTool.named("grok-build"), CodingTool(id: "grok-build", title: "Grok Build", chip: "GB"))
+        XCTAssertEqual(ModelCohort.clientTitle("claude-code"), "Claude Code")
+        XCTAssertEqual(CodingTool.named("zed-agent"), CodingTool(id: "zed-agent", title: "zed-agent", chip: "ZE"))
+    }
+
+    @MainActor func testToolChipImageIsACachedTemplate() {
+        let image = ToolChip.image(chip: "CC")
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertEqual(image.size, ToolChip.size)
+        XCTAssertTrue(image === ToolChip.image(chip: "CC"))
     }
 
     // MARK: Community line

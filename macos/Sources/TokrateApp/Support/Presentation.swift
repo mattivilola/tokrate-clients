@@ -212,16 +212,62 @@ enum ModelPickerGrouping {
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
-    /// The model picker button text for the current selection: "Auto · claude-opus-5-5".
+    /// Models shown directly in the picker; older ones live under "More models".
+    static let recentLimit = 5
+
+    /// The newest `limit` models, each merged across client, parser and metric versions. Cohorts
+    /// arrive most recently active first and the newest of each group is kept. Unknown models are
+    /// left out. A title qualifier appears only when two rows differ by provider or region.
+    static func recentEntries(cohorts: [ModelCohort], limit: Int = recentLimit) -> [CohortDisplay] {
+        var seen = Set<String>()
+        let newest = cohorts.filter { cohort in
+            guard cohort.model != nil else { return false }
+            let key = [cohort.client, cohort.model ?? "", cohort.reasoningEffort ?? "", cohort.measurement.chipTitle ?? "", cohort.provider ?? "", cohort.providerRegion ?? ""]
+                .joined(separator: "\u{1F}")
+            return seen.insert(key).inserted
+        }
+        .prefix(limit)
+        // Labelled without versions, so a qualifier can only come from provider or region.
+        let unversioned = newest.map { ModelCohort(model: $0.model, provider: $0.provider, clientVersion: nil, reasoningEffort: $0.reasoningEffort, client: $0.client, parserVersion: $0.parserVersion, metricVersion: $0.metricVersion, providerRegion: $0.providerRegion) }
+        return zip(newest, CohortLabeler.displays(for: unversioned)).map { CohortDisplay(cohort: $0, qualifier: $1.qualifier) }
+    }
+
+    /// One "Auto within a coding tool" row: the tool and the model it currently resolves to.
+    struct ToolEntry: Identifiable, Equatable {
+        let tool: CodingTool
+        let model: String?
+
+        var id: String { tool.id }
+        var title: String { model.map { "\(tool.title) · \($0)" } ?? tool.title }
+    }
+
+    /// One entry per coding tool in alphabetical title order. The tool's latest model comes from
+    /// `records`; for the tool currently selected it is the `resolved` cohort, matching what is shown.
+    static func toolEntries(clients: [String], records: [TurnMetric], selection: DashboardSelection, resolved: ModelCohort?) -> [ToolEntry] {
+        clients.map { client in
+            let cohort = selection == .autoTool(client) ? resolved : AutoSelection.resolve(records: records, activeModel: nil, client: client)
+            return ToolEntry(tool: CodingTool.named(client), model: cohort?.model)
+        }
+        .sorted { $0.tool.title.localizedCaseInsensitiveCompare($1.tool.title) == .orderedAscending }
+    }
+
+    /// The coding tool a picker button shows as a chip; none for Auto and All models.
+    static func chipTool(selection: DashboardSelection) -> CodingTool? {
+        switch selection {
+        case .autoTool(let client): CodingTool.named(client)
+        case .cohort(let cohort): CodingTool.named(cohort.client)
+        case .auto, .all: nil
+        }
+    }
+
+    /// The model picker button text for the current selection: "Auto · claude-opus-5-5". The coding
+    /// tool is shown as a chip beside it, not in the text.
     static func label(selection: DashboardSelection, resolved: ModelCohort?, cohorts: [ModelCohort]) -> String {
         switch selection {
         case .all:
             return "All models"
-        case .auto:
+        case .auto, .autoTool:
             return resolved.map { "Auto · \($0.displayModel)" } ?? "Auto"
-        case .autoTool(let client):
-            let tool = ModelCohort.clientTitle(client)
-            return resolved.map { "Auto in \(tool) · \($0.displayModel)" } ?? "Auto in \(tool)"
         case .cohort(let cohort):
             return displayTitle(for: cohort, in: cohorts)
         }

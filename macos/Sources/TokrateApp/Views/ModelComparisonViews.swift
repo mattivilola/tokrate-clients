@@ -1,4 +1,5 @@
 import SwiftUI
+import TokrateCore
 
 // MARK: - Shared filter pickers (used by the popover menu and the history window)
 
@@ -42,10 +43,12 @@ struct ProviderFilterPicker: View {
 struct MenuFieldLabel: View {
     let text: String
     var systemImage: String?
+    var tool: CodingTool?
 
     var body: some View {
         HStack(spacing: 6) {
             if let systemImage { Image(systemName: systemImage).foregroundStyle(DashboardStyle.accent) }
+            if let tool { ToolChipView(tool: tool) }
             Text(text).lineLimit(1).truncationMode(.middle)
             Image(systemName: "chevron.up.chevron.down")
                 .font(.system(size: 11, weight: .semibold))
@@ -94,11 +97,13 @@ struct ClientProviderFilterView: View {
 }
 
 /// The model choices shared by the popover picker and the history window: Auto, Auto within a
-/// coding tool, one section per coding tool with its model entries, and the comparison.
+/// coding tool, the most recent models, every exact cohort under "More models", and the comparison.
 struct ModelSelectionItems: View {
     @Binding var selection: DashboardSelection
     let cohorts: [ModelCohort]
     let clients: [String]
+    let records: [TurnMetric]
+    let resolved: ModelCohort?
     var comparisonTitle = "Compare all models"
 
     var body: some View {
@@ -106,25 +111,44 @@ struct ModelSelectionItems: View {
             Text("Auto (most active)").tag(DashboardSelection.auto)
         }
         .pickerStyle(.inline).labelsHidden()
-        if !clients.isEmpty {
-            Menu("Auto within a coding tool") {
+        Divider()
+        let tools = ModelPickerGrouping.toolEntries(clients: clients, records: records, selection: selection, resolved: resolved)
+        if !tools.isEmpty {
+            Section("Auto within a coding tool") {
                 Picker("Coding tool", selection: $selection) {
-                    ForEach(clients, id: \.self) { client in
-                        Text(ModelCohort.clientTitle(client)).tag(DashboardSelection.autoTool(client))
+                    ForEach(tools) { entry in
+                        chipLabel(entry.title, tool: entry.tool).tag(DashboardSelection.autoTool(entry.tool.id))
                     }
                 }
                 .pickerStyle(.inline).labelsHidden()
             }
         }
-        Divider()
-        ForEach(ModelPickerGrouping.sections(cohorts: cohorts)) { section in
-            Section(section.title) {
-                Picker(section.title, selection: $selection) {
-                    ForEach(section.entries) { entry in
-                        Text(entry.menuTitle).tag(DashboardSelection.cohort(entry.cohort))
+        let recent = ModelPickerGrouping.recentEntries(cohorts: cohorts)
+        if !recent.isEmpty {
+            Section("Recent models") {
+                Picker("Recent models", selection: $selection) {
+                    ForEach(recent) { entry in
+                        chipLabel(entry.menuTitle, tool: CodingTool.named(entry.cohort.client))
+                            .accessibilityLabel(entry.accessibilityLabel)
+                            .tag(DashboardSelection.cohort(entry.cohort))
                     }
                 }
                 .pickerStyle(.inline).labelsHidden()
+            }
+        }
+        let sections = ModelPickerGrouping.sections(cohorts: cohorts)
+        if !sections.isEmpty {
+            Menu("More models") {
+                ForEach(sections) { section in
+                    Section(section.title) {
+                        Picker(section.title, selection: $selection) {
+                            ForEach(section.entries) { entry in
+                                Text(entry.menuTitle).tag(DashboardSelection.cohort(entry.cohort))
+                            }
+                        }
+                        .pickerStyle(.inline).labelsHidden()
+                    }
+                }
             }
         }
         Divider()
@@ -133,6 +157,10 @@ struct ModelSelectionItems: View {
         }
         .pickerStyle(.inline).labelsHidden()
     }
+
+    private func chipLabel(_ title: String, tool: CodingTool) -> some View {
+        Label { Text(title) } icon: { Image(nsImage: ToolChip.image(chip: tool.chip)) }
+    }
 }
 
 /// The full model/cohort selector used on the history window (the popover uses `ModelPickerMenu`).
@@ -140,13 +168,14 @@ struct CohortSelectionView: View {
     @Binding var selection: DashboardSelection
     let cohorts: [ModelCohort]
     let clients: [String]
+    let records: [TurnMetric]
     let resolved: ModelCohort?
 
     var body: some View {
         Menu {
-            ModelSelectionItems(selection: $selection, cohorts: cohorts, clients: clients, comparisonTitle: "All models comparison")
+            ModelSelectionItems(selection: $selection, cohorts: cohorts, clients: clients, records: records, resolved: resolved, comparisonTitle: "All models comparison")
         } label: {
-            MenuFieldLabel(text: ModelPickerGrouping.label(selection: selection, resolved: resolved, cohorts: cohorts), systemImage: "cpu")
+            MenuFieldLabel(text: ModelPickerGrouping.label(selection: selection, resolved: resolved, cohorts: cohorts), systemImage: "cpu", tool: ModelPickerGrouping.chipTool(selection: selection))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityLabel("Exact coding tool, inference provider, version, and metric cohort selector")
         }

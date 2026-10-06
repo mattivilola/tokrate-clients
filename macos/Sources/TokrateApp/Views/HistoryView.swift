@@ -26,7 +26,7 @@ struct HistoryView: View {
                     SharingView(preferences: store.sharingPreferences, selection: store.dashboardSelection, resolvedCohort: store.resolvedCohort, compact: false, showToggle: false, checkForUpdates: { updates.checkForUpdates() })
                 }
                 HStack(alignment: .center, spacing: 10) {
-                    CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, clients: store.availableClients, resolved: store.resolvedCohort)
+                    CohortSelectionView(selection: $store.dashboardSelection, cohorts: store.availableCohorts, clients: store.availableClients, records: store.filteredRecords, resolved: store.resolvedCohort)
                     ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
                         .fixedSize()
                 }
