@@ -73,6 +73,9 @@ final class DelegatedWorkTests: XCTestCase {
         XCTAssertTrue(stillWaiting.metrics.isEmpty)
 
         try append([assistant("s2", 120, 450, "end_turn", agent: "a1")], toSubagent: subagentFile, modified: at(120))
+        await monitor.noteChanges(SessionFolderChange(paths: [
+            directory.appendingPathComponent("project/\(session)/subagents/\(subagentFile)").standardizedFileURL.path
+        ]))
         let done = try await monitor.poll(now: at(125))
         let final = try XCTUnwrap(done.metrics.first { $0.sourceKind == "primary" })
         XCTAssertEqual(final.id, parent.id)
@@ -355,6 +358,42 @@ final class DelegatedWorkTests: XCTestCase {
         )
         aged.ingest(events: [.primaryTurn(turnID: "recent", root: "r")], metrics: [recent])
         XCTAssertEqual(aged.finalize(now: completedAt.addingTimeInterval(settle), backlog: .none).first?.delegatedOutputTokens, 0, "the expired open item no longer blocks")
+    }
+
+    // MARK: Next poll deadline
+
+    func testAttributorDeadlineIsTheSettleTimeThenTheMaximumWaitWhileWorkIsOpen() {
+        var attributor = DelegationAttributor()
+        XCTAssertNil(attributor.nextDeadline(now: origin), "no pending turn")
+        let (_, start) = pendingTurn(&attributor)
+        XCTAssertEqual(attributor.nextDeadline(now: origin), origin.addingTimeInterval(settle))
+        XCTAssertNil(attributor.nextDeadline(now: origin.addingTimeInterval(settle)), "only an unread file can hold it now")
+        attributor.ingest(events: [.workStarted(id: "w", root: "r", startedAt: start.addingTimeInterval(10))], metrics: [])
+        XCTAssertEqual(attributor.nextDeadline(now: origin.addingTimeInterval(settle)), origin.addingTimeInterval(maximumWait))
+    }
+
+    func testClaudeMonitorDeadlineIsTheSettleTimeWhileATurnIsPendingAndNilOnceIdle() async throws {
+        let monitor = try claudeMonitor(primary: [prompt(0), assistant("p1", 60, 300, "end_turn")], subagents: [:])
+        _ = try await monitor.poll(now: at(60))
+        let waiting = await monitor.nextPollDeadline(now: at(60))
+        XCTAssertEqual(waiting, at(60 + settle))
+        _ = try await monitor.poll(now: at(60 + settle))
+        let idle = await monitor.nextPollDeadline(now: at(60 + settle))
+        XCTAssertNil(idle)
+    }
+
+    func testCodexMonitorDeadlineIsNowWhileArchiveReplayIsPendingThenTheSettleTimeThenNil() async throws {
+        let session = codexRoot(turns: [codexTurn("t1", start: 0, end: 60, tokens: 300)])
+        let monitor = try codexMonitor(files: ["root": session + Data(repeating: 0x20, count: 700_000) + Data([0x0A])])
+        _ = try await monitor.poll(now: at(60))
+        let replaying = await monitor.nextPollDeadline(now: at(60))
+        XCTAssertEqual(replaying, at(60), "the archive reader still has bytes to read")
+        for _ in 0..<10 { _ = try await monitor.poll(now: at(60)) }
+        let waiting = await monitor.nextPollDeadline(now: at(60))
+        XCTAssertEqual(waiting, at(60 + settle))
+        _ = try await monitor.poll(now: at(60 + settle))
+        let idle = await monitor.nextPollDeadline(now: at(60 + settle))
+        XCTAssertNil(idle)
     }
 
     // MARK: Turn-scoped backlog

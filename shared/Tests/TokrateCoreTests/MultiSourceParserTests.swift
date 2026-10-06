@@ -277,6 +277,98 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(status.sessions, 2)
     }
 
+    func testGrokMonitorServicesReportedChangesWithoutWaitingForDiscoveryAndSchedulesTheSnapshotSettle() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let known = root.appendingPathComponent("known", isDirectory: true)
+        let fresh = root.appendingPathComponent("fresh", isDirectory: true)
+        try FileManager.default.createDirectory(at: known, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = Date.now
+        let started = iso8601(now.addingTimeInterval(-8)), ended = iso8601(now.addingTimeInterval(-5)), updated = iso8601(now.addingTimeInterval(-4))
+        try writeGrokSession(directory: known, session: "known-session", number: 1, startedAt: started, endedAt: ended, updatedAt: updated)
+        let monitor = GrokSessionMonitor(root: root)
+        _ = try await monitor.poll(now: now)
+        let settling = await monitor.nextPollDeadline(now: now)
+        XCTAssertEqual(settling, now.addingTimeInterval(4), "the snapshot is reconciled once it has been stable for four seconds")
+        let records = try await monitor.poll(now: now.addingTimeInterval(4))
+        XCTAssertEqual(records.count, 1)
+        let idle = await monitor.nextPollDeadline(now: now.addingTimeInterval(4))
+        XCTAssertNil(idle)
+
+        try writeGrokSession(directory: fresh, session: "fresh-session", number: 2, startedAt: started, endedAt: ended, updatedAt: updated)
+        _ = try await monitor.poll(now: now.addingTimeInterval(6))
+        var status = await monitor.status()
+        XCTAssertEqual(status.sessions, 1, "a new session waits for discovery unless it is reported")
+        let unrelated = await monitor.noteChanges(SessionFolderChange(paths: [fresh.appendingPathComponent("notes.txt").path]))
+        XCTAssertFalse(unrelated)
+        let noted = await monitor.noteChanges(SessionFolderChange(paths: [fresh.appendingPathComponent("events.jsonl").standardizedFileURL.path]))
+        XCTAssertTrue(noted)
+        let pending = await monitor.nextPollDeadline(now: now.addingTimeInterval(6))
+        XCTAssertEqual(pending, now.addingTimeInterval(6))
+        _ = try await monitor.poll(now: now.addingTimeInterval(8))
+        status = await monitor.status()
+        XCTAssertEqual(status.sessions, 2)
+
+        // A change to a known session's usage file services that session again and restarts its settle.
+        try await Task.sleep(for: .milliseconds(20))
+        try writeGrokSession(directory: known, session: "known-session", number: 1, startedAt: started, endedAt: ended, updatedAt: iso8601(now))
+        await monitor.noteChanges(SessionFolderChange(paths: [known.appendingPathComponent("usage.json").standardizedFileURL.path]))
+        let changed = await monitor.nextPollDeadline(now: now.addingTimeInterval(10))
+        XCTAssertEqual(changed, now.addingTimeInterval(10))
+        _ = try await monitor.poll(now: now.addingTimeInterval(10))
+        let resettling = await monitor.nextPollDeadline(now: now.addingTimeInterval(10))
+        XCTAssertEqual(resettling, now.addingTimeInterval(12), "the fresh session settles first")
+    }
+
+    func testGrokIdlePollsReadNothingUntilTheNextDiscoveryOrAReportedChange() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let eventsURL = root.appendingPathComponent("events.jsonl")
+        let usageURL = root.appendingPathComponent("usage.json")
+        func line(_ data: Data) -> Data { data + Data("\n".utf8) }
+        let first = line(try grokStart(timestamp: "2026-10-03T20:00:00Z", number: 0, relationship: "primary"))
+            + line(try grokEnd(timestamp: "2026-10-03T20:00:05Z", outcome: "completed"))
+        let second = line(try grokStart(timestamp: "2026-10-03T20:01:00Z", number: 1, relationship: "primary"))
+            + line(try grokEnd(timestamp: "2026-10-03T20:01:05Z", outcome: "completed"))
+        try first.write(to: eventsURL)
+        try usageSnapshot(number: 0, endedAt: "2026-10-03T20:00:05.020Z", output: 50, updatedAt: "2026-10-03T20:00:06Z", modelUsage: ["grok-4": [:]])
+            .write(to: usageURL)
+
+        let monitor = GrokSessionMonitor(root: root)
+        let t0 = Date.now
+        let discovered = try await monitor.poll(now: t0)
+        XCTAssertTrue(discovered.isEmpty)
+        let reconciled = try await monitor.poll(now: t0.addingTimeInterval(4))
+        XCTAssertEqual(reconciled.count, 1)
+        let settled = await monitor.nextPollDeadline(now: t0.addingTimeInterval(4))
+        XCTAssertNil(settled)
+        let again = try await monitor.poll(now: t0.addingTimeInterval(6))
+        XCTAssertTrue(again.isEmpty, "a snapshot is reconciled once, not on every poll")
+
+        // A new turn nobody reported is not read by idle polls.
+        let handle = try FileHandle(forWritingTo: eventsURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: second)
+        try handle.close()
+        try usageSnapshot(number: 1, endedAt: "2026-10-03T20:01:05.020Z", output: 60, updatedAt: "2026-10-03T20:01:06Z", modelUsage: ["grok-4": [:]])
+            .write(to: usageURL)
+        for seconds in [8.0, 12, 40, 200] {
+            let idle = try await monitor.poll(now: t0.addingTimeInterval(seconds))
+            XCTAssertTrue(idle.isEmpty)
+            let deadline = await monitor.nextPollDeadline(now: t0.addingTimeInterval(seconds))
+            XCTAssertNil(deadline)
+        }
+
+        // The discovery safety net visits every session, so the missed change is caught.
+        let sweep = try await monitor.poll(now: t0.addingTimeInterval(305))
+        XCTAssertTrue(sweep.isEmpty, "the snapshot has to settle first")
+        let caught = try await monitor.poll(now: t0.addingTimeInterval(310))
+        XCTAssertEqual(caught.map(\.outputTokens), [60])
+    }
+
     // MARK: Grok Build response speed (0.1.15)
 
     /// One model call: generation window, then its tool run (with the repeated `tool_started` and the
@@ -646,11 +738,14 @@ final class MultiSourceParserTests: XCTestCase {
             try Data().write(to: eventsURL)
             records += try await monitor.poll(now: t0)
             try start.write(to: eventsURL)
+            await monitor.noteChanges(SessionFolderChange(paths: [eventsURL.standardizedFileURL.path]))
             records += try await monitor.poll(now: t0.addingTimeInterval(1))
             try (start + end).write(to: eventsURL)
             try usage.write(to: usageURL)
         }
         try writeSummary(summaryAtEmit)
+        // Between discoveries a session is only read once a change to its files is reported.
+        await monitor.noteChanges(SessionFolderChange(paths: Set([eventsURL, usageURL, summaryURL].map { $0.standardizedFileURL.path })))
         records += try await monitor.poll(now: t0.addingTimeInterval(2))
         records += try await monitor.poll(now: t0.addingTimeInterval(7))
         return records

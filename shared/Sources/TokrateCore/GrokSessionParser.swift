@@ -404,6 +404,9 @@ public actor GrokSessionMonitor {
     private static let maximumUsageBytes = 262_144
     private static let maximumSummaryBytes = 65_536
     private static let snapshotStabilitySeconds: TimeInterval = 4
+    /// Safety net for a folder watcher that missed a change; `noteChanges` normally triggers discovery.
+    private static let discoveryInterval = CodexSessionMonitor.discoveryInterval
+    private static let watchedFileNames: Set<String> = ["events.jsonl", "usage.json", "summary.json"]
 
     private struct WatchedSession {
         var events: IncrementalJSONLMetricReader<GrokSessionParser>
@@ -411,6 +414,8 @@ public actor GrokSessionMonitor {
         var usageModifiedAt: Date?
         var usageData: Data?
         var stableSince: Date?
+        /// The `stableSince` whose snapshot was last reconciled; a session is due once that lags behind.
+        var reconciledSince: Date?
         var usageReadCheckedAt = Date.distantPast
         var summaryModifiedAt: Date?
         var summarySize: Int?
@@ -420,16 +425,73 @@ public actor GrokSessionMonitor {
     private let root: URL
     private var sessions: [String: WatchedSession] = [:]
     private var lastDiscovery = Date.distantPast
+    private var needsDiscovery = false
+    /// Sessions a folder watcher reported as changed; they are serviced first.
+    private var changedSessions: Set<String> = []
+    /// Sessions not visited since the last discovery. Discovery is the safety net for a missed event, so
+    /// every session is read once after it; between discoveries only changed ones are.
+    private var unvisitedSessions: Set<String> = []
     private var nextSessionIndex = 0
     private(set) var rootIsAvailable = false
     private(set) var watchedSessionCount = 0
 
     public init(root: URL) { self.root = root }
 
+    /// Marks what a folder watcher reported so the next poll reads it: a change to a known session's
+    /// event log, usage or summary file services that session first, and a new session or a lost event
+    /// triggers discovery. Returns whether anything is now pending.
+    @discardableResult
+    public func noteChanges(_ change: SessionFolderChange) -> Bool {
+        var noted = change.mustRescan
+        if change.mustRescan { needsDiscovery = true }
+        for path in change.paths {
+            let url = URL(fileURLWithPath: path)
+            guard Self.watchedFileNames.contains(url.lastPathComponent) else { continue }
+            let key = url.deletingLastPathComponent().appendingPathComponent("events.jsonl").standardizedFileURL.path
+            if var session = sessions[key] {
+                if url.lastPathComponent == "events.jsonl" {
+                    if let modified = SessionFolderChange.modificationDate(ofRegularFileAt: path) {
+                        session.eventsModifiedAt = modified
+                    } else {
+                        needsDiscovery = true
+                    }
+                }
+                session.stableSince = nil
+                sessions[key] = session
+                changedSessions.insert(key)
+                noted = true
+            } else if url.lastPathComponent == "events.jsonl", SessionFolderChange.isDiscoverable(path, under: root),
+                      SessionFolderChange.modificationDate(ofRegularFileAt: path) != nil {
+                needsDiscovery = true
+                noted = true
+            }
+        }
+        return noted
+    }
+
+    /// `now` while a session has unread events or is yet to be visited after a discovery, a change was
+    /// reported or a discovery is waiting; else when the
+    /// earliest session's snapshot has been stable long enough to reconcile; nil when nothing is pending.
+    public func nextPollDeadline(now: Date) -> Date? {
+        if needsDiscovery || !changedSessions.isEmpty || !unvisitedSessions.isEmpty { return now }
+        guard rootIsAvailable else { return nil }
+        var earliest: Date?
+        for session in sessions.values {
+            if !session.events.isCaughtUp { return now }
+            guard let stableSince = session.stableSince, session.reconciledSince != stableSince else { continue }
+            let due = stableSince.addingTimeInterval(Self.snapshotStabilitySeconds)
+            if earliest.map({ due < $0 }) ?? true { earliest = due }
+        }
+        return earliest
+    }
+
     public func poll(now: Date = .now) throws -> [TurnMetric] {
-        if now.timeIntervalSince(lastDiscovery) >= 10 || sessions.isEmpty {
+        if needsDiscovery || now.timeIntervalSince(lastDiscovery) >= Self.discoveryInterval || sessions.isEmpty {
+            // Cleared first so a failing enumeration is retried by the safety net, not on every poll.
+            needsDiscovery = false
             try discoverSessions(now: now)
             lastDiscovery = now
+            unvisitedSessions = Set(sessions.keys)
         }
         guard rootIsAvailable, !sessions.isEmpty else { return [] }
 
@@ -441,10 +503,21 @@ public actor GrokSessionMonitor {
         var budget = Self.maximumPollBytes
         var processed = 0
         var records: [TurnMetric] = []
-        for step in 0..<min(24, keys.count) {
+        let rotation = (0..<keys.count).map { keys[(nextSessionIndex + $0) % keys.count] }
+        // Only sessions with something to do are visited: reported changes and snapshots that have become
+        // stable first, then unread events and the sessions yet to be visited after a discovery in round
+        // robin, which only advances by the sessions it visited.
+        let urgent = Set(rotation.filter { key in
+            changedSessions.contains(key) || sessions[key].map { Self.isSnapshotDue($0, now: now) } == true
+        })
+        let others = rotation.filter { key in
+            !urgent.contains(key) && (unvisitedSessions.contains(key) || sessions[key]?.events.isCaughtUp == false)
+        }
+        for key in (rotation.filter(urgent.contains) + others).prefix(24) {
             guard budget > 0 else { break }
-            let key = keys[(nextSessionIndex + step) % keys.count]
             guard var session = sessions[key] else { continue }
+            changedSessions.remove(key)
+            unvisitedSessions.remove(key)
             do {
                 let currentEventDate = (try? sessionFileDate(at: URL(fileURLWithPath: key))) ?? session.eventsModifiedAt
                 if currentEventDate != session.eventsModifiedAt {
@@ -479,22 +552,29 @@ public actor GrokSessionMonitor {
 
                 if session.events.isCaughtUp, session.usageData != nil {
                     if session.stableSince == nil { session.stableSince = now }
-                    if let stableSince = session.stableSince,
+                    if let stableSince = session.stableSince, session.reconciledSince != stableSince,
                        now.timeIntervalSince(stableSince) >= Self.snapshotStabilitySeconds,
                        let usageData = session.usageData {
                         records += session.events.reconcile(snapshot: usageData)
+                        session.reconciledSince = stableSince
                     }
                 }
                 sessions[key] = session
             } catch {
                 sessions[key] = session
             }
-            processed += 1
+            if !urgent.contains(key) { processed += 1 }
         }
         nextSessionIndex = (nextSessionIndex + processed) % keys.count
         var unique: [String: TurnMetric] = [:]
         for record in records { unique[record.id] = record }
         return unique.values.sorted { $0.completedAt > $1.completedAt }
+    }
+
+    private static func isSnapshotDue(_ session: WatchedSession, now: Date) -> Bool {
+        guard let stableSince = session.stableSince else { return false }
+        return session.reconciledSince != stableSince
+            && now.timeIntervalSince(stableSince) >= snapshotStabilitySeconds
     }
 
     public func status() -> (rootAvailable: Bool, sessions: Int) {
@@ -506,6 +586,8 @@ public actor GrokSessionMonitor {
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             rootIsAvailable = false
             sessions.removeAll(keepingCapacity: false)
+            changedSessions.removeAll()
+            unvisitedSessions.removeAll()
             watchedSessionCount = 0
             return
         }
@@ -541,6 +623,8 @@ public actor GrokSessionMonitor {
             }
         }
         sessions = sessions.filter { seen.contains($0.key) }
+        changedSessions.formIntersection(sessions.keys)
+        unvisitedSessions.formIntersection(sessions.keys)
         watchedSessionCount = sessions.count
         nextSessionIndex = sessions.isEmpty ? 0 : nextSessionIndex % sessions.count
     }

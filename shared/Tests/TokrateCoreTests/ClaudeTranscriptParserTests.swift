@@ -367,6 +367,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             try user(at: 20, id: "second-prompt", origin: liveSince),
             try assistant(at: 30, id: "m3", output: 300, stop: "end_turn", origin: liveSince)
         ], to: file, modified: liveSince.addingTimeInterval(22))
+        await monitor.noteChanges(SessionFolderChange(paths: [file.standardizedFileURL.path]))
         let second = try await monitor.poll(now: liveSince.addingTimeInterval(22))
         XCTAssertEqual(second.metrics.map(\.outputTokens), [300])
         XCTAssertEqual(second.responses.map(\.outputTokens), [300])
@@ -374,6 +375,50 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let after = try await monitor.poll(now: liveSince.addingTimeInterval(33))
         XCTAssertTrue(after.metrics.isEmpty)
         XCTAssertTrue(after.responses.isEmpty)
+    }
+
+    func testNotedAppendAndNewFileAreReadWithoutWaitingForDiscovery() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let project = root.appendingPathComponent("synthetic-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let liveSince = Date.now
+        let file = project.appendingPathComponent("\(sessionID).jsonl")
+        try write([
+            try user(at: 1, id: "prompt", origin: liveSince),
+            try assistant(at: 5, id: "m1", output: 100, stop: "end_turn", origin: liveSince)
+        ], to: file)
+        let monitor = ClaudeSessionMonitor(root: root, liveSince: liveSince)
+        let first = try await monitor.poll(now: liveSince)
+        XCTAssertEqual(first.metrics.map(\.outputTokens), [100])
+
+        try append([
+            try user(at: 10, id: "second-prompt", origin: liveSince),
+            try assistant(at: 14, id: "m2", output: 200, stop: "end_turn", origin: liveSince)
+        ], to: file, modified: liveSince.addingTimeInterval(2))
+        let silent = try await monitor.poll(now: liveSince.addingTimeInterval(2))
+        XCTAssertTrue(silent.metrics.isEmpty, "the caught-up file is only re-read once a modification is known")
+        let noted = await monitor.noteChanges(SessionFolderChange(paths: [file.standardizedFileURL.path]))
+        XCTAssertTrue(noted)
+        let pending = await monitor.nextPollDeadline(now: liveSince.addingTimeInterval(2))
+        XCTAssertEqual(pending, liveSince.addingTimeInterval(2))
+        let second = try await monitor.poll(now: liveSince.addingTimeInterval(4))
+        XCTAssertEqual(second.metrics.filter { $0.outputTokens == 200 }.count, 1)
+        XCTAssertEqual(second.responses.map(\.outputTokens), [200])
+
+        let other = project.appendingPathComponent("another-session.jsonl")
+        try write([
+            try user(at: 20, id: "other-prompt", origin: liveSince),
+            try assistant(at: 24, id: "m3", output: 300, stop: "end_turn", origin: liveSince)
+        ], to: other)
+        let unseen = try await monitor.poll(now: liveSince.addingTimeInterval(6))
+        XCTAssertTrue(unseen.metrics.isEmpty, "a new file waits for discovery unless it is reported")
+        let unrelated = await monitor.noteChanges(SessionFolderChange(paths: [project.appendingPathComponent("notes.md").path]))
+        XCTAssertFalse(unrelated)
+        await monitor.noteChanges(SessionFolderChange(paths: [other.standardizedFileURL.path]))
+        let third = try await monitor.poll(now: liveSince.addingTimeInterval(8))
+        XCTAssertEqual(third.metrics.filter { $0.outputTokens == 300 }.count, 1)
     }
 
     func testMonitorHoldsAThinkingLastTerminalTurnUntilThirtySecondsOfPollClock() async throws {

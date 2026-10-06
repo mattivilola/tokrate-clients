@@ -134,23 +134,51 @@ struct DelegationAttributor: Sendable {
             let completedAt = entry.metric.completedAt
             guard now >= completedAt.addingTimeInterval(Self.settleSeconds),
                   !backlog.hasBacklog(affectingWorkStartedAt: entry.startedAt) else { continue }
-            var total = 0
-            var hasOpenWork = false
-            for workID in workByRoot[entry.root] ?? [] {
-                guard let item = work[workID], item.startedAt >= entry.startedAt, item.startedAt <= completedAt else { continue }
-                switch item.status {
-                case .open: hasOpenWork = true
-                case .finished(let tokens):
-                    let (sum, overflow) = total.addingReportingOverflow(tokens)
-                    total = overflow ? Int.max : sum
-                case .discarded: break
-                }
-            }
+            let (total, hasOpenWork) = delegatedTotal(for: entry)
             if hasOpenWork, now < completedAt.addingTimeInterval(Self.maximumWaitSeconds) { continue }
             finals.append(entry.metric.withDelegatedOutputTokens(total))
             pending.removeValue(forKey: id)
         }
         return finals.sorted { $0.completedAt > $1.completedAt }
+    }
+
+    /// The earliest moment a pending turn can change state through time alone: its settle time, or,
+    /// while open work holds it, the end of the maximum wait. A turn held only by an unread file is
+    /// not listed; reading that file is what moves it.
+    func nextDeadline(now: Date) -> Date? {
+        var earliest: Date?
+        for entry in pending.values {
+            let settled = entry.metric.completedAt.addingTimeInterval(Self.settleSeconds)
+            let deadline: Date
+            if now < settled {
+                deadline = settled
+            } else if delegatedTotal(for: entry).hasOpenWork {
+                deadline = entry.metric.completedAt.addingTimeInterval(Self.maximumWaitSeconds)
+            } else {
+                continue
+            }
+            if earliest.map({ deadline < $0 }) ?? true { earliest = deadline }
+        }
+        return earliest
+    }
+
+    /// The finished delegated output tokens of the work started inside `entry`'s turn, and whether any
+    /// of that work is still open.
+    private func delegatedTotal(for entry: Pending) -> (total: Int, hasOpenWork: Bool) {
+        var total = 0
+        var hasOpenWork = false
+        for workID in workByRoot[entry.root] ?? [] {
+            guard let item = work[workID], item.startedAt >= entry.startedAt,
+                  item.startedAt <= entry.metric.completedAt else { continue }
+            switch item.status {
+            case .open: hasOpenWork = true
+            case .finished(let tokens):
+                let (sum, overflow) = total.addingReportingOverflow(tokens)
+                total = overflow ? Int.max : sum
+            case .discarded: break
+            }
+        }
+        return (total, hasOpenWork)
     }
 
     /// A poll's own records with the re-emitted final records laid over those of the same id.

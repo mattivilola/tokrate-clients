@@ -50,6 +50,11 @@ final class HistoryStore {
     private static let selectionDefaultsKey = "dashboardModelSelection"
     private static let clientFilterDefaultsKey = "dashboardClientFilter"
     private static let providerFilterDefaultsKey = "dashboardProviderFilter"
+    /// Polls never come closer than this, so a busy writer costs at most one poll per interval.
+    nonisolated static let minimumPollSpacing: TimeInterval = 2
+    /// The longest the app sleeps with nothing pending. A poll also ages the live readout and moves
+    /// Auto model selection (`refreshLiveReadout`), which must not stall while the folders are quiet.
+    nonisolated static let idlePollInterval: TimeInterval = 30
     private struct PersistedHistory: Codable {
         let schemaVersion: Int
         let records: [TurnMetric]
@@ -99,6 +104,9 @@ final class HistoryStore {
     @ObservationIgnored private var claudeMonitor: ClaudeSessionMonitor?
     @ObservationIgnored private var grokMonitor: GrokSessionMonitor?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
+    /// One watcher per existing source folder; a change wakes the polling task early.
+    @ObservationIgnored private var watchers: [SourceFolderKind: SessionFolderWatcher] = [:]
+    @ObservationIgnored private var waker: PollWaker?
     @ObservationIgnored private let defaultFolders: [SourceFolderKind: URL]
     @ObservationIgnored private var securityScopedFolders: [SourceFolderKind: URL] = [:]
 
@@ -242,8 +250,13 @@ final class HistoryStore {
         saveHistory()
         let codexFolder = folder(for: .codex)
         guard let monitor, let claudeMonitor, let grokMonitor else { return }
+        let waker = PollWaker()
+        self.waker = waker
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
+                // Before the poll, so a file written once a watcher exists is either reported by it or
+                // already visible to the poll.
+                self?.syncWatchers()
                 var newRecords: [TurnMetric] = []
                 var newResponses: [LiveResponse] = []
                 var failures: [String] = []
@@ -285,7 +298,62 @@ final class HistoryStore {
                 if newRecords.isEmpty, failures.isEmpty {
                     self.errorMessage = nil
                 }
-                try? await Task.sleep(for: .seconds(2))
+                let polledAt = Date.now
+                let deadlines = [
+                    await monitor.nextPollDeadline(now: polledAt),
+                    await claudeMonitor.nextPollDeadline(now: polledAt),
+                    await grokMonitor.nextPollDeadline(now: polledAt),
+                    // A failed poll is retried at the normal cadence.
+                    failures.isEmpty ? nil : polledAt
+                ].compactMap { $0 }
+                await Self.waitForNextPoll(lastPoll: polledAt, deadline: deadlines.min(), waker: waker)
+            }
+        }
+    }
+
+    /// How long to wait after the poll that ended at `lastPoll` before polling again: until `deadline`
+    /// (the earliest time-based transition a monitor reported; nil when nothing is pending) but no
+    /// sooner than the minimum spacing and no later than the idle interval.
+    nonisolated static func pollDelay(now: Date, lastPoll: Date, deadline: Date?) -> TimeInterval {
+        let idle = lastPoll.addingTimeInterval(idlePollInterval)
+        let due = min(deadline ?? idle, idle)
+        let earliest = lastPoll.addingTimeInterval(minimumPollSpacing)
+        return max(0, max(due, earliest).timeIntervalSince(now))
+    }
+
+    /// Sleeps until the next poll is due, or until a watcher reports a change (observing the minimum
+    /// spacing either way).
+    private nonisolated static func waitForNextPoll(lastPoll: Date, deadline: Date?, waker: PollWaker) async {
+        let delay = pollDelay(now: .now, lastPoll: lastPoll, deadline: deadline)
+        guard await waker.wait(timeout: delay) else { return }
+        try? await Task.sleep(for: .seconds(pollDelay(now: .now, lastPoll: lastPoll, deadline: .now)))
+    }
+
+    /// Watches every source folder that exists and drops the watcher of one that vanished, so a folder
+    /// created or replaced after launch is picked up by the next poll cycle.
+    private func syncWatchers() {
+        guard let waker else { return }
+        for kind in SourceFolderKind.allCases {
+            guard FileManager.default.fileExists(atPath: folder(for: kind).path) else {
+                watchers.removeValue(forKey: kind)?.stop()
+                continue
+            }
+            guard watchers[kind] == nil else { continue }
+            let notify: @Sendable (SessionFolderChange) async -> Bool
+            switch kind {
+            case .codex:
+                guard let monitor else { continue }
+                notify = { await monitor.noteChanges($0) }
+            case .claudeCode:
+                guard let claudeMonitor else { continue }
+                notify = { await claudeMonitor.noteChanges($0) }
+            case .grokBuild:
+                guard let grokMonitor else { continue }
+                notify = { await grokMonitor.noteChanges($0) }
+            }
+            // Only a change a monitor cares about wakes the poll.
+            watchers[kind] = SessionFolderWatcher(root: folder(for: kind)) { change in
+                Task { if await notify(change) { await waker.signal() } }
             }
         }
     }
@@ -293,6 +361,9 @@ final class HistoryStore {
     func stopMonitoring() {
         pollingTask?.cancel()
         pollingTask = nil
+        for watcher in watchers.values { watcher.stop() }
+        watchers.removeAll()
+        waker = nil
         monitor = nil
         claudeMonitor = nil
         grokMonitor = nil

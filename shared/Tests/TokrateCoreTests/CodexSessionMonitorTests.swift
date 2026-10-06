@@ -62,8 +62,9 @@ final class CodexSessionMonitorTests: XCTestCase {
         try handle.seekToEnd()
         try handle.write(contentsOf: turn(id: "completed-after-monitoring-start", tokens: 123))
         try handle.close()
-        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(11)], ofItemAtPath: file.path)
-        let records = try await monitor.poll(now: now.addingTimeInterval(11)).metrics
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(2)], ofItemAtPath: file.path)
+        await monitor.noteChanges(SessionFolderChange(paths: [file.standardizedFileURL.path]))
+        let records = try await monitor.poll(now: now.addingTimeInterval(2)).metrics
         XCTAssertEqual(records.filter { $0.outputTokens == 123 }.count, 1)
     }
 
@@ -132,6 +133,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         try handle.write(contentsOf: timedTurn(id: "later", start: 30, usageAt: 40, response: "resp-later", tokens: 600, liveSince: liveSince))
         try handle.close()
         try FileManager.default.setAttributes([.modificationDate: liveSince.addingTimeInterval(55)], ofItemAtPath: file.path)
+        await monitor.noteChanges(SessionFolderChange(paths: [file.standardizedFileURL.path]))
         var laterMetrics: [TurnMetric] = []
         var laterResponses: [LiveResponse] = []
         for step in 0..<3 {
@@ -143,6 +145,93 @@ final class CodexSessionMonitorTests: XCTestCase {
         XCTAssertEqual(Set(laterMetrics.map(\.outputTokens)), [500, 600])
         XCTAssertEqual(laterMetrics.filter { $0.delegatedOutputTokens == nil }.map(\.outputTokens), [600])
         XCTAssertEqual(laterResponses.map(\.id), ["mon-session|resp-later"])
+    }
+
+    func testNotedAppendIsReadByTheNextPollWithoutWaitingForDiscovery() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let liveSince = Date.now
+        let file = directory.appendingPathComponent("noted.jsonl")
+        try (metadata(id: "noted") + timedTurn(id: "first", start: 1, usageAt: 3, response: "r1", tokens: 100, liveSince: liveSince)).write(to: file)
+        let monitor = CodexSessionMonitor(root: directory, liveSince: liveSince)
+        let first = try await settle(monitor, at: liveSince)
+        XCTAssertEqual(first.metrics.map(\.outputTokens), [100])
+
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: timedTurn(id: "second", start: 5, usageAt: 8, response: "r2", tokens: 200, liveSince: liveSince))
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: liveSince.addingTimeInterval(2)], ofItemAtPath: file.path)
+        let silent = try await settle(monitor, at: liveSince.addingTimeInterval(2))
+        XCTAssertTrue(silent.metrics.isEmpty, "the caught-up file is only re-read once a modification is known")
+
+        let noted = await monitor.noteChanges(SessionFolderChange(paths: [file.standardizedFileURL.path]))
+        XCTAssertTrue(noted)
+        let deadline = await monitor.nextPollDeadline(now: liveSince.addingTimeInterval(2))
+        XCTAssertEqual(deadline, liveSince.addingTimeInterval(2), "a noted modification is polled at the next cadence")
+        let update = try await settle(monitor, at: liveSince.addingTimeInterval(4))
+        XCTAssertEqual(update.metrics.filter { $0.outputTokens == 200 }.count, 1)
+        XCTAssertEqual(update.responses.map(\.outputTokens), [200])
+    }
+
+    func testNotedNewFileIsDiscoveredOnTheNextPollAndIrrelevantPathsAreIgnored() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let liveSince = Date.now
+        try metadata(id: "known").write(to: directory.appendingPathComponent("known.jsonl"))
+        let monitor = CodexSessionMonitor(root: directory, liveSince: liveSince)
+        _ = try await settle(monitor, at: liveSince)
+
+        let fresh = directory.appendingPathComponent("fresh.jsonl")
+        try (metadata(id: "fresh") + timedTurn(id: "fresh", start: 1, usageAt: 3, response: "r2", tokens: 300, liveSince: liveSince)).write(to: fresh)
+        let silent = try await settle(monitor, at: liveSince.addingTimeInterval(2))
+        XCTAssertTrue(silent.metrics.isEmpty, "a new file waits for discovery unless it is reported")
+
+        let ignored = [
+            directory.appendingPathComponent("notes.txt").path,
+            directory.appendingPathComponent(".hidden/hidden.jsonl").path,
+            FileManager.default.temporaryDirectory.appendingPathComponent("elsewhere.jsonl").path,
+            directory.appendingPathComponent("missing.jsonl").path
+        ]
+        let ignoredNote = await monitor.noteChanges(SessionFolderChange(paths: Set(ignored)))
+        XCTAssertFalse(ignoredNote)
+        let idle = await monitor.nextPollDeadline(now: liveSince.addingTimeInterval(2))
+        XCTAssertNil(idle)
+
+        let noted = await monitor.noteChanges(SessionFolderChange(paths: [fresh.standardizedFileURL.path]))
+        XCTAssertTrue(noted)
+        let found = try await settle(monitor, at: liveSince.addingTimeInterval(4)).metrics
+        XCTAssertEqual(found.filter { $0.outputTokens == 300 }.count, 1)
+    }
+
+    func testMustRescanTriggersDiscovery() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let liveSince = Date.now
+        try metadata(id: "known").write(to: directory.appendingPathComponent("known.jsonl"))
+        let monitor = CodexSessionMonitor(root: directory, liveSince: liveSince)
+        _ = try await settle(monitor, at: liveSince)
+        let quiet = await monitor.nextPollDeadline(now: liveSince)
+        XCTAssertNil(quiet)
+
+        try (metadata(id: "fresh") + timedTurn(id: "fresh", start: 1, usageAt: 3, response: "r2", tokens: 300, liveSince: liveSince))
+            .write(to: directory.appendingPathComponent("fresh.jsonl"))
+        await monitor.noteChanges(SessionFolderChange(mustRescan: true))
+        let pending = await monitor.nextPollDeadline(now: liveSince.addingTimeInterval(2))
+        XCTAssertEqual(pending, liveSince.addingTimeInterval(2))
+        let found = try await settle(monitor, at: liveSince.addingTimeInterval(2)).metrics
+        XCTAssertEqual(found.filter { $0.outputTokens == 300 }.count, 1)
+    }
+
+    /// A new Codex file is read in steps (header, then content), so a few polls at one clock reading read it all.
+    private func settle(_ monitor: CodexSessionMonitor, at now: Date) async throws -> MonitorUpdate {
+        var update = MonitorUpdate()
+        for _ in 0..<4 {
+            let next = try await monitor.poll(now: now)
+            update.metrics += next.metrics
+            update.responses += next.responses
+        }
+        return update
     }
 
     private func temporaryDirectory() throws -> URL {

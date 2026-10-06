@@ -166,6 +166,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private static var maximumPollBytes: Int { CodexSessionMonitor.maximumPollBytes }
     private static var maximumFiles: Int { 2_000 }
     private static var readerBatchBytes: Int { 65_536 }
+    private static var discoveryInterval: TimeInterval { CodexSessionMonitor.discoveryInterval }
 
     private struct WatchedFile {
         var live: IncrementalJSONLMetricReader<Parser>
@@ -182,6 +183,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private let includesFile: @Sendable (URL) -> Bool
     private var files: [String: WatchedFile] = [:]
     private var lastDiscovery = Date.distantPast
+    private var needsDiscovery = false
     private var nextArchiveIndex = 0
     private(set) var rootIsAvailable = false
     private(set) var watchedFileCount = 0
@@ -210,7 +212,9 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     }
 
     func poll(now: Date = .now) throws -> MonitorUpdate {
-        if now.timeIntervalSince(lastDiscovery) >= 10 || files.isEmpty {
+        if needsDiscovery || now.timeIntervalSince(lastDiscovery) >= Self.discoveryInterval || files.isEmpty {
+            // Cleared first so a failing enumeration is retried by the safety net, not on every poll.
+            needsDiscovery = false
             try discoverFiles(now: now)
             lastDiscovery = now
         }
@@ -286,6 +290,41 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         )
         update.delegation = delegation
         return update
+    }
+
+    /// Marks what a folder watcher reported so the next poll reads it: a changed known file is serviced
+    /// again, and a new file this monitor includes or a lost event triggers discovery. Returns whether
+    /// anything is now pending.
+    @discardableResult
+    func noteChanges(_ change: SessionFolderChange) -> Bool {
+        var noted = change.mustRescan
+        if change.mustRescan { needsDiscovery = true }
+        for path in change.paths {
+            if var file = files[path] {
+                if let modified = SessionFolderChange.modificationDate(ofRegularFileAt: path) {
+                    file.modifiedAt = modified
+                    file.liveServicedModification = .distantPast
+                    files[path] = file
+                } else {
+                    needsDiscovery = true
+                }
+                noted = true
+            } else if includesFile(URL(fileURLWithPath: path)), SessionFolderChange.isDiscoverable(path, under: root),
+                      SessionFolderChange.modificationDate(ofRegularFileAt: path) != nil {
+                needsDiscovery = true
+                noted = true
+            }
+        }
+        return noted
+    }
+
+    /// `now` while any reader has bytes left to read, holds a record sequence open or discovery is due;
+    /// nil when only a new write can make a poll useful.
+    func nextPollDeadline(now: Date) -> Date? {
+        let hasWork = needsDiscovery || files.values.contains {
+            !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification || $0.live.hasPendingWork || $0.archive != nil
+        }
+        return hasWork ? now : nil
     }
 
     private func discoverFiles(now: Date) throws {

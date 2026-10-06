@@ -717,6 +717,25 @@ public actor ClaudeSessionMonitor {
         )
     }
 
+    /// Forwards to both inner monitors; each ignores the paths its include rule rejects, so primary and
+    /// subagent transcripts stay apart. Returns whether anything is now pending.
+    @discardableResult
+    public func noteChanges(_ change: SessionFolderChange) async -> Bool {
+        let notedPrimary = await primary.noteChanges(change)
+        let notedSubagents = await subagents.noteChanges(change)
+        return notedPrimary || notedSubagents
+    }
+
+    /// When to poll again if nothing else changes (see `CodexSessionMonitor.nextPollDeadline`).
+    public func nextPollDeadline(now: Date) async -> Date? {
+        let deadlines = [
+            await primary.nextPollDeadline(now: now),
+            await subagents.nextPollDeadline(now: now),
+            attributor.nextDeadline(now: now)
+        ].compactMap { $0 }
+        return deadlines.min()
+    }
+
     public func status() async -> (rootAvailable: Bool, files: Int) {
         let primaryFiles = await primary.watchedFileCount, subagentFiles = await subagents.watchedFileCount
         return (await primary.rootIsAvailable, primaryFiles + subagentFiles)

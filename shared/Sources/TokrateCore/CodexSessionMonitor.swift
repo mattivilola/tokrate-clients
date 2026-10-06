@@ -11,6 +11,8 @@ public actor CodexSessionMonitor {
     public static let maximumPollBytes = 1_048_576
     private static let maximumFiles = 2_000
     private static let readerBatchBytes = 65_536
+    /// Safety net for a folder watcher that missed a change; `noteChanges` normally triggers discovery.
+    static let discoveryInterval: TimeInterval = 300
 
     private struct WatchedFile {
         var live: JSONLFileReader
@@ -25,6 +27,7 @@ public actor CodexSessionMonitor {
     private let root: URL
     private var files: [String: WatchedFile] = [:]
     private var lastDiscovery = Date.distantPast
+    private var needsDiscovery = false
     private var nextArchiveIndex = 0
     private var attributor = DelegationAttributor()
 
@@ -44,7 +47,9 @@ public actor CodexSessionMonitor {
         func collect(_ completed: [LiveResponse]) {
             for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
         }
-        if now.timeIntervalSince(lastDiscovery) >= 10 || files.isEmpty {
+        if needsDiscovery || now.timeIntervalSince(lastDiscovery) >= Self.discoveryInterval || files.isEmpty {
+            // Cleared first so a failing enumeration is retried by the safety net, not on every poll.
+            needsDiscovery = false
             try discoverFiles(now: now)
             lastDiscovery = now
         }
@@ -123,6 +128,40 @@ public actor CodexSessionMonitor {
             metrics: DelegationAttributor.merging(metrics, finals: finals),
             responses: responses.values.sorted { $0.completedAt > $1.completedAt }
         )
+    }
+
+    /// Marks what a folder watcher reported so the next poll reads it: a changed known file is serviced
+    /// again, and a new file or a lost event triggers discovery. Returns whether anything is now pending.
+    @discardableResult
+    public func noteChanges(_ change: SessionFolderChange) -> Bool {
+        var noted = change.mustRescan
+        if change.mustRescan { needsDiscovery = true }
+        for path in change.paths {
+            if var file = files[path] {
+                if let modified = SessionFolderChange.modificationDate(ofRegularFileAt: path) {
+                    file.modifiedAt = modified
+                    file.liveServicedModification = .distantPast
+                    files[path] = file
+                } else {
+                    needsDiscovery = true
+                }
+                noted = true
+            } else if URL(fileURLWithPath: path).pathExtension.lowercased() == "jsonl", SessionFolderChange.isDiscoverable(path, under: root),
+                      SessionFolderChange.modificationDate(ofRegularFileAt: path) != nil {
+                needsDiscovery = true
+                noted = true
+            }
+        }
+        return noted
+    }
+
+    /// When the monitor needs to poll again if nothing else changes: `now` while any reader has bytes
+    /// left to read or discovery is due, else the earliest delegation transition, else nil.
+    public func nextPollDeadline(now: Date) -> Date? {
+        let hasWork = needsDiscovery || files.values.contains {
+            !$0.live.isCaughtUp || $0.modifiedAt > $0.liveServicedModification || $0.archive != nil
+        }
+        return hasWork ? now : attributor.nextDeadline(now: now)
     }
 
     /// The files that still have history to read: an archive reader in progress, a live reader short of
