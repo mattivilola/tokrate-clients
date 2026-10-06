@@ -76,6 +76,7 @@ Optional public cohort fields `recent`, `comparison`, and `signals` keep older c
 | Claude Code subagent | claude-transcript-v4 (v3 before 0.1.14) | claude-observed-subagent-turn-v1 | Subagent task prompt through its terminal response; sourceKind `subagent` |
 | Grok Build | grok-session-v2 (v1 before 0.1.15) | grok-observed-work-turn-v1 | Matched completed work-turn events and usage; includes nested agent output, plus whole-turn response speed (see "Grok Build response speed (0.1.15)") |
 | Antigravity | antigravity-conversation-v1 | antigravity-observed-execution-v1 | One finished agent execution (prompt through final answer, including tools and waiting) from the local conversation database, plus per-model-call response speed (see "Antigravity (0.1.18)") |
+| OpenCode | opencode-db-v1 | opencode-observed-turn-v1 | Prompt through final answer of a primary session from the local OpenCode database, plus per-model-call response speed and subagent sessions as delegated output (see "OpenCode (0.1.18)") |
 
 Claude/Grok TTFT and streaming rate are null. Reasoning token details are not added to output tokens. Exclude ambiguous/incomplete windows rather than fabricate timing. Claude tool-result records are not human turn starts; deduplicate repeated content blocks by API message ID. Primary turns exclude sidechains; subagent transcripts are measured separately (0.1.12, below). Grok usage timestamps record persistence after completion: require exact session/unique turn-number joins (Grok events `turn_number` is 0-based while the usage ledger `turnNumber` is 1-based, so event turn N joins ledger turn N+1), usage time from one second before to 60 seconds after completion, and no later than the next known primary start. The 60-second cap is a conservative Tokrate bound; incomplete/colliding/ambiguous joins are excluded, repeated snapshots are deduplicated, and child sessions are not separately counted. Grok model attribution requires exactly one modelUsage entry: older missing breakdowns stay Unknown even if a selected/primary model is recorded. Grok reasoning effort comes only from the session folder's `summary.json` `reasoning_effort` (64 KiB cap; nothing else is retained, and `chat_history.jsonl` is never read). Because the user can change it between turns, a turn gets an effort only when it started while Tokrate was already watching the session and the value read at start equals the value at emission; turns read during initial catch-up or after a change stay Unknown.
 
@@ -333,6 +334,7 @@ One of `cli`, `desktop`, `ide`, `sdk`, `other`, or `nil`/`null` when the source 
 | Antigravity | the folder the conversation database was found in | `desktop` | `antigravity` (the Antigravity app) |
 | | | `ide` | `antigravity-ide` |
 | | | `cli` | `antigravity-cli` (`agy`) |
+| OpenCode | none | `nil` | OpenCode's database carries no such signal. |
 
 - **Codex.** `session_meta.payload.source` is deliberately not used: real logs show it is unreliable (Codex Desktop sessions report `vscode`). The originator read from the session's `session_meta` applies to every turn of that file.
 - **Claude Code.** `entrypoint` is read the same way and at the same points as the top-level `version` is read for `clientVersion`: the user-turn start record, falling back to the turn's assistant records. The first non-empty value of the turn wins.
@@ -451,3 +453,49 @@ Each model call is one response: start = its created timestamp, end = its comple
 ### Presentation
 
 Tool name "Antigravity". Provider "Google", provider badge a filled circle in Google blue `#4285F4` with a white "G" (model prefix `gemini-` or provider `google`), letters only and no logo, like the other badges. In Settings > Sources the Mac app shows "Antigravity data folder" (default `~/.gemini`).
+
+## OpenCode (0.1.18)
+
+OpenCode (sst/opencode: the TUI, `opencode run`, its desktop app and IDE integrations) is a multi-provider coding agent. Client id `opencode`, parser `opencode-db-v1`, metric `opencode-observed-turn-v1` (label "Turn speed"; short explanation "Prompt through final answer, including tools & waiting"), sourceKind `primary`. Tool title "OpenCode", chip "OC".
+
+### Source
+
+OpenCode keeps all sessions in one SQLite database (Drizzle schema). The layout below was observed in OpenCode 1.14.21 to 1.18.31; it is not a public API, so anything malformed or missing makes Tokrate skip the record instead of guessing.
+
+- **Root.** `$XDG_DATA_HOME/opencode` when `XDG_DATA_HOME` is set, else `~/.local/share/opencode` (on every platform, Windows included, as OpenCode itself resolves it). Mac: overridable in Settings > Sources as the "OpenCode data folder". The database is exactly `<root>/opencode.db`; the older JSON `storage/` folder and every other file are ignored.
+- **Opening.** As for Antigravity: read-only `file:` URI with `mode=ro` (never `immutable=1`), busy timeout of at most 1 s, no writes. A locked, busy, corrupt or schema-mismatched database is skipped and retried with the same backoff (10 s doubling to 5 min). It is re-read when the modification time or size of `opencode.db` or `opencode.db-wal` changes.
+- **Columns read.** `session(id, parent_id, version, time_created)` and, from `message(id, session_id, time_created, time_updated, data)`, only these JSON paths extracted in SQL with `json_extract` (the full `data` text is never loaded into the app): `$.role`, `$.parentID`, `$.modelID`, `$.providerID`, `$.variant`, `$.finish`, `$.error.name`, `$.time.created`, `$.time.completed`, `$.tokens.output`, `$.tokens.reasoning`. The `part` table (prompts, responses, tool output), session titles, directories, paths, summaries and every other table are never read. Only numeric usage, timestamps, model and provider ids and the effort are kept; session and message ids are used in memory and for the record digest only.
+- **Incremental reads.** The first read takes messages with `time_created` within the 7-day retention. Later reads take messages with `time_updated ≥ watermark − 2000` (milliseconds; the watermark is the largest `time_updated` seen) and merge them into an in-memory index of message metadata, bounded to the retention window. Sessions are re-read when a message names a session not in the index. A full re-read (rebuilding the index) runs as a safety net every 5 minutes of activity, so messages OpenCode deleted (revert) leave the index.
+- **Version floor.** Only sessions whose `version` parses as `major.minor[.patch]` with `major.minor ≥ 1.14` are measured. From 1.14 OpenCode's `tokens.output` counts visible output only and `tokens.reasoning` counts reasoning separately (its own statistics add them); for older versions this is unverified.
+- **Subagent sessions.** A session with a non-null `parent_id` is a subagent (task tool) session. It produces no turns and no live responses; its output is delegated output of the primary turn that started it.
+
+### Messages
+
+An **assistant message** is one model call (one OpenCode step). Its values:
+
+- `outputTokens` = `tokens.output + tokens.reasoning` (both default to 0 when absent; a negative, non-integer or larger than 100,000,000 value makes the message malformed).
+- `start` = `time.created`, `end` = `time.completed` (milliseconds since the epoch). A message without `time.completed` is still running.
+- `failed` when `error.name` is present (for example `MessageAbortedError`).
+- model = `modelID`; effort = `variant` when it is one of the shared allowed reasoning efforts, else unknown.
+- **provider**: `providerID` mapped as `anthropic` → `anthropic`, `openai` → `openai`, `google` → `google`, `xai` → `xai`. Any other id (gateways such as `openrouter` or `opencode`, `amazon-bedrock`, `google-vertex`, vendor plans such as `kimi-for-coding`, local or custom servers) is kept as the provider string locally when it matches `^[a-z0-9][a-z0-9._-]{0,39}$` (else `unknown`), so the user sees where it ran, but such records are never shared: `SharedSample` accepts an OpenCode record only with provider `anthropic`, `openai`, `google`, `xai` or `unknown`. A missing `providerID` is `unknown`.
+
+A **user message** starts a turn. Its assistant messages are the assistant messages of the same session whose `parentID` is the user message id.
+
+### Turns
+
+A turn is emitted once, when all of these hold:
+
+1. its session is a primary session (`parent_id` null) at or above the version floor;
+2. it has at least one assistant message, every assistant message has `time.completed`, and none failed;
+3. the last assistant message (by `time.created`, then id) has a terminal `finish`: present and not `tool-calls` or `unknown`. A turn that ends in `tool-calls` or without a finish (OpenCode leaves an empty, finish-less message when the user interrupts) is incomplete or interrupted and never emitted;
+4. `durationSeconds > 0` and the turn throughput is at most 2,000 tok/s.
+
+Values: `startedAt` = the user message's `time.created`; `completedAt` = the latest `time.completed` of its assistant messages; `durationSeconds = completedAt − startedAt`; `outputTokens` = Σ assistant `outputTokens`; `reasoningOutputTokens` = Σ `tokens.reasoning`; model = the common `modelID` when all assistant messages agree, else nil; provider = the common mapped provider when all agree, else `unknown`; effort = the common effort when all agree, else unknown; `clientVersion` = the session's `version`; `surface` nil (OpenCode records no surface signal); `codexTTFTSeconds` nil; `providerRegion` nil; **id** = SHA-256 hex of `opencode|<sessionId>|<userMessageId>`.
+
+**Response speed.** Each assistant message is one response (start `time.created`, end `time.completed`) under the standard rules: not failed, at least 200 output tokens, `0 < duration ≤ 600 s`, at most 2,000 tok/s. Turn response fields sum the qualifying messages.
+
+**Live responses.** A qualifying assistant message of a primary session that completed after the monitor started is published once (tracked by message id), with its own model, provider, effort, client `opencode`, sourceKind `primary`, metric `opencode-observed-turn-v1`.
+
+### Delegated output
+
+Delegated output of primary turn T = Σ `outputTokens` of the assistant messages in sessions descending from T's session (following `parent_id` to the root) whose `time.created` lies within `[T.startedAt, T.completedAt]`. It is final when every such message has `time.completed` (failed messages count with their recorded tokens), or 30 minutes (`DELEGATION_MAX_WAIT`) after `T.completedAt`, when unfinished ones are ignored. A turn is emitted with `delegatedOutputTokens` nil while not final and re-emitted under the same id once final (the existing upsert-by-id and share-when-final rules apply); with no subagent work it is `0` at emission.
