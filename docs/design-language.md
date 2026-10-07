@@ -60,7 +60,7 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 - Track: `line` color, round caps. Active arc: `arc-start → arc-end` gradient up to the value.
 - Needle: `needle` color, round cap, hub dot in `needle`; drawn only when a value exists.
 - Readout sits in the open lower segment of the arc, fully below the hub: large tabular number + unit `tok/s` on the next line in `muted`. The needle (length ≈ radius − 14) and hub never overlap the readout.
-- Scale: the "nice" ceiling of 1.25 × the largest median within the selected value's measurement group (same coding tool, metric version and source kind), using steps 20, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000; minimum 20. Label only 0 and max. Values from other measurement definitions never stretch the scale. Response speed is a single definition across coding tools, so its scale uses the 24 h medians of every model's per-turn response speed.
+- Scale: the "nice" ceiling of 1.25 × the largest median within the selected value's measurement group (same coding tool, metric version and source kind), using steps 20, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000; minimum 20. Label only 0 and max. Values from other measurement definitions never stretch the scale. Response speed is a single definition across coding tools, so its scale uses the 24 h medians of every model's per-turn response speed. The tokrate.dev Turn speed list ranks all coding tools together, so its rows and detail gauge share one scale over the visible list.
 - Empty state: track only, readout "—", caption "Waiting for a completed turn".
 - One eased transition (≈400 ms) when the value changes; none under `prefers-reduced-motion`.
 
@@ -77,7 +77,7 @@ Primary buttons: `accent` background with white text in light mode; `accent` bac
 |---|---|
 | **Response speed** · `tok/s` (primary metric) | streaming speed, generation speed, live decode rate |
 | **Turn speed** · `tok/s` (secondary) | whole-turn throughput, t/s, tokens / whole-turn second |
-| Measurement group names: **Codex · Turn speed**, **Claude Code · Turn speed**, **Claude Code · Subagent turn speed**, **Grok Build · Work-turn speed** | "Whole-turn throughput", "Transcript-observed turn throughput" (the precise definition lives in the ⓘ explanation) |
+| Measurement group names: **Codex · Turn speed**, **Claude Code · Turn speed**, **Claude Code · Subagent turn speed**, **Grok Build · Work-turn speed** (on the web board a row shows them as a tool chip plus a Subagent or Work turn chip) | "Whole-turn throughput", "Transcript-observed turn throughput" (the precise definition lives in the ⓘ explanation) |
 | **First token** · `s` | TTFT, reported first-token wait |
 | **Turns** | eligible turns, samples |
 | **Contributors** | reporting installations, reporting keys (public); admin may say "reporting installations" |
@@ -93,7 +93,7 @@ The one-line definition shown next to a response-speed readout: "Output tokens p
 
 ### tokrate.dev public board
 1. Compact header: mark + wordmark, nav (Board, Download, Methodology), theme toggle.
-2. Hero line + **leaderboard**: one row per model (grouped across effort), median turn speed, sparkline, coverage, live dot. Coding-tool segmented control + window segmented control + "Filters" popover (provider, effort, tool version).
+2. Hero line + **leaderboard**: one ranked list per view; a row is one model (grouped across effort) with its maker badge, neutral coding-tool chip(s), median, sparkline, coverage, live dot. Turn speed keeps one row per model and coding tool and never pools tools. Coding-tool segmented control + window segmented control + "Filters" popover (provider, effort, tool version).
 3. Selecting a row opens the **model detail**: gauge, first token, range, history chart with hover, period change; effort chips switch the exact cohort.
 4. Status strip (one line): early data, stale, alerts.
 5. Usage breakdown and detailed table behind disclosures. Filter state lives in the URL.
