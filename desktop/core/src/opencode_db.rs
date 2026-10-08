@@ -11,6 +11,7 @@
 use crate::sqlite_read::open_read_only;
 use rusqlite::types::Value;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// More messages than this in the retention window are not held in memory: the newest win.
@@ -19,6 +20,8 @@ const MAX_SESSIONS: usize = 100_000;
 /// A single token count above this is not a real usage figure.
 const MAX_TOKEN_COUNT: i64 = 100_000_000;
 const SESSION_FETCH_CHUNK: usize = 400;
+/// How many generations of ancestors of a session are looked up (subagent chains are short).
+const MAX_ANCESTOR_ROUNDS: usize = 16;
 const MAX_IDENTIFIER_BYTES: usize = 120;
 /// Longest row id, session id or parent id read, in characters (the bound of the other sources'
 /// ids). A message or session with a longer one is skipped; a longer parent id never reads as "no
@@ -178,45 +181,68 @@ pub(crate) fn read_database(
     full: bool,
     known: SessionLookup,
 ) -> rusqlite::Result<Read> {
-    read_database_within(path, scope, full, known, MAX_READ_BYTES)
+    read_database_within(path, scope, full, known, Limits::DEFAULT)
 }
 
-/// [`read_database`] with its own byte budget: messages and sessions are read, newest first,
-/// until their values add up to `max_bytes`.
+/// What one read may hold: values up to `bytes` in all (messages and sessions together) and at
+/// most `sessions` session rows, whether read in full or looked up as ancestors.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    pub bytes: usize,
+    pub sessions: usize,
+}
+
+impl Limits {
+    /// Whether `read` already holds as much as the limits allow.
+    fn exhausted_by(&self, read: &Read) -> bool {
+        read.sessions.len() >= self.sessions || read.bytes_read >= self.bytes
+    }
+
+    pub const DEFAULT: Self = Self {
+        bytes: MAX_READ_BYTES,
+        sessions: MAX_SESSIONS,
+    };
+}
+
+/// [`read_database`] with its own limits: messages and sessions are read, newest messages first,
+/// until their values add up to `limits.bytes`, and no more than `limits.sessions` session rows.
 pub(crate) fn read_database_within(
     path: &Path,
     scope: MessageScope,
     full: bool,
     known: SessionLookup,
-    max_bytes: usize,
+    limits: Limits,
 ) -> rusqlite::Result<Read> {
     let mut connection = open_read_only(path)?;
     let transaction = connection.transaction()?;
     let mut read = Read::default();
-    read_messages(&transaction, scope, &mut read, max_bytes)?;
+    read_messages(&transaction, scope, &mut read, limits.bytes)?;
     if full {
-        read_all_sessions(&transaction, &mut read, max_bytes)?;
+        read_all_sessions(&transaction, &mut read, limits)?;
     } else {
-        // Sessions the new messages name, and the ancestors of those, until nothing is missing.
+        // Sessions the new messages name, and the ancestors of those, until nothing is missing or
+        // a limit is reached. Every session asked for once is remembered, so a shared ancestor is
+        // asked for once.
+        let mut asked: HashSet<String> = HashSet::new();
         let mut wanted: Vec<String> = Vec::new();
         for message in &read.messages {
-            if !known(&message.session_id) && !wanted.contains(&message.session_id) {
+            if !known(&message.session_id) && asked.insert(message.session_id.clone()) {
                 wanted.push(message.session_id.clone());
             }
         }
-        for _ in 0..16 {
+        for _ in 0..MAX_ANCESTOR_ROUNDS {
             if wanted.is_empty() {
                 break;
             }
-            let fetched = read_sessions(&transaction, &wanted, &mut read.bytes_read)?;
-            wanted = fetched
+            let first_new = read.sessions.len();
+            read_sessions(&transaction, &wanted, &mut read, limits)?;
+            wanted = read.sessions[first_new..]
                 .iter()
-                .filter_map(|session| session.parent_id.clone())
-                .filter(|parent| !known(parent) && !read.sessions.iter().any(|s| &s.id == parent))
+                .filter_map(|session| session.parent_id.as_ref())
+                .filter(|parent| !known(parent) && asked.insert((*parent).clone()))
+                .cloned()
                 .collect();
             wanted.sort();
-            wanted.dedup();
-            read.sessions.extend(fetched);
         }
     }
     Ok(read)
@@ -271,16 +297,16 @@ fn read_messages(
 fn read_all_sessions(
     connection: &Connection,
     read: &mut Read,
-    max_bytes: usize,
+    limits: Limits,
 ) -> rusqlite::Result<()> {
     let mut statement = connection.prepare(&format!(
         "{} LIMIT {}",
         session_query("1"),
-        MAX_SESSIONS + 1
+        limits.sessions + 1
     ))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
-        if read.sessions.len() >= MAX_SESSIONS || read.bytes_read >= max_bytes {
+        if limits.exhausted_by(read) {
             break;
         }
         if let Some(session) = decode_session(&row.get::<_, Value>(0)?, &row.get(1)?, &row.get(2)?)
@@ -292,27 +318,34 @@ fn read_all_sessions(
     Ok(())
 }
 
+/// Appends the sessions with these ids to `read`, until a limit is reached.
 fn read_sessions(
     connection: &Connection,
     ids: &[String],
-    bytes_read: &mut usize,
-) -> rusqlite::Result<Vec<SessionRow>> {
-    let mut found = Vec::new();
+    read: &mut Read,
+    limits: Limits,
+) -> rusqlite::Result<()> {
     for chunk in ids.chunks(SESSION_FETCH_CHUNK) {
+        if limits.exhausted_by(read) {
+            break;
+        }
         let placeholders = vec!["?"; chunk.len()].join(",");
         let mut statement =
             connection.prepare(&session_query(&format!("id IN ({placeholders})")))?;
         let mut rows = statement.query(rusqlite::params_from_iter(chunk.iter()))?;
         while let Some(row) = rows.next()? {
+            if limits.exhausted_by(read) {
+                break;
+            }
             if let Some(session) =
                 decode_session(&row.get::<_, Value>(0)?, &row.get(1)?, &row.get(2)?)
             {
-                *bytes_read += session.id.len() + session.version.len() + 16;
-                found.push(session);
+                read.bytes_read += session.id.len() + session.version.len() + 16;
+                read.sessions.push(session);
             }
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 fn approximate_size(value: &Value) -> usize {

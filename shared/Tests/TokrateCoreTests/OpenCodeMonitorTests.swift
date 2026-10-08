@@ -384,6 +384,25 @@ final class OpenCodeMonitorTests: XCTestCase {
 
     // MARK: Incremental reads
 
+    func testExtremeUpdateTimesNeitherTrapTheWatermarkNorHideLaterUpdates() async throws {
+        for (label, extreme) in [("minimum", "-9223372036854775808"), ("maximum", "9223372036854775807")] {
+            let database = try makeDatabase(in: root.appendingPathComponent(label, isDirectory: true))
+            try database.addSession("ses1")
+            try database.user("msg_u1", session: "ses1", at: 0)
+            try database.put(assistant("msg_a1", created: 1, completed: 11, output: 400, finish: "tool-calls"))
+            try database.execute("UPDATE message SET time_updated = \(extreme) WHERE id = 'msg_u1'")
+            let monitor = OpenCodeMonitor(root: root.appendingPathComponent(label, isDirectory: true), liveSince: .distantFuture)
+            _ = await monitor.poll(now: now)
+
+            // An incremental read computes its start from the watermark: it must not trap, and an
+            // ordinary later update must still be seen.
+            try database.put(assistant("msg_a2", created: 12, completed: 20, output: 300, finish: "stop"))
+            try bump(database)
+            let update = await monitor.poll(now: now.addingTimeInterval(1))
+            XCTAssertEqual(try onlyMetric(update).outputTokens, 700, label)
+        }
+    }
+
     func testALaterUpdatedMessageIsMergedAndNothingIsEmittedTwice() async throws {
         let database = try makeDatabase()
         try database.addSession("ses1")

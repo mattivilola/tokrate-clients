@@ -45,7 +45,7 @@ pub use model::{
 };
 pub use monitor::{Monitor, SourceChange, SourceFileCheckpoint};
 pub use opencode::OpenCodeMonitor;
-pub use private_file::write_private_file;
+pub use private_file::{read_private_file, write_private_file, MAX_SMALL_FILE_BYTES};
 pub use selector::{
     fallback_model, tray_reading, AutoSelector, ModelKey, SelectionMode, TrayReading,
     TrayReadingKind, AUTO_LEAD_SECONDS, AUTO_WINDOW_MINUTES,

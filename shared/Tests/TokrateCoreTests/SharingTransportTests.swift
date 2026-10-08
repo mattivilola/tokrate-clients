@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import XCTest
 @testable import TokrateCore
 
@@ -80,6 +81,20 @@ private final class StubNetwork: URLProtocol, @unchecked Sendable {
     }
 }
 
+private final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value?
+    var value: Value? { lock.withLock { stored } }
+    func set(_ value: Value) { lock.withLock { stored = value } }
+    func update(_ change: (inout Value) -> Void) where Value == Data {
+        lock.withLock {
+            var current = stored ?? Data()
+            change(&current)
+            stored = current
+        }
+    }
+}
+
 final class SharingTransportTests: XCTestCase {
     private let limit = URLSessionSharingTransport.maximumResponseBytes
     private func transport() -> URLSessionSharingTransport { URLSessionSharingTransport(protocolClasses: [StubNetwork.self]) }
@@ -96,6 +111,60 @@ final class SharingTransportTests: XCTestCase {
             XCTAssertEqual(sent.value(forHTTPHeaderField: "User-Agent"), "Tokrate/\(SharedSample.appVersion)")
             XCTAssertFalse(sent.value(forHTTPHeaderField: "User-Agent")?.contains("Darwin") ?? true)
         }
+    }
+
+    func testEveryRequestAsksForJSONInEnglishWhateverTheUsersLanguagesAre() async throws {
+        for name in ["board", "samples"] {
+            let url = StubNetwork.prepare(.init(chunks: [Data("{}".utf8)]), for: name)
+            var request = URLRequest(url: url)
+            request.setValue("de-DE,fr;q=0.8", forHTTPHeaderField: "Accept-Language")
+            _ = try await transport().send(request)
+            let sent = try XCTUnwrap(StubNetwork.request(name))
+            XCTAssertEqual(sent.value(forHTTPHeaderField: "Accept"), "application/json")
+            XCTAssertEqual(sent.value(forHTTPHeaderField: "Accept-Language"), "en")
+        }
+    }
+
+    /// What really leaves the process: a loopback server records the raw request head, which includes
+    /// the headers CFNetwork adds below URLSession and a protocol stub never sees.
+    func testTheHeadersOnTheWireCarryNoLocaleAndNoSystemVersions() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let captured = LockedBox<String>()
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: .global())
+            let received = LockedBox<Data>()
+            func receive() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, _, error in
+                    if let data { received.update { $0.append(data) } }
+                    let head = received.value ?? Data()
+                    if error != nil || head.range(of: Data("\r\n\r\n".utf8)) != nil {
+                        captured.set(String(decoding: head, as: UTF8.self))
+                        let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                    } else {
+                        receive()
+                    }
+                }
+            }
+            receive()
+        }
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+        listener.start(queue: .global())
+        XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
+        defer { listener.cancel() }
+        let port = try XCTUnwrap(listener.port?.rawValue)
+
+        let (_, code) = try await URLSessionSharingTransport().send(URLRequest(url: URL(string: "http://127.0.0.1:\(port)/board")!))
+        XCTAssertEqual(code, 200)
+        let head = try XCTUnwrap(captured.value).lowercased()
+        func header(_ name: String) -> String? {
+            head.split(separator: "\r\n").first { $0.hasPrefix(name + ":") }.map { String($0.dropFirst(name.count + 1)).trimmingCharacters(in: .whitespaces) }
+        }
+        XCTAssertEqual(header("accept"), "application/json")
+        XCTAssertEqual(header("accept-language"), "en")
+        XCTAssertEqual(header("user-agent"), "tokrate/\(SharedSample.appVersion)")
+        XCTAssertFalse(head.contains("darwin") || head.contains("cfnetwork"))
     }
 
     func testABodyUpToTheLimitIsReturnedWithItsStatus() async throws {

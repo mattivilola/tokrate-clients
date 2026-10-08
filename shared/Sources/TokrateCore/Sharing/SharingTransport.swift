@@ -17,6 +17,11 @@ public struct URLSessionSharingTransport: SharingTransport {
     /// CFNetwork and Darwin versions.
     static let userAgent = "Tokrate/\(SharedSample.appVersion)"
 
+    /// Fixed, so the user's language preferences (which URLSession would otherwise send as
+    /// `Accept-Language`) are not. `Accept-Encoding` stays the system's.
+    static let acceptLanguage = "en"
+    static let accept = "application/json"
+
     private let session: URLSession
     public init() {
         self.init(protocolClasses: nil)
@@ -34,6 +39,8 @@ public struct URLSessionSharingTransport: SharingTransport {
     public func send(_ request: URLRequest) async throws -> (Data, Int) {
         var request = request
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(Self.accept, forHTTPHeaderField: "Accept")
+        request.setValue(Self.acceptLanguage, forHTTPHeaderField: "Accept-Language")
         let (bytes, response) = try await session.bytes(for: request)
         guard let response = response as? HTTPURLResponse,
               response.expectedContentLength <= Self.maximumResponseBytes else { throw URLError(.badServerResponse) }

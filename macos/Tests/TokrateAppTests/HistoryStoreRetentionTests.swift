@@ -119,6 +119,35 @@ final class HistoryStoreRetentionTests: XCTestCase {
         XCTAssertEqual(try permissions(), 0o600)
     }
 
+    func testAHistoryFileAboveTheSizeCapOrThatIsNotARegularFileLoadsAsNoHistory() throws {
+        try writeHistory([record("kept", expiresIn: 3_600)])
+        XCTAssertEqual(makeStore().records.map(\.id), ["kept"])
+
+        // One byte over the cap, even though it begins like a valid history.
+        let valid = try Data(contentsOf: historyURL)
+        var oversized = valid
+        oversized.append(Data(repeating: 0x20, count: HistoryStore.maximumHistoryBytes + 1 - valid.count))
+        XCTAssertEqual(oversized.count, HistoryStore.maximumHistoryBytes + 1)
+        try oversized.write(to: historyURL)
+        XCTAssertTrue(makeStore().records.isEmpty)
+        // At the cap it is read.
+        try Data(valid + Data(repeating: 0x20, count: HistoryStore.maximumHistoryBytes - valid.count)).write(to: historyURL)
+        XCTAssertEqual(makeStore().records.map(\.id), ["kept"])
+
+        // A FIFO is not opened, so the store does not wait for a writer.
+        try FileManager.default.removeItem(at: historyURL)
+        XCTAssertEqual(mkfifo(historyURL.path, 0o600), 0)
+        XCTAssertTrue(makeStore().records.isEmpty)
+
+        // A link to a regular history is followed.
+        try FileManager.default.removeItem(at: historyURL)
+        let target = root.appendingPathComponent("real-history.json")
+        try writeHistory([record("linked", expiresIn: 3_600)])
+        try FileManager.default.moveItem(at: historyURL, to: target)
+        try FileManager.default.createSymbolicLink(at: historyURL, withDestinationURL: target)
+        XCTAssertEqual(makeStore().records.map(\.id), ["linked"])
+    }
+
     private func waitUntil(timeout: TimeInterval = 10, _ condition: () -> Bool) async throws {
         let deadline = Date.now.addingTimeInterval(timeout)
         while !condition() {

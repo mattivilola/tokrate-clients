@@ -17,6 +17,11 @@ private func fail(_ message: String? = nil, status: Int32 = 2) -> Never {
     Foundation.exit(status)
 }
 
+private func refuse(_ message: String) -> Never {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    Foundation.exit(1)
+}
+
 private func say(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
 }
@@ -107,10 +112,17 @@ enum TokrateCommand {
         let start = now.addingTimeInterval(-TimeInterval(options.days) * 86_400)
         let end = options.before ?? now
         guard start < end else { fail("--before must be later than the start of the --days window.") }
+        // Before the replay, so a refused destination costs nothing.
+        let folders = SourceFolders.defaults()
+        do {
+            _ = try ExportDestination.validated(options.out, sourceFolders: folders)
+        } catch {
+            refuse(String(describing: error))
+        }
 
         // Reads session files only. It never contacts the network and never touches the signing key,
         // preferences, checkpoints, consent records or local history.
-        let replay = await HistoryReplay.run(folders: .defaults(), retention: TimeInterval(options.days) * 86_400)
+        let replay = await HistoryReplay.run(folders: folders, retention: TimeInterval(options.days) * 86_400)
         let result = HistoryExport.samples(from: replay.metrics, window: start..<end)
 
         do {
@@ -120,10 +132,11 @@ enum TokrateCommand {
                 output.append(try encoder.encode(sample))
                 output.append(0x0A)
             }
-            try output.write(to: options.out, options: .atomic)
+            try ExportDestination.write(output, to: options.out, sourceFolders: folders)
+        } catch let rejection as ExportDestination.Rejection {
+            refuse(String(describing: rejection))
         } catch {
-            FileHandle.standardError.write(Data("Unable to write the export file.\n".utf8))
-            Foundation.exit(1)
+            refuse("Unable to write the export file.")
         }
         printSummary(result, replay: replay, start: start, end: end)
     }

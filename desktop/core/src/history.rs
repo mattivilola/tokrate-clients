@@ -1,10 +1,9 @@
 use crate::model::TurnMetric;
-use crate::private_file::write_private_file;
+use crate::private_file::{read_private_file, write_private_file};
 use crate::sources::SourceCheckpoints;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
 
@@ -35,19 +34,12 @@ impl History {
     pub const MAX_RECORDS: usize = 50_000;
 
     pub fn load<P: AsRef<Path>>(path: P, now: DateTime<Utc>) -> io::Result<Self> {
-        let path = path.as_ref();
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
+        // Regular file, size-capped on the open handle (see `read_private_file`).
+        let data = match read_private_file(path.as_ref(), MAX_HISTORY_BYTES) {
+            Ok(data) => data,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(error),
         };
-        if metadata.len() > MAX_HISTORY_BYTES {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "local history exceeds the size limit",
-            ));
-        }
-        let data = fs::read(path)?;
         let persisted: PersistedHistory = serde_json::from_slice(&data)
             .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
         if persisted.schema_version != SCHEMA_VERSION {

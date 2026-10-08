@@ -55,6 +55,10 @@ final class OpenCodeDatabase {
     /// A read stops after this many bytes of values, keeping the newest messages like
     /// `maximumReadMessages` does.
     static let maximumReadBytes = 64 * 1_048_576
+    /// Session rows one read may hold, read as ancestors of the messages' sessions.
+    static let maximumReadSessions = 100_000
+    /// How many generations of ancestors of a session are looked up (subagent chains are short).
+    static let maximumAncestorRounds = 16
     private static let sessionChunk = 400
     private static let messageColumnCount: Int32 = 18
 
@@ -119,15 +123,63 @@ final class OpenCodeDatabase {
         try database.readTransaction(body)
     }
 
+    /// What one read may hold: values up to `bytes` in all (messages and sessions together), at most
+    /// `messages` message rows and `sessions` session rows, whether found as the sessions of the
+    /// messages or as their ancestors.
+    struct Limits: Sendable {
+        var bytes = OpenCodeDatabase.maximumReadBytes
+        var messages = OpenCodeDatabase.maximumReadMessages
+        var sessions = OpenCodeDatabase.maximumReadSessions
+    }
+
+    /// Which messages a read takes.
+    enum Scope: Sendable {
+        /// Everything created at or after this time (milliseconds since the epoch).
+        case createdSince(Int64)
+        /// Everything updated at or after `updated`, restricted to messages created at or after `created`.
+        case updatedSince(Int64, createdSince: Int64)
+    }
+
+    /// What one read returned.
+    struct Read: Sendable {
+        var messages: [MessageRow] = []
+        /// The sessions of the messages that `known` lacked, and their ancestors.
+        var sessions: [SessionRow] = []
+        /// Approximate bytes of values read.
+        var bytesRead = 0
+    }
+
+    /// The newest messages of `scope` within `limits`, then the sessions they name that `known` lacks
+    /// and those sessions' ancestors, until nothing is missing, `maximumAncestorRounds` rounds have
+    /// passed or a limit is reached. One budget covers every round.
+    func read(_ scope: Scope, known: Set<String> = [], limits: Limits = Limits()) throws -> Read {
+        var read = Read()
+        let (messages, bytes) = try readMessages(scope, limits: limits)
+        read.messages = messages
+        read.bytesRead = bytes
+        // Every id asked for once is remembered, so a shared ancestor is asked for once.
+        var asked = Set<String>()
+        var wanted: [String] = []
+        for message in messages where !known.contains(message.sessionID) && asked.insert(message.sessionID).inserted {
+            wanted.append(message.sessionID)
+        }
+        for _ in 0..<Self.maximumAncestorRounds where !wanted.isEmpty {
+            let firstNew = read.sessions.count
+            try readSessions(ids: wanted, into: &read, limits: limits)
+            wanted = read.sessions[firstNew...]
+                .compactMap(\.parentID)
+                .filter { !known.contains($0) && asked.insert($0).inserted }
+                .sorted()
+        }
+        return read
+    }
+
     /// The newest messages created at or after `milliseconds`, for a full read. More than `limit` in the
     /// window, or than `maximumBytes` of values, are not held in memory: the newest win.
     func messages(
         createdSince milliseconds: Int64, limit: Int = maximumReadMessages, maximumBytes: Int = maximumReadBytes
     ) throws -> [MessageRow] {
-        try readMessages(
-            Self.messageSelect(filter: "m.time_created >= ?1", limit: limit),
-            bindings: [.integer(milliseconds)], limit: limit, maximumBytes: maximumBytes
-        )
+        try readMessages(.createdSince(milliseconds), limits: Limits(bytes: maximumBytes, messages: limit)).rows
     }
 
     /// The newest messages updated at or after `updated` and created at or after `created`, for an
@@ -136,33 +188,50 @@ final class OpenCodeDatabase {
         updatedSince updated: Int64, createdSince created: Int64, limit: Int = maximumReadMessages,
         maximumBytes: Int = maximumReadBytes
     ) throws -> [MessageRow] {
-        try readMessages(
-            Self.messageSelect(filter: "m.time_updated >= ?1 AND m.time_created >= ?2", limit: limit),
-            bindings: [.integer(updated), .integer(created)], limit: limit, maximumBytes: maximumBytes
-        )
+        try readMessages(.updatedSince(updated, createdSince: created), limits: Limits(bytes: maximumBytes, messages: limit)).rows
     }
 
-    private func readMessages(_ sql: String, bindings: [SQLiteValue], limit: Int, maximumBytes: Int) throws -> [MessageRow] {
+    private func readMessages(_ scope: Scope, limits: Limits) throws -> (rows: [MessageRow], bytes: Int) {
+        let sql: String, bindings: [SQLiteValue]
+        switch scope {
+        case .createdSince(let created):
+            sql = Self.messageSelect(filter: "m.time_created >= ?1", limit: limits.messages)
+            bindings = [.integer(created)]
+        case .updatedSince(let updated, let created):
+            sql = Self.messageSelect(filter: "m.time_updated >= ?1 AND m.time_created >= ?2", limit: limits.messages)
+            bindings = [.integer(updated), .integer(created)]
+        }
         var rows: [MessageRow] = []
         var bytes = 0
         try database.forEachRow(sql, bindings: bindings) { row in
-            if rows.count >= limit || bytes >= maximumBytes { return .stop }
+            if rows.count >= limits.messages || bytes >= limits.bytes { return .stop }
             bytes += row.approximateBytes(columns: Self.messageColumnCount)
             if let message = Self.messageRow(row) { rows.append(message) }
             return .next
         }
-        return rows
+        return (rows, bytes)
     }
 
     /// The sessions with these ids; ids that do not exist are simply absent from the result. A session
     /// whose id or parent id is too long is skipped, and so are its messages. A version that is too long
     /// reads as empty: the session stays in the tree but is not measured.
     func sessions(ids: [String]) throws -> [SessionRow] {
-        var result: [SessionRow] = []
+        var read = Read()
+        try readSessions(ids: ids, into: &read, limits: Limits())
+        return read.sessions
+    }
+
+    /// Appends the sessions with these ids to `read` until a limit is reached.
+    private func readSessions(ids: [String], into read: inout Read, limits: Limits) throws {
+        func exhausted(_ read: Read) -> Bool { read.sessions.count >= limits.sessions || read.bytesRead >= limits.bytes }
         for start in stride(from: 0, to: ids.count, by: Self.sessionChunk) {
+            if exhausted(read) { return }
             let chunk = Array(ids[start..<min(start + Self.sessionChunk, ids.count)])
             let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ",")
-            result += try database.query(
+            var found: [SessionRow] = []
+            var bytes = read.bytesRead
+            var count = read.sessions.count
+            try database.forEachRow(
                 """
                 SELECT id, CASE WHEN typeof(parent_id) = 'text' THEN parent_id END,
                     CASE WHEN typeof(version) = 'text' THEN
@@ -173,12 +242,18 @@ final class OpenCodeDatabase {
                 """,
                 bindings: chunk.map { .text($0) }
             ) { row in
-                guard let id = row.text(0) else { return nil }
+                if count >= limits.sessions || bytes >= limits.bytes { return .stop }
+                guard let id = row.text(0) else { return .next }
                 // An empty parent id is no parent.
-                return SessionRow(id: id, parentID: row.text(1).flatMap { $0.isEmpty ? nil : $0 }, version: row.text(2))
+                let session = SessionRow(id: id, parentID: row.text(1).flatMap { $0.isEmpty ? nil : $0 }, version: row.text(2))
+                bytes += id.utf8.count + (session.version?.utf8.count ?? 0) + 16
+                count += 1
+                found.append(session)
+                return .next
             }
+            read.sessions += found
+            read.bytesRead = bytes
         }
-        return result
     }
 
     // MARK: Row mapping

@@ -277,6 +277,90 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(status.sessions, 2)
     }
 
+    func testGrokNestingNeverGrowsPastItsBoundWhateverTheLogContains() throws {
+        let timestamp = "2026-10-03T20:00:00Z"
+        func start(_ relationship: String, number: Int = 0, session: String? = nil) throws -> Data {
+            try json(["type": "turn_started", "ts": timestamp, "session_id": session ?? sessionID, "turn_number": number, "session_relationship": relationship, "schema_version": "1.0"])
+        }
+        // Nested agents past the bound.
+        var parser = GrokSessionParser(sourceIdentity: "grok-test")
+        _ = parser.consume(line: try start("primary"))
+        for _ in 0..<10_000 {
+            _ = parser.consume(line: try start("subagent"))
+            XCTAssertLessThanOrEqual(parser.frameDepth, 64)
+        }
+        XCTAssertLessThanOrEqual(parser.frameDepth, 64)
+
+        // Starts that cannot be paired: another session, an unknown relationship, a second primary,
+        // an unreadable start.
+        for lines in [
+            [try start("primary"), try start("primary", number: 1, session: "other-session")],
+            [try start("primary"), try start("sidekick")],
+            [try start("primary"), try start("primary", number: 1)],
+            [try start("primary"), try json(["type": "turn_started", "schema_version": "1.0"])]
+        ] {
+            var parser = GrokSessionParser(sourceIdentity: "grok-test")
+            _ = parser.consume(line: lines[0])
+            for _ in 0..<10_000 { _ = parser.consume(line: lines[1]) }
+            XCTAssertLessThanOrEqual(parser.frameDepth, 2)
+        }
+
+        // The discarded turn is lost, the next end marker ends the discarding, and a later turn is read.
+        var after = GrokSessionParser(sourceIdentity: "grok-test")
+        _ = after.consume(line: try start("primary", number: 0))
+        for _ in 0..<100 { _ = after.consume(line: try start("subagent")) }
+        for _ in 0..<70 { _ = after.consume(line: try start("primary", number: 9)) }
+        _ = after.consume(line: try grokEnd(timestamp: "2026-10-03T20:00:05Z", outcome: "completed"))
+        XCTAssertEqual(after.frameDepth, 0)
+        _ = after.consume(line: try start("primary", number: 1))
+        XCTAssertEqual(after.frameDepth, 1, "the next primary turn is tracked again")
+    }
+
+    func testGrokMonitorWatchesAtMostAsManySessionsAsTheDesktopClientAndAReplayScalesThat() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for index in 0..<130 {
+            let folder = root.appendingPathComponent("session-\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data().write(to: folder.appendingPathComponent("events.jsonl"))
+        }
+        XCTAssertEqual(GrokSessionMonitor.maximumSessions, 128)
+        let live = GrokSessionMonitor(root: root)
+        _ = try await live.poll(now: .now)
+        let liveStatus = await live.status()
+        XCTAssertEqual(liveStatus.sessions, 128)
+        let replay = GrokSessionMonitor(root: root, scope: .replay(retention: MetricHistory.retention))
+        _ = try await replay.poll(now: .now)
+        let replayStatus = await replay.status()
+        XCTAssertEqual(replayStatus.sessions, 130)
+    }
+
+    func testGrokMonitorReconcilesTheUsageLedgerAsItIsWhenItSettlesNotAsItWasFirstRead() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date.now
+        let started = iso8601(now.addingTimeInterval(-8)), ended = iso8601(now.addingTimeInterval(-5)), updated = iso8601(now.addingTimeInterval(-4))
+        try writeGrokSession(directory: root, session: "ledger-session", number: 1, startedAt: started, endedAt: ended, updatedAt: updated)
+        let usageURL = root.appendingPathComponent("usage.json")
+        let monitor = GrokSessionMonitor(root: root)
+        var records = try await monitor.poll(now: now)
+
+        // The ledger is rewritten (50 output tokens became 80) before it has settled.
+        let ledger: [String: Any] = [
+            "sessionId": "ledger-session", "updatedAt": updated,
+            "turns": [["turnNumber": 2, "endedAt": ended, "outputTokens": 80, "reasoningTokens": 10, "modelCalls": 1, "turnCount": 1, "usageIsIncomplete": false, "modelUsage": ["grok-4": ["outputTokens": 80]]]]
+        ]
+        try JSONSerialization.data(withJSONObject: ledger).write(to: usageURL)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(2)], ofItemAtPath: usageURL.path)
+        await monitor.noteChanges(SessionFolderChange(paths: [usageURL.standardizedFileURL.path]))
+        records += try await monitor.poll(now: now.addingTimeInterval(4))
+        XCTAssertTrue(records.isEmpty, "the changed ledger starts its settling again")
+        records += try await monitor.poll(now: now.addingTimeInterval(8.5))
+        XCTAssertEqual(records.map(\.outputTokens), [80], "the first read's 50 tokens are never reconciled")
+    }
+
     func testGrokMonitorServicesReportedChangesWithoutWaitingForDiscoveryAndSchedulesTheSnapshotSettle() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let known = root.appendingPathComponent("known", isDirectory: true)

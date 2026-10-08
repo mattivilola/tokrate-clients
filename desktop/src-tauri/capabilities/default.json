@@ -1,6 +1,29 @@
 {
   "identifier": "default",
-  "description": "Only the bundled local dashboard windows (tray flyout and full history) can use the narrow application commands.",
-  "windows": ["main", "history"],
-  "permissions": ["core:default"]
+  "description": "The bundled local dashboard windows (tray flyout and full history) may call only the application commands the UI uses. They get no Tauri core, window, menu, tray, event or path permissions: the tray and menus are built by the Rust shell.",
+  "windows": [
+    "main",
+    "history"
+  ],
+  "permissions": [
+    "allow-snapshot",
+    "allow-update-settings",
+    "allow-record-sharing-consent",
+    "allow-set-dashboard-filters",
+    "allow-retry-sharing",
+    "allow-sent-example",
+    "allow-update-preferences",
+    "allow-set-automatic-update-checks",
+    "allow-check-update",
+    "allow-check-update-automatically",
+    "allow-install-update",
+    "allow-restart-after-update",
+    "allow-choose-folder",
+    "allow-reset-folder",
+    "allow-open-history",
+    "allow-hide-flyout",
+    "allow-open-website",
+    "allow-smoke-complete",
+    "allow-quit"
+  ]
 }

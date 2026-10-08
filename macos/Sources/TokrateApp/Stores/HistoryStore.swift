@@ -129,6 +129,10 @@ final class HistoryStore {
     @ObservationIgnored private let defaultFolders: [SourceFolderKind: URL]
     @ObservationIgnored private var securityScopedFolders: [SourceFolderKind: URL] = [:]
 
+    /// The largest history file that is loaded (the Windows/Linux client's bound; 50,000 records are far
+    /// below it). A larger file, or one that is not a regular file, is read like a corrupt one: as no history.
+    static let maximumHistoryBytes = 64 * 1_048_576
+
     var records: [TurnMetric] { history.records }
     var availableClients: [String] {
         Array(Set(history.records.map(\.client))).sorted()
@@ -197,7 +201,7 @@ final class HistoryStore {
         decoder.dateDecodingStrategy = .iso8601
         if let initialRecords {
             history = MetricHistory(records: initialRecords)
-        } else if let data = try? Data(contentsOf: self.persistenceURL),
+        } else if let data = try? RegularFile.read(self.persistenceURL, maximumBytes: Self.maximumHistoryBytes),
            let persisted = try? decoder.decode(PersistedHistory.self, from: data),
            persisted.schemaVersion == 1 {
             history = MetricHistory(records: persisted.records)

@@ -17,6 +17,8 @@ public actor OpenCodeMonitor {
     static let fullReadInterval: TimeInterval = 300
     /// Later reads start this far before the watermark, as the contract specifies, in milliseconds.
     static let watermarkOverlapMilliseconds: Int64 = 2_000
+    /// The furthest ahead of the clock a message's update time may move the watermark.
+    static let maximumWatermarkLeadMilliseconds: Int64 = 86_400_000
     static let maximumIndexedMessages = 200_000
     private static let maximumRememberedItems = 16_384
     private static let initialRetryDelay: TimeInterval = 10
@@ -111,11 +113,6 @@ public actor OpenCodeMonitor {
         rootIsAvailable = signature != nil
     }
 
-    private struct Snapshot {
-        var messages: [OpenCodeDatabase.MessageRow] = []
-        var sessions: [String: OpenCodeDatabase.SessionRow] = [:]
-    }
-
     /// Reads and merges what changed. `false` (nothing applied, retried with backoff) when the database
     /// could not be opened or read.
     private func read(signature: DatabaseFileSignature, now: Date) -> Bool {
@@ -124,22 +121,16 @@ public actor OpenCodeMonitor {
         let full = watermark == nil || fullReadDue
         let cutoff = Int64((now.timeIntervalSince1970 - scope.retention) * 1_000)
         let known = full ? [] : Set(sessions.keys)
+        // The watermark starts at 0 and never goes below it, so this cannot underflow.
         let from = (watermark ?? 0) - Self.watermarkOverlapMilliseconds
-        let snapshot: Snapshot
+        let snapshot: OpenCodeDatabase.Read
         do {
             let database = try OpenCodeDatabase(url: Self.databaseURL(root: root))
             defer { database.close() }
             snapshot = try database.readTransaction {
-                var snapshot = Snapshot()
-                snapshot.messages = full ? try database.messages(createdSince: cutoff) : try database.messages(updatedSince: from, createdSince: cutoff)
-                // Sessions the index lacks, then their ancestors (a subagent's parents lead to the primary session).
-                var wanted = Set(snapshot.messages.map(\.sessionID)).subtracting(known)
-                for _ in 0..<16 where !wanted.isEmpty {
-                    let fetched = try database.sessions(ids: Array(wanted))
-                    for row in fetched { snapshot.sessions[row.id] = row }
-                    wanted = Set(fetched.compactMap(\.parentID)).subtracting(snapshot.sessions.keys).subtracting(known)
-                }
-                return snapshot
+                // The messages, then the sessions the index lacks and their ancestors (a subagent's
+                // parents lead to the primary session), all within one budget.
+                try database.read(full ? .createdSince(cutoff) : .updatedSince(from, createdSince: cutoff), known: known)
             }
         } catch {
             failureCount += 1
@@ -154,11 +145,15 @@ public actor OpenCodeMonitor {
             sessions.removeAll(keepingCapacity: true)
             lastFullRead = now
         }
-        for (id, row) in snapshot.sessions { sessions[id] = OpenCodeSession(row: row) }
+        for row in snapshot.sessions { sessions[row.id] = OpenCodeSession(row: row) }
+        // A row's `time_updated` is the database's to set: one in the far future would hide every later
+        // update from the incremental reads, so the watermark ignores anything beyond a day ahead (such
+        // a row is simply read again each time), and a negative one never takes it below 0.
+        let ceiling = Int64(now.timeIntervalSince1970 * 1_000) + Self.maximumWatermarkLeadMilliseconds
         for row in snapshot.messages {
             let message = OpenCodeMessage(row: row)
             messages[message.id] = message
-            watermark = max(watermark ?? row.timeUpdated, row.timeUpdated)
+            watermark = max(watermark ?? 0, row.timeUpdated <= ceiling ? row.timeUpdated : 0)
         }
         prune(cutoff: cutoff)
         return true

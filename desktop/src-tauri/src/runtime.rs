@@ -217,47 +217,62 @@ pub struct Polled {
 impl Runtime {
     pub fn load(dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&dir)?;
-        let (settings, status, consent_prompt_required) =
-            match std::fs::read(dir.join("settings.json")) {
-                Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
-                    Ok(mut s) if [1, 7].contains(&s.days) => {
-                        s.selection =
-                            SelectionMode::normalize(&s.selection).unwrap_or_else(|| "auto".into());
-                        let requires_reconfirmation = s.sharing && !s.sharing_authorized();
-                        if requires_reconfirmation {
-                            s.sharing = false;
-                        }
-                        let prompt = requires_reconfirmation
-                            && s.sharing_consent
-                                .as_ref()
-                                .map_or(true, |consent| !consent.notice_is_current());
-                        (
-                            s,
-                            if requires_reconfirmation {
-                                "Sharing is off until you review the contribution notice."
-                            } else {
-                                "Starting…"
-                            },
-                            prompt,
-                        )
+        let (settings, status, consent_prompt_required) = match tokrate_core::read_private_file(
+            dir.join("settings.json"),
+            tokrate_core::MAX_SMALL_FILE_BYTES,
+        ) {
+            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+                Ok(mut s) if [1, 7].contains(&s.days) => {
+                    s.selection =
+                        SelectionMode::normalize(&s.selection).unwrap_or_else(|| "auto".into());
+                    let requires_reconfirmation = s.sharing && !s.sharing_authorized();
+                    if requires_reconfirmation {
+                        s.sharing = false;
                     }
-                    _ => (
-                        Settings::default(),
-                        "Settings could not be read. Sharing is off; review your settings.",
-                        false,
-                    ),
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                    let prompt = requires_reconfirmation
+                        && s.sharing_consent
+                            .as_ref()
+                            .map_or(true, |consent| !consent.notice_is_current());
+                    (
+                        s,
+                        if requires_reconfirmation {
+                            "Sharing is off until you review the contribution notice."
+                        } else {
+                            "Starting…"
+                        },
+                        prompt,
+                    )
+                }
+                _ => (
                     Settings::default(),
-                    "Choose whether Tokrate may contribute measurements.",
-                    true,
-                ),
-                Err(_) => (
-                    Settings::default(),
-                    "Settings unavailable. Sharing is off.",
+                    "Settings could not be read. Sharing is off; review your settings.",
                     false,
                 ),
-            };
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                Settings::default(),
+                "Choose whether Tokrate may contribute measurements.",
+                true,
+            ),
+            // A pipe, folder or oversize file is as unusable as a corrupt one.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+                ) =>
+            {
+                (
+                    Settings::default(),
+                    "Settings could not be read. Sharing is off; review your settings.",
+                    false,
+                )
+            }
+            Err(_) => (
+                Settings::default(),
+                "Settings unavailable. Sharing is off.",
+                false,
+            ),
+        };
         let loaded_history = History::load(&dir.join("history.json"), Utc::now());
         let history_read_error = loaded_history.is_err();
         let history = loaded_history.unwrap_or_default();
@@ -1285,6 +1300,39 @@ mod tests {
             assert_eq!(user_agents, [format!("Tokrate/{APP_VERSION}")]);
         }
         assert!(!requests.concat().contains("reqwest"));
+    }
+    /// Settings that are a pipe or larger than the cap are unreadable like corrupt ones: defaults,
+    /// sharing off, no consent prompt, and no wait for a writer.
+    #[cfg(unix)]
+    #[test]
+    fn settings_that_are_a_pipe_or_oversize_fall_back_to_defaults_with_sharing_off() {
+        use crate::test_support::{make_fifo, within_seconds};
+        let fifo_dir = temporary();
+        make_fifo(&fifo_dir.join("settings.json"));
+        let big_dir = temporary();
+        let big = std::fs::File::create(big_dir.join("settings.json")).unwrap();
+        big.set_len(tokrate_core::MAX_SMALL_FILE_BYTES + 1).unwrap();
+        drop(big);
+        // A small corrupt file for comparison.
+        let corrupt_dir = temporary();
+        std::fs::write(corrupt_dir.join("settings.json"), b"{broken").unwrap();
+
+        let loaded = |dir: PathBuf| within_seconds(move || Runtime::load(dir).unwrap());
+        let corrupt = loaded(corrupt_dir.clone());
+        for dir in [&fifo_dir, &big_dir] {
+            let runtime = loaded(dir.clone());
+            assert!(!runtime.settings.sharing);
+            assert!(!runtime.settings.sharing_authorized());
+            assert!(!runtime.consent_prompt_required);
+            assert_eq!(runtime.status, corrupt.status);
+            assert_eq!(
+                runtime.status,
+                "Settings could not be read. Sharing is off; review your settings."
+            );
+        }
+        for dir in [fifo_dir, big_dir, corrupt_dir] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
     #[cfg(unix)]
     #[test]

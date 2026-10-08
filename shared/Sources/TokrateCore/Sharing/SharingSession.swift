@@ -5,10 +5,13 @@ import Observation
 ///
 /// Uploads leave in slots: the 5-minute UTC boundaries (epoch seconds divisible by 300), each plus a
 /// random delay drawn once per slot. A sample is assigned the first slot at or after both the moment
-/// it was queued and the end of its own observation bucket (`SharedSample.observedAt`), and waits in
-/// the memory queue until that slot's time. So the upload time says nothing more about when a turn
-/// finished than its bucket does, also for a turn queued long after its bucket closed (a primary turn
-/// waits for its delegated total) and for samples of different buckets queued in the same period.
+/// it was queued and one full period after the end of its own observation bucket
+/// (`SharedSample.observedAt` + 600 s), and waits in the memory queue until that slot's time. So the
+/// upload time says nothing more about when a turn finished than its bucket does: every turn of a
+/// bucket that is ready within one period after it closes (a primary turn waits about 30 s for its
+/// delegated total) leaves in the same slot whenever inside the bucket it finished, a turn queued
+/// much later leaves in the first slot after it was queued, and samples of different buckets queued
+/// in the same period share a slot.
 @MainActor @Observable
 public final class SharingSession {
     /// The length of an observation bucket and of an upload slot (contract "Privacy").
@@ -180,10 +183,10 @@ public final class SharingSession {
     }
 
     /// When the sample may leave: its slot's boundary plus the slot's random delay. The slot is the first
-    /// 5-minute UTC boundary at or after both the moment of queueing and the end of the sample's bucket;
-    /// its delay is drawn the first time the slot is needed.
+    /// 5-minute UTC boundary at or after both the moment of queueing and the end of the sample's bucket
+    /// plus one full period; its delay is drawn the first time the slot is needed.
     private func uploadableAt(of sample: SharedSample, queuedAt: Date) -> Date {
-        let earliest = max(queuedAt.timeIntervalSince1970, sample.observedAt.timeIntervalSince1970 + Self.bucketSeconds)
+        let earliest = max(queuedAt.timeIntervalSince1970, sample.observedAt.timeIntervalSince1970 + 2 * Self.bucketSeconds)
         let slot = Date(timeIntervalSince1970: (earliest / Self.bucketSeconds).rounded(.up) * Self.bucketSeconds)
         let jitter: TimeInterval
         if let known = slotJitter[slot] {

@@ -1951,8 +1951,8 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let recent = metric("recent", now + Duration::seconds(2));
     queue.enqueue(&[old, recent.clone()], now + Duration::seconds(3));
     assert_eq!(queue.len(), 1);
-    let first = queue.batch(now + Duration::minutes(7));
-    let retry = queue.batch(now + Duration::minutes(7));
+    let first = queue.batch(now + Duration::minutes(12));
+    let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
     assert_eq!(first[0].app_version, "0.1.19");
     queue.disable();
@@ -5334,7 +5334,7 @@ fn sharing_queue_waits_for_final_primary_turns_and_shares_each_turn_once() {
         at + Duration::seconds(41),
     );
     assert_eq!(queue.len(), 2);
-    let batch = queue.batch(at + Duration::minutes(7));
+    let batch = queue.batch(at + Duration::minutes(12));
     let delegated: Vec<Option<i64>> = batch
         .iter()
         .map(|sample| sample.delegated_output_tokens)
@@ -8615,26 +8615,28 @@ fn queue_with_jitter(
 }
 
 #[test]
-fn a_sample_is_not_uploaded_before_its_period_ended_plus_its_delay() {
+fn a_sample_is_not_uploaded_before_a_full_period_after_its_own_plus_its_delay() {
     let (mut queue, _) = queue_with_jitter(30);
     queue.enable(time("2026-10-03T09:59:00Z"));
-    // Completed in the period 10:00:00 to 10:05:00.
+    // Completed in the period 10:00:00 to 10:05:00 and queued at once.
     let completed = time("2026-10-03T10:03:47Z");
     queue.enqueue(&[metric("turn", completed)], completed);
     assert_eq!(queue.len(), 1);
-    let eligible = time("2026-10-03T10:05:30Z");
+    let eligible = time("2026-10-03T10:10:30Z");
     assert_eq!(queue.next_eligible_after(completed), Some(eligible));
-    // Neither the period's own end nor the second before the delay has passed.
+    // Neither the period's own end, the next boundary nor the second before the delay.
     for early in [
         "2026-10-03T10:03:48Z",
         "2026-10-03T10:05:00Z",
-        "2026-10-03T10:05:29Z",
+        "2026-10-03T10:05:30Z",
+        "2026-10-03T10:10:00Z",
+        "2026-10-03T10:10:29Z",
     ] {
         assert!(queue.batch(time(early)).is_empty(), "{early}");
     }
     assert_eq!(queue.len(), 1, "waiting samples stay queued");
     assert_eq!(
-        queue.next_eligible_after(time("2026-10-03T10:05:29Z")),
+        queue.next_eligible_after(time("2026-10-03T10:10:29Z")),
         Some(eligible)
     );
     // From the eligible instant on it leaves, and an unacknowledged one is offered again.
@@ -8655,32 +8657,40 @@ fn a_sample_is_not_uploaded_before_its_period_ended_plus_its_delay() {
 }
 
 #[test]
-fn the_samples_of_one_slot_share_one_delay_and_leave_in_one_batch() {
+fn every_normally_settled_turn_of_a_period_leaves_in_the_same_slot() {
     let (mut queue, draws) = queue_with_jitter(17);
     queue.enable(time("2026-10-03T09:59:00Z"));
     let draws_so_far = || draws.load(std::sync::atomic::Ordering::SeqCst);
-    // Three turns queued as they complete inside the period 10:00 to 10:05, one inside 10:05 to
-    // 10:10.
-    for (id, at) in [
-        ("a", "2026-10-03T10:00:10Z"),
-        ("b", "2026-10-03T10:02:00Z"),
-        ("c", "2026-10-03T10:04:59Z"),
-        ("d", "2026-10-03T10:07:00Z"),
+    // Turns of the period 10:00 to 10:05: one finishing at its start, one in the middle, and two
+    // finishing in its last seconds, which are queued only after the period ended (a turn that
+    // delegated work settles after 30 s).
+    for (id, completed, queued) in [
+        ("start", "2026-10-03T10:00:10Z", "2026-10-03T10:00:10Z"),
+        ("middle", "2026-10-03T10:02:00Z", "2026-10-03T10:02:30Z"),
+        ("late", "2026-10-03T10:04:59Z", "2026-10-03T10:04:59Z"),
+        (
+            "settled-late",
+            "2026-10-03T10:04:55Z",
+            "2026-10-03T10:05:25Z",
+        ),
     ] {
-        queue.enqueue(&[metric(id, time(at))], time(at));
+        queue.enqueue(&[metric(id, time(completed))], time(queued));
     }
+    // One in the next period.
+    let at = time("2026-10-03T10:07:00Z");
+    queue.enqueue(&[metric("next", at)], at);
     assert_eq!(draws_so_far(), 2, "one draw per slot");
 
-    let first_slot = time("2026-10-03T10:05:17Z");
+    let first_slot = time("2026-10-03T10:10:17Z");
     assert!(queue.batch(first_slot - Duration::seconds(1)).is_empty());
     let batch = queue.batch(first_slot);
-    assert_eq!(batch.len(), 3, "the slot leaves together");
+    assert_eq!(batch.len(), 4, "the whole period leaves together");
     assert!(batch
         .iter()
         .all(|sample| sample.observed_at == "2026-10-03T10:00:00Z"));
     assert_eq!(
         queue.next_eligible_after(first_slot),
-        Some(time("2026-10-03T10:10:17Z"))
+        Some(time("2026-10-03T10:15:17Z"))
     );
     queue.ack(
         &batch
@@ -8688,7 +8698,7 @@ fn the_samples_of_one_slot_share_one_delay_and_leave_in_one_batch() {
             .map(|sample| sample.sample_id)
             .collect::<Vec<_>>(),
     );
-    let later = queue.batch(time("2026-10-03T10:10:17Z"));
+    let later = queue.batch(time("2026-10-03T10:15:17Z"));
     assert_eq!(later.len(), 1);
     assert_eq!(later[0].observed_at, "2026-10-03T10:05:00Z");
 
@@ -8699,7 +8709,7 @@ fn the_samples_of_one_slot_share_one_delay_and_leave_in_one_batch() {
 }
 
 #[test]
-fn a_sample_queued_after_its_period_closed_leaves_at_the_next_boundary_plus_the_delay() {
+fn a_sample_queued_long_after_its_period_leaves_at_the_next_boundary_plus_the_delay() {
     let (mut queue, draws) = queue_with_jitter(30);
     queue.enable(time("2026-10-03T09:59:00Z"));
     // A primary turn that finished in the period 10:00 to 10:05 is queued half an hour later,
@@ -8710,9 +8720,9 @@ fn a_sample_queued_after_its_period_closed_leaves_at_the_next_boundary_plus_the_
     assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 1);
     let eligible = time("2026-10-03T10:35:30Z");
     assert_eq!(queue.next_eligible_after(queued), Some(eligible));
-    // Not when its period's own delay would have passed, and not within seconds of being queued.
+    // Not when its period's own slot would have passed, and not within seconds of being queued.
     for early in [
-        "2026-10-03T10:05:30Z",
+        "2026-10-03T10:10:30Z",
         "2026-10-03T10:34:17Z",
         "2026-10-03T10:35:00Z",
         "2026-10-03T10:35:29Z",
@@ -8731,7 +8741,7 @@ fn a_sample_queued_after_its_period_closed_leaves_at_the_next_boundary_plus_the_
 fn samples_of_different_periods_queued_in_one_window_share_a_slot_and_its_delay() {
     let (mut queue, draws) = queue_with_jitter(12);
     queue.enable(time("2026-10-03T09:59:00Z"));
-    let queued = time("2026-10-03T10:12:10Z");
+    let queued = time("2026-10-03T10:32:10Z");
     queue.enqueue(
         &[
             metric("early", time("2026-10-03T10:02:00Z")),
@@ -8743,10 +8753,10 @@ fn samples_of_different_periods_queued_in_one_window_share_a_slot_and_its_delay(
     assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
         queue.next_eligible_after(queued),
-        Some(time("2026-10-03T10:15:12Z"))
+        Some(time("2026-10-03T10:35:12Z"))
     );
-    assert!(queue.batch(time("2026-10-03T10:15:11Z")).is_empty());
-    let batch = queue.batch(time("2026-10-03T10:15:12Z"));
+    assert!(queue.batch(time("2026-10-03T10:35:11Z")).is_empty());
+    let batch = queue.batch(time("2026-10-03T10:35:12Z"));
     let mut periods: Vec<&str> = batch.iter().map(|s| s.observed_at.as_str()).collect();
     periods.sort();
     assert_eq!(
@@ -8764,44 +8774,56 @@ fn a_sample_queued_exactly_on_a_boundary_takes_that_boundary() {
     let slot_of = |completed: &str, queued: &str| {
         let (mut queue, _) = queue_with_jitter(0);
         queue.enable(time("2026-10-03T09:59:00Z"));
-        let queued = time(queued);
-        queue.enqueue(&[metric("turn", time(completed))], queued);
+        queue.enqueue(&[metric("turn", time(completed))], time(queued));
         queue
             .next_eligible_after(time("2026-10-03T09:00:00Z"))
             .unwrap()
     };
-    // Queued after its period closed: the boundary itself when exactly on it, else the next one.
+    let completed = "2026-10-03T10:03:00Z";
+    // Queued after the slot of its period: the boundary itself when exactly on it, else the next.
     assert_eq!(
-        slot_of("2026-10-03T10:03:00Z", "2026-10-03T10:10:00Z"),
+        slot_of(completed, "2026-10-03T10:20:00Z"),
+        time("2026-10-03T10:20:00Z")
+    );
+    assert_eq!(
+        slot_of(completed, "2026-10-03T10:19:59Z"),
+        time("2026-10-03T10:20:00Z")
+    );
+    assert_eq!(
+        slot_of(completed, "2026-10-03T10:20:01Z"),
+        time("2026-10-03T10:25:00Z")
+    );
+    // Queued exactly when the slot of its period comes, or earlier: that slot, B + 600.
+    assert_eq!(
+        slot_of(completed, "2026-10-03T10:10:00Z"),
         time("2026-10-03T10:10:00Z")
     );
     assert_eq!(
-        slot_of("2026-10-03T10:03:00Z", "2026-10-03T10:09:59Z"),
+        slot_of(completed, "2026-10-03T10:05:00Z"),
         time("2026-10-03T10:10:00Z")
     );
     assert_eq!(
-        slot_of("2026-10-03T10:03:00Z", "2026-10-03T10:10:01Z"),
-        time("2026-10-03T10:15:00Z")
+        slot_of(completed, "2026-10-03T10:04:00Z"),
+        time("2026-10-03T10:10:00Z")
     );
-    // Queued exactly when its own period ends.
+    // A turn finishing 10 s into its period and one 295 s into it, each queued 30 s later.
     assert_eq!(
-        slot_of("2026-10-03T10:03:00Z", "2026-10-03T10:05:00Z"),
-        time("2026-10-03T10:05:00Z")
+        slot_of("2026-10-03T10:00:10Z", "2026-10-03T10:00:40Z"),
+        time("2026-10-03T10:10:00Z")
     );
-    // Queued inside its period: the period's end.
     assert_eq!(
-        slot_of("2026-10-03T10:03:00Z", "2026-10-03T10:04:00Z"),
-        time("2026-10-03T10:05:00Z")
+        slot_of("2026-10-03T10:04:55Z", "2026-10-03T10:05:25Z"),
+        time("2026-10-03T10:10:00Z")
     );
 
     // A fraction of a second past a boundary belongs to the next slot.
     let (mut queue, _) = queue_with_jitter(0);
     queue.enable(time("2026-10-03T09:59:00Z"));
-    let queued = time("2026-10-03T10:10:00Z") + Duration::milliseconds(500);
+    let queued = time("2026-10-03T10:20:00Z") + Duration::milliseconds(500);
     queue.enqueue(&[metric("turn", time("2026-10-03T10:03:00Z"))], queued);
     assert_eq!(
         queue.next_eligible_after(time("2026-10-03T09:00:00Z")),
-        Some(time("2026-10-03T10:15:00Z"))
+        Some(time("2026-10-03T10:25:00Z"))
     );
 }
 
@@ -8814,7 +8836,7 @@ fn more_than_fifty_samples_of_one_period_follow_in_the_next_batch() {
         .map(|index| metric(format!("turn-{index}"), time("2026-10-03T10:01:00Z")))
         .collect();
     queue.enqueue(&turns, now);
-    let eligible = time("2026-10-03T10:05:00Z");
+    let eligible = time("2026-10-03T10:10:00Z");
     let first = queue.batch(eligible);
     assert_eq!(first.len(), 50);
     queue.ack(
@@ -8835,7 +8857,7 @@ fn the_upload_delay_is_between_zero_and_sixty_seconds_whatever_the_source_says()
         queue.enqueue(&[metric("turn", completed)], completed);
         assert_eq!(
             queue.next_eligible_after(completed),
-            Some(time("2026-10-03T10:05:00Z") + Duration::seconds(expected)),
+            Some(time("2026-10-03T10:10:00Z") + Duration::seconds(expected)),
             "{drawn}"
         );
     }
@@ -8844,13 +8866,13 @@ fn the_upload_delay_is_between_zero_and_sixty_seconds_whatever_the_source_says()
 #[test]
 fn the_default_upload_delay_is_random_within_a_minute() {
     let completed = time("2026-10-03T10:01:00Z");
-    let end = time("2026-10-03T10:05:00Z");
+    let slot = time("2026-10-03T10:10:00Z");
     let mut delays = HashSet::new();
     for _ in 0..40 {
         let mut queue = SharingQueue::new();
         queue.enable(time("2026-10-03T09:59:00Z"));
         queue.enqueue(&[metric("turn", completed)], completed);
-        let delay = queue.next_eligible_after(completed).unwrap() - end;
+        let delay = queue.next_eligible_after(completed).unwrap() - slot;
         assert!(
             delay >= Duration::zero() && delay < Duration::seconds(60),
             "{delay}"
@@ -8908,4 +8930,67 @@ fn app_files_are_written_readable_by_their_owner_only() {
     let history = temp.path().join("history.json");
     History::default().save(&history).unwrap();
     assert_eq!(mode_of(&history), 0o600);
+}
+
+#[test]
+fn history_that_is_oversized_is_unreadable_and_a_missing_one_is_empty() {
+    let temp = TestDir::new();
+    let now = time("2026-10-03T12:00:00Z");
+    assert!(History::load(temp.path().join("none.json"), now)
+        .unwrap()
+        .records()
+        .is_empty());
+
+    // A file past the 64 MiB cap (sparse, so cheap to make) is not loaded, whatever its stat said
+    // when it was opened: the read itself stops one byte past the cap.
+    let path = temp.path().join("history.json");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    drop(file);
+    let error = History::load(&path, now).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+    // A saved history of normal size loads again.
+    let mut history = History::default();
+    history.merge(&[metric("turn", now - Duration::minutes(5))], now);
+    history.save(&path).unwrap();
+    assert_eq!(History::load(&path, now).unwrap().records().len(), 1);
+    // A directory is not a history either.
+    assert!(History::load(temp.path(), now).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_history_file_that_is_a_fifo_does_not_block_startup() {
+    let temp = TestDir::new();
+    let path = temp.path().join("history.json");
+    make_fifo(&path);
+    let now = time("2026-10-03T12:00:00Z");
+    let error = within_seconds(move || History::load(&path, now).unwrap_err());
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn app_files_are_read_whole_only_when_regular_and_within_the_cap() {
+    let temp = TestDir::new();
+    let path = temp.path().join("settings.json");
+    fs::write(&path, b"0123456789").unwrap();
+    assert_eq!(crate::read_private_file(&path, 10).unwrap(), b"0123456789");
+    let oversize = crate::read_private_file(&path, 9).unwrap_err();
+    assert_eq!(oversize.kind(), std::io::ErrorKind::InvalidData);
+    let missing = crate::read_private_file(temp.path().join("none"), 10).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    let folder = crate::read_private_file(temp.path(), 10).unwrap_err();
+    assert_eq!(folder.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(crate::MAX_SMALL_FILE_BYTES, 1_048_576);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_app_file_that_is_a_pipe_is_refused_without_waiting_for_a_writer() {
+    let temp = TestDir::new();
+    let path = temp.path().join("settings.json");
+    make_fifo(&path);
+    let error = within_seconds(move || crate::read_private_file(&path, 1_024).unwrap_err());
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }

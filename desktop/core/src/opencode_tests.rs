@@ -1588,7 +1588,10 @@ fn a_read_stops_at_its_byte_budget_and_keeps_the_newest_messages() {
             crate::opencode_db::MessageScope::CreatedSince(0),
             true,
             &|_| false,
-            budget,
+            crate::opencode_db::Limits {
+                bytes: budget,
+                sessions: 1_000,
+            },
         )
         .unwrap()
     };
@@ -1601,6 +1604,144 @@ fn a_read_stops_at_its_byte_budget_and_keeps_the_newest_messages() {
     // The newest are kept.
     assert_eq!(bounded.messages[0].id, "msg_099");
     assert_eq!(read(0).messages.len(), 0);
+}
+
+/// Many separate ancestry chains of three sessions, each with one message in the youngest.
+fn chains(db: &Database, count: usize) {
+    db.connection.execute_batch("BEGIN").unwrap();
+    for index in 0..count {
+        db.session(&format!("ses_root_{index}"), None, VERSION);
+        db.session(
+            &format!("ses_child_{index}"),
+            Some(&format!("ses_root_{index}")),
+            VERSION,
+        );
+        db.session(
+            &format!("ses_leaf_{index}"),
+            Some(&format!("ses_child_{index}")),
+            VERSION,
+        );
+        db.raw_message(
+            &format!("msg_{index}"),
+            &format!("ses_leaf_{index}"),
+            1_000 + index as i64,
+            1_000 + index as i64,
+            &assistant_data(json!({})),
+        );
+    }
+    db.connection.execute_batch("COMMIT").unwrap();
+}
+
+fn read_ancestors(db: &Database, limits: crate::opencode_db::Limits) -> crate::opencode_db::Read {
+    crate::opencode_db::read_database_within(
+        &db.path,
+        crate::opencode_db::MessageScope::CreatedSince(0),
+        false,
+        &|_| false,
+        limits,
+    )
+    .unwrap()
+}
+
+#[test]
+fn ancestor_lookups_find_every_chain_and_stay_within_the_read_limits() {
+    use crate::opencode_db::Limits;
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    chains(&db, 3_000);
+    let unlimited = Limits {
+        bytes: usize::MAX,
+        sessions: 100_000,
+    };
+
+    // Every session of every chain, over three rounds of lookups, each exactly once.
+    let all = read_ancestors(&db, unlimited);
+    assert_eq!(all.messages.len(), 3_000);
+    let mut ids: Vec<&str> = all.sessions.iter().map(|s| s.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 9_000);
+    assert_eq!(all.sessions.len(), 9_000);
+
+    // The session limit holds across rounds and chunks, not per query.
+    let few = read_ancestors(
+        &db,
+        Limits {
+            sessions: 1_000,
+            ..unlimited
+        },
+    );
+    assert_eq!(few.sessions.len(), 1_000);
+    let none = read_ancestors(
+        &db,
+        Limits {
+            sessions: 0,
+            ..unlimited
+        },
+    );
+    assert!(none.sessions.is_empty());
+
+    // So does the byte budget, which the messages already used part of.
+    let messages_only = read_ancestors(
+        &db,
+        Limits {
+            sessions: 0,
+            ..unlimited
+        },
+    )
+    .bytes_read;
+    for allowance in [0, 2_000, 50_000] {
+        let read = read_ancestors(
+            &db,
+            Limits {
+                bytes: messages_only + allowance,
+                ..unlimited
+            },
+        );
+        // One row past the allowance at most.
+        assert!(
+            read.bytes_read < messages_only + allowance + 300,
+            "{allowance}"
+        );
+        assert_eq!(read.sessions.is_empty(), allowance == 0);
+    }
+    let full_bytes = all.bytes_read;
+    assert!(full_bytes > messages_only + 50_000);
+}
+
+#[test]
+fn an_ancestor_shared_by_many_sessions_is_asked_for_once() {
+    use crate::opencode_db::Limits;
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    db.session("ses_shared", None, VERSION);
+    db.connection.execute_batch("BEGIN").unwrap();
+    for index in 0..500 {
+        db.session(&format!("ses_leaf_{index}"), Some("ses_shared"), VERSION);
+        db.raw_message(
+            &format!("msg_{index}"),
+            &format!("ses_leaf_{index}"),
+            1_000 + index,
+            1_000 + index,
+            &assistant_data(json!({})),
+        );
+    }
+    db.connection.execute_batch("COMMIT").unwrap();
+    let read = read_ancestors(
+        &db,
+        Limits {
+            bytes: usize::MAX,
+            sessions: 100_000,
+        },
+    );
+    assert_eq!(read.sessions.len(), 501);
+    assert_eq!(
+        read.sessions
+            .iter()
+            .filter(|s| s.id == "ses_shared")
+            .count(),
+        1
+    );
 }
 
 #[cfg(unix)]

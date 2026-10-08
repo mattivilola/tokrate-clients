@@ -126,4 +126,69 @@ final class OpenCodeDatabaseBoundsTests: XCTestCase {
             "an incremental read has the same budget"
         )
     }
+
+    /// `chains` separate ancestry chains of four sessions (root, middle, child, leaf), each leaf with one
+    /// message.
+    private func addChains(_ database: SyntheticOpenCodeDatabase, count chains: Int) throws {
+        let generate = "WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM c WHERE i < \(chains - 1))"
+        func sessions(_ prefix: String, parent: String?) -> String {
+            """
+            INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated)
+            \(generate) SELECT '\(prefix)' || i, 'proj', \(parent.map { "'\($0)' || i" } ?? "NULL"), 's', 'd', 't', '1.18.31', 0, 0 FROM c
+            """
+        }
+        try database.execute(sessions("root", parent: nil))
+        try database.execute(sessions("mid", parent: "root"))
+        try database.execute(sessions("child", parent: "mid"))
+        try database.execute(sessions("leaf", parent: "child"))
+        try database.execute("""
+            INSERT INTO message (id, session_id, time_created, time_updated, data)
+            \(generate) SELECT 'msg' || i, 'leaf' || i, 1790000000500, 1790000000500, '{"role":"user","time":{"created":1790000000500}}' FROM c
+            """)
+    }
+
+    func testManySeparateAncestryChainsAreAllFollowedWithinTheBudget() throws {
+        let database = try makeDatabase()
+        try addChains(database, count: 2_000)
+        let reader = try reader()
+        defer { reader.close() }
+        let read = try reader.read(.createdSince(0))
+        XCTAssertEqual(read.messages.count, 2_000)
+        XCTAssertEqual(read.sessions.count, 8_000, "every leaf, child, middle and root session, each once")
+        XCTAssertEqual(Set(read.sessions.map(\.id)).count, 8_000)
+        // Sessions the index already has are not asked for again.
+        let known = Set((0..<2_000).flatMap { ["leaf\($0)", "child\($0)"] })
+        let incremental = try reader.read(.createdSince(0), known: known)
+        XCTAssertEqual(incremental.sessions.count, 0, "the known leaf is the only session named, so no ancestors are asked for")
+    }
+
+    func testTheSessionRowBudgetCoversAllAncestorRoundsOfOneRead() throws {
+        let database = try makeDatabase()
+        try addChains(database, count: 300)
+        let reader = try reader()
+        defer { reader.close() }
+        let capped = try reader.read(.createdSince(0), limits: .init(sessions: 50))
+        XCTAssertEqual(capped.sessions.count, 50, "1,200 sessions are reachable; the row budget is shared by every round")
+        XCTAssertEqual(try reader.read(.createdSince(0), limits: .init(sessions: 0)).sessions.count, 0)
+        XCTAssertEqual(try reader.read(.createdSince(0), limits: .init(sessions: 1_200)).sessions.count, 1_200)
+    }
+
+    func testTheByteBudgetIsSharedByMessagesAndEveryAncestorRound() throws {
+        let database = try makeDatabase()
+        try addChains(database, count: 300)
+        let reader = try reader()
+        defer { reader.close() }
+        let full = try reader.read(.createdSince(0))
+        let messageBytes = try reader.read(.createdSince(0), limits: .init(sessions: 0)).bytesRead
+        let sessionBytes = full.bytesRead - messageBytes
+        XCTAssertGreaterThan(sessionBytes, 0)
+        // A budget that leaves room for about a tenth of the session bytes.
+        let tight = try reader.read(.createdSince(0), limits: .init(bytes: messageBytes + sessionBytes / 10))
+        XCTAssertEqual(tight.messages.count, 300)
+        XCTAssertLessThan(tight.sessions.count, 300, "ancestor rounds stop at the budget")
+        XCTAssertGreaterThan(tight.sessions.count, 0)
+        XCTAssertLessThanOrEqual(tight.bytesRead, messageBytes + sessionBytes / 10 + 64)
+        XCTAssertEqual(OpenCodeDatabase.maximumReadSessions, 100_000)
+        XCTAssertEqual(OpenCodeDatabase.maximumAncestorRounds, 16)
+    }
 }

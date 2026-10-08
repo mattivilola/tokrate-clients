@@ -319,10 +319,11 @@ type JitterSource = Box<dyn FnMut() -> Duration + Send>;
 /// Memory-only queue for post-consent turns. No key material or account identity is stored here.
 /// Uploads leave in slots: the five-minute UTC boundaries (seconds since the epoch divisible by
 /// 300), each with one random delay of up to a minute that all of its samples share. A sample is
-/// given the first boundary at or after both its queueing time and the end of its own
-/// five-minute period (`observedAt`) and leaves at that boundary plus the slot's delay. Even a
-/// turn queued long after it ended (one waiting for its subagent work to settle) so leaves at a
-/// time that says nothing about when it ended.
+/// given the first boundary at or after both its queueing time and one full period after the end
+/// of its own five-minute period (`observedAt`), and leaves at that boundary plus the slot's
+/// delay. So every normally settled turn of a period leaves in the same slot, whenever inside
+/// the period it finished, and a turn queued long after it ended (one waiting for its subagent
+/// work to settle) leaves at a time that says nothing about when it ended.
 pub struct SharingQueue {
     enabled_since: Option<DateTime<Utc>>,
     pending: VecDeque<PendingSample>,
@@ -512,13 +513,15 @@ fn safe_identifier(value: &str, maximum: usize, plus_allowed: bool) -> bool {
 }
 
 /// The upload slot of a sample queued at `queued_at`: the first five-minute UTC boundary at or
-/// after both `queued_at` and the end of the sample's own period (`observedAt`).
+/// after both `queued_at` and the end of the period after the sample's own (`observedAt` + two
+/// periods). The extra period keeps a turn that only settled after its period ended, a delegated
+/// turn waits about 30 s, in the same slot as the turns that finished earlier in that period.
 fn upload_slot(sample: &SharedSample, queued_at: DateTime<Utc>) -> Option<i64> {
     let period_start = DateTime::parse_from_rfc3339(&sample.observed_at)
         .ok()?
         .timestamp();
     let queued = queued_at.timestamp() + i64::from(queued_at.timestamp_subsec_nanos() > 0);
-    let earliest = queued.max(period_start + OBSERVED_PERIOD_SECONDS);
+    let earliest = queued.max(period_start + 2 * OBSERVED_PERIOD_SECONDS);
     Some(
         earliest.div_euclid(OBSERVED_PERIOD_SECONDS) * OBSERVED_PERIOD_SECONDS
             + if earliest.rem_euclid(OBSERVED_PERIOD_SECONDS) == 0 {

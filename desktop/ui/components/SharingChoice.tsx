@@ -18,6 +18,20 @@ export const SURFACE_NOTICE =
 export const PROMPT_CACHE_NOTICE =
   "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache.";
 
+/** What every shared turn contains, in the wording of the Mac notice. */
+export const SENT_FIELDS = [
+  "Coding tool, and app, parser and metric versions",
+  "Model, provider (for Claude on Amazon Bedrock, its inference-profile region) and effort",
+  "Source kind (primary, subagent or unknown)",
+  "Token counts and turn duration",
+  "Output tokens of subagent work a turn started",
+  "Where the tool ran, as a category",
+  "Response timing within the turn",
+  "First-token time, when available",
+  "Time rounded to 5 minutes",
+  "A random ID for each sample",
+];
+
 /** Explains the example's fields, what the model name is, and how precisely the time is sent. */
 export const FIELD_DESCRIPTION =
   "Region is derived by the server, not sent by the app. The Amazon Bedrock region (providerRegion) is the one the model id itself names and is null for every other route. Model names are sent as your coding tool reports them, so a custom deployment name is shared as is; a name with unusual characters is sent as “unknown”. Uploads leave after each five-minute period ends, so the time of a turn is not sent more precisely than its five-minute period.";
@@ -71,13 +85,9 @@ export function SharingChoice({
         <div>
           <h2>Sent for each new turn</h2>
           <ul>
-            <li>Coding tool, model and effort</li>
-            <li>Token counts and turn duration</li>
-            <li>Output tokens of subagent work a turn started</li>
-            <li>Where the tool ran, as a category</li>
-            <li>Response timing within the turn</li>
-            <li>First-token time, when available</li>
-            <li>Time rounded to 5 minutes</li>
+            {SENT_FIELDS.map((field) => (
+              <li key={field}>{field}</li>
+            ))}
           </ul>
         </div>
         <div>

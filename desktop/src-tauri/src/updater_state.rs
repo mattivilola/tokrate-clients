@@ -1,9 +1,38 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
-use tauri::utils::platform;
+use tauri::{utils::platform, Url};
 use tauri_plugin_updater::Update;
 
 const AUTOMATIC_CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
+/// Updates are downloaded only from this project's GitHub release assets, whatever the signed
+/// feed names: `https://github.com/mattivilola/tokrate-clients/releases/download/...`.
+const UPDATE_DOWNLOAD_HOST: &str = "github.com";
+const UPDATE_DOWNLOAD_PATH: &str = "/mattivilola/tokrate-clients/releases/download/";
+
+/// Whether an update may be downloaded from `url`: HTTPS on the default port, the exact host, no
+/// credentials, and a path below the project's release downloads.
+pub fn download_url_is_trusted(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some(UPDATE_DOWNLOAD_HOST)
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path().starts_with(UPDATE_DOWNLOAD_PATH)
+}
+
+/// An update the check found, only if it downloads from a trusted place; otherwise the check
+/// fails like any other and nothing is stored or downloaded.
+pub fn trusted_update<T>(
+    update: Option<T>,
+    download_url: impl Fn(&T) -> &Url,
+) -> Result<Option<T>, String> {
+    match update {
+        Some(update) if !download_url_is_trusted(download_url(&update)) => {
+            Err("The update is not offered from Tokrate's release location".to_owned())
+        }
+        other => Ok(other),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,7 +93,8 @@ impl UpdateState {
     ) -> Result<Self, String> {
         fs::create_dir_all(&dir).map_err(|_| "Could not prepare update preferences".to_owned())?;
         let path = dir.join("update-preferences.json");
-        let (automatic_checks, last_check_unix_seconds, warning) = match fs::read(&path) {
+        let saved = tokrate_core::read_private_file(&path, tokrate_core::MAX_SMALL_FILE_BYTES);
+        let (automatic_checks, last_check_unix_seconds, warning) = match saved {
             Ok(bytes) => match serde_json::from_slice::<SavedPreferences>(&bytes) {
                 Ok(saved) => (saved.automatic_checks, saved.last_check_unix_seconds, None),
                 Err(_) => (
@@ -320,5 +350,78 @@ mod tests {
             0o600
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn url(text: &str) -> Url {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn updates_download_only_from_the_projects_github_release_assets() {
+        for trusted in [
+            "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.20/Tokrate_0.1.20_x64-setup.exe",
+            "https://github.com/mattivilola/tokrate-clients/releases/download/desktop-v0.1.20/a%20b.AppImage?x=1",
+            "https://GITHUB.com:443/mattivilola/tokrate-clients/releases/download/v1/a",
+        ] {
+            assert!(download_url_is_trusted(&url(trusted)), "{trusted}");
+        }
+        for untrusted in [
+            "http://github.com/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://github.com:8443/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://evil.example/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://github.com.evil.example/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://evilgithub.com/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://user:pass@github.com/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://github.com@evil.example/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://github.com/someone-else/tokrate-clients/releases/download/v1/a",
+            "https://github.com/mattivilola/tokrate-clients-fork/releases/download/v1/a",
+            "https://github.com/mattivilola/tokrate-clients/releases/latest",
+            "https://github.com/mattivilola/tokrate-clients/archive/main.zip",
+            "https://github.com/mattivilola/tokrate-clients/releases/download/../../../../x/y/releases/download/v1/a",
+            "https://github.com/mattivilola/tokrate-clients/releases/download/%2e%2e/%2e%2e/%2e%2e/x",
+            "https://objects.githubusercontent.com/mattivilola/tokrate-clients/releases/download/v1/a",
+            "ftp://github.com/mattivilola/tokrate-clients/releases/download/v1/a",
+        ] {
+            assert!(!download_url_is_trusted(&url(untrusted)), "{untrusted}");
+        }
+    }
+
+    #[test]
+    fn an_update_from_anywhere_else_fails_the_check_and_is_never_kept() {
+        struct Offer(Url);
+        let offer = |text: &str| Some(Offer(url(text)));
+        let good = "https://github.com/mattivilola/tokrate-clients/releases/download/v1/a";
+        assert!(trusted_update(None, |o: &Offer| &o.0).unwrap().is_none());
+        assert!(trusted_update(offer(good), |o| &o.0).unwrap().is_some());
+        for bad in [
+            "https://evil.example/mattivilola/tokrate-clients/releases/download/v1/a",
+            "http://github.com/mattivilola/tokrate-clients/releases/download/v1/a",
+            "https://github.com/other/other/releases/download/v1/a",
+        ] {
+            let rejected = trusted_update(offer(bad), |o| &o.0);
+            assert!(rejected.is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preferences_that_are_a_pipe_or_oversize_pause_automatic_checks() {
+        use crate::test_support::{make_fifo, within_seconds};
+        let fifo_dir = temporary();
+        make_fifo(&fifo_dir.join("update-preferences.json"));
+        let big_dir = temporary();
+        let big = fs::File::create(big_dir.join("update-preferences.json")).unwrap();
+        big.set_len(tokrate_core::MAX_SMALL_FILE_BYTES + 1).unwrap();
+        drop(big);
+        for dir in [fifo_dir, big_dir] {
+            let path = dir.clone();
+            let state = within_seconds(move || {
+                UpdateState::load_with_mode(path, false, UpdateMode::Native).unwrap()
+            });
+            let snapshot = state.snapshot();
+            assert!(!snapshot.automatic_checks);
+            assert!(snapshot.settings_warning.is_some());
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

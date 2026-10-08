@@ -3,6 +3,8 @@ mod badge;
 mod flyout;
 mod runtime;
 mod schedule;
+#[cfg(test)]
+mod test_support;
 mod updater_state;
 mod watcher;
 use flyout::{Area, FlyoutState};
@@ -111,6 +113,7 @@ async fn perform_update_check(
             .check()
             .await
             .map_err(|_| "Could not check for updates")?;
+        let update = updater_state::trusted_update(update, |update| &update.download_url)?;
         Ok::<_, String>(state.lock().unwrap().store_pending_update(update))
     }
     .await;
@@ -155,6 +158,10 @@ async fn install_update(
             .take_pending_update()
             .ok_or_else(|| "Check for an update before installing".to_owned())?
     };
+    // Checked again where the download starts, whatever stored the update.
+    if !updater_state::download_url_is_trusted(&update.download_url) {
+        return Err("The update is not offered from Tokrate's release location".into());
+    }
     let chunk_events = on_event.clone();
     let mut started = false;
     let result = update
@@ -434,4 +441,43 @@ fn main() {
                 save_history_on_exit(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    /// The names listed between `open` and `close` in `source`, one per comma-separated entry.
+    fn listed(source: &str, open: &str, close: &str) -> BTreeSet<String> {
+        let start = source.find(open).expect("list start") + open.len();
+        let end = start + source[start..].find(close).expect("list end");
+        source[start..end]
+            .split(',')
+            .map(|name| name.trim().trim_matches('"').to_owned())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn only_the_commands_the_handler_serves_are_permitted_to_the_windows() {
+        let handler = listed(include_str!("main.rs"), "generate_handler![", "])");
+        let manifest = listed(include_str!("../build.rs"), "COMMANDS: &[&str] = &[", "];");
+        assert!(handler.len() > 10);
+        assert_eq!(handler, manifest, "build.rs COMMANDS and generate_handler!");
+
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let granted: BTreeSet<String> = capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|permission| permission.as_str().unwrap().to_owned())
+            .collect();
+        let expected: BTreeSet<String> = handler
+            .iter()
+            .map(|command| format!("allow-{}", command.replace('_', "-")))
+            .collect();
+        // Nothing but the application's own commands: no `core:` or plugin permission.
+        assert_eq!(granted, expected);
+    }
 }

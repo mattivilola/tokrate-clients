@@ -10,6 +10,8 @@ import Foundation
 struct GrokSessionParser: JSONLMetricParser {
     private static let earlyTimestampTolerance: TimeInterval = 1
     private static let maximumUsageWriteDelay: TimeInterval = 60
+    /// Open frames (the primary turn and its nested agents) the parser tracks; the desktop's bound.
+    private static let maximumFrames = 64
 
     private struct TurnStart: Sendable {
         let number: Int
@@ -79,6 +81,8 @@ struct GrokSessionParser: JSONLMetricParser {
     private var sourceIdentity: String
     private var sessionID: String?
     private var stack: [Frame] = []
+    /// Open frames, for tests of the bound.
+    var frameDepth: Int { stack.count }
     private var activeStart: TurnStart?
     private var windows = GenerationWindows()
     private var seenPrimaryTurnNumbers: Set<Int> = []
@@ -239,21 +243,18 @@ struct GrokSessionParser: JSONLMetricParser {
               let number = nonnegativeInteger(event["turn_number"]),
               let timestamp = parseDate(event["ts"])
         else {
-            invalidateActivePrimary()
-            if !stack.isEmpty { stack.append(.ambiguous) }
+            if stack.isEmpty { invalidateActivePrimary() } else { discardThroughNextEnd() }
             return
         }
         if let sessionID, sessionID != id {
-            invalidateActivePrimary()
-            stack.append(.ambiguous)
+            discardThroughNextEnd()
             return
         }
         sessionID = id
 
         if relationship == "subagent" {
-            guard stack.count < 64 else {
-                invalidateActivePrimary()
-                stack.append(.ambiguous)
+            guard stack.count < Self.maximumFrames else {
+                discardThroughNextEnd()
                 return
             }
             stack.append(.subagent)
@@ -261,14 +262,12 @@ struct GrokSessionParser: JSONLMetricParser {
             return
         }
         guard relationship == "primary" else {
-            invalidateActivePrimary()
-            stack.append(.ambiguous)
+            discardThroughNextEnd()
             return
         }
 
         guard stack.isEmpty else {
-            invalidateActivePrimary()
-            stack.append(.ambiguous)
+            discardThroughNextEnd()
             return
         }
         for number in pendingEndedTurnNumbers {
@@ -327,6 +326,15 @@ struct GrokSessionParser: JSONLMetricParser {
         }
         endedTurns[number] = EndedTurn(start: start, endedAt: timestamp, outcome: outcome, windows: turnWindows)
         pendingEndedTurnNumbers.insert(number)
+    }
+
+    /// Something the log does not pair reliably (an unreadable, foreign, overlapping or too deeply nested
+    /// start): the active turn is lost and everything up to the next end marker is discarded, as the
+    /// desktop client does. The stack is reset to that one marker, so a log of starts without ends
+    /// cannot grow it.
+    private mutating func discardThroughNextEnd() {
+        invalidateActivePrimary()
+        stack = [.ambiguous]
     }
 
     private mutating func invalidateActivePrimary() {
@@ -405,6 +413,8 @@ struct GrokSessionParser: JSONLMetricParser {
 public actor GrokSessionMonitor {
     private static let maximumUsageBytes = 262_144
     private static let maximumSummaryBytes = 65_536
+    /// Sessions watched at once (the Windows/Linux client's bound), multiplied by the scope's capacity.
+    static let maximumSessions = 128
     private static let snapshotStabilitySeconds: TimeInterval = 4
     /// Safety net for a folder watcher that missed a change; `noteChanges` normally triggers discovery.
     private static let discoveryInterval = CodexSessionMonitor.discoveryInterval
@@ -414,7 +424,9 @@ public actor GrokSessionMonitor {
         var events: IncrementalJSONLMetricReader<GrokSessionParser>
         var eventsModifiedAt: Date
         var usageModifiedAt: Date?
-        var usageData: Data?
+        /// The digest of the `usage.json` last read, not its bytes (up to 256 KiB per session): enough
+        /// to notice a change, and the snapshot is read again when it is reconciled.
+        var usageDigest: SHA256.Digest?
         var stableSince: Date?
         /// The `stableSince` whose snapshot was last reconciled; a session is due once that lags behind.
         var reconciledSince: Date?
@@ -547,24 +559,34 @@ public actor GrokSessionMonitor {
                     do { data = try RegularFile.read(usageURL, maximumBytes: Self.maximumUsageBytes) } catch is RegularFile.Failure { data = nil }
                     budget -= data?.count ?? 0
                     session.usageReadCheckedAt = now
-                    if session.usageData != data {
-                        session.usageData = data
+                    let digest = data.map { SHA256.hash(data: $0) }
+                    if session.usageDigest != digest {
+                        session.usageDigest = digest
                         session.stableSince = nil
                     }
                     session.usageModifiedAt = usageDate
                 } else if usageDate == nil {
                     session.usageModifiedAt = nil
-                    session.usageData = nil
+                    session.usageDigest = nil
                     session.stableSince = nil
                 }
 
-                if session.events.isCaughtUp, session.usageData != nil {
+                if session.events.isCaughtUp, let expected = session.usageDigest {
                     if session.stableSince == nil { session.stableSince = now }
                     if let stableSince = session.stableSince, session.reconciledSince != stableSince,
-                       now.timeIntervalSince(stableSince) >= Self.snapshotStabilitySeconds,
-                       let usageData = session.usageData {
-                        records += session.events.reconcile(snapshot: usageData)
-                        session.reconciledSince = stableSince
+                       now.timeIntervalSince(stableSince) >= Self.snapshotStabilitySeconds {
+                        // The stable snapshot is read again rather than kept in memory per session.
+                        if let usageData = try? RegularFile.read(usageURL, maximumBytes: Self.maximumUsageBytes),
+                           SHA256.hash(data: usageData) == expected {
+                            budget -= usageData.count
+                            records += session.events.reconcile(snapshot: usageData)
+                            session.reconciledSince = stableSince
+                        } else {
+                            // It changed since it was read, or cannot be read now: settle again.
+                            session.stableSince = now
+                            session.usageModifiedAt = nil
+                            changedSessions.insert(key)
+                        }
                     }
                 }
                 sessions[key] = session
@@ -614,7 +636,7 @@ public actor GrokSessionMonitor {
         }
         candidates.sort { $0.modified > $1.modified }
         var seen = Set<String>()
-        for candidate in candidates.prefix(scope.maximumFiles) {
+        for candidate in candidates.prefix(Self.maximumSessions * scope.capacityScale) {
             let key = candidate.url.standardizedFileURL.path
             seen.insert(key)
             if var session = sessions[key] {

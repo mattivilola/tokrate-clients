@@ -84,7 +84,7 @@ final class SharingPreferencesTests: XCTestCase {
         ], now: now.addingTimeInterval(40))
         XCTAssertEqual(session.pendingCount, 1, "Repeated activation must not move the original launch boundary")
         // The samples leave once their five-minute bucket has closed.
-        await session.refresh(now: now.addingTimeInterval(500))
+        await session.refresh(now: now.addingTimeInterval(700))
         let count = await transport.count()
         XCTAssertEqual(count, 2)
     }
@@ -190,7 +190,7 @@ final class SharingPreferencesTests: XCTestCase {
         XCTAssertEqual(relaunchedSession.pendingCount, 1)
         XCTAssertTrue(relaunched.isSharingRequested)
         XCTAssertTrue(relaunchedSession.isEnabled)
-        await relaunchedSession.refresh(now: now.addingTimeInterval(500))
+        await relaunchedSession.refresh(now: now.addingTimeInterval(700))
         let count = await transport.count()
         XCTAssertEqual(count, 2)
     }

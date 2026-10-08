@@ -16,6 +16,7 @@ import {
   DELEGATED_NOTICE,
   FIELD_DESCRIPTION,
   PROMPT_CACHE_NOTICE,
+  SENT_FIELDS,
   SURFACE_NOTICE,
 } from "../components/SharingChoice";
 import sentExample from "../store/sent-example.json?raw";
@@ -515,6 +516,26 @@ describe("sharing notice", () => {
     expect(FIELD_DESCRIPTION).toBe(
       "Region is derived by the server, not sent by the app. The Amazon Bedrock region (providerRegion) is the one the model id itself names and is null for every other route. Model names are sent as your coding tool reports them, so a custom deployment name is shared as is; a name with unusual characters is sent as “unknown”. Uploads leave after each five-minute period ends, so the time of a turn is not sent more precisely than its five-minute period.",
     );
+  });
+  it("lists every kind of field a turn carries", () => {
+    expect(SENT_FIELDS).toEqual([
+      "Coding tool, and app, parser and metric versions",
+      "Model, provider (for Claude on Amazon Bedrock, its inference-profile region) and effort",
+      "Source kind (primary, subagent or unknown)",
+      "Token counts and turn duration",
+      "Output tokens of subagent work a turn started",
+      "Where the tool ran, as a category",
+      "Response timing within the turn",
+      "First-token time, when available",
+      "Time rounded to 5 minutes",
+      "A random ID for each sample",
+    ]);
+    // Every key of the example upload is covered by the list above.
+    const sample = JSON.parse(sentExample).samples[0];
+    expect(Object.keys(sample)).toContain("sampleId");
+    expect(Object.keys(sample)).toContain("providerRegion");
+    expect(Object.keys(sample)).toContain("sourceKind");
+    expect(Object.keys(sample)).toContain("parserVersion");
   });
   it("states the surface category in the notice", () => {
     expect(SURFACE_NOTICE).toBe(
