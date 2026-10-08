@@ -1162,7 +1162,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.19");
+    assert_eq!(sample.app_version, "0.1.20");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1954,7 +1954,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::minutes(12));
     let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.19");
+    assert_eq!(first[0].app_version, "0.1.20");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2107,7 +2107,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.19-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.20-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2115,7 +2115,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.19-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.20-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2137,7 +2137,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.19");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.20");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2651,7 +2651,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.19");
+    assert_eq!(crate::APP_VERSION, "0.1.20");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [

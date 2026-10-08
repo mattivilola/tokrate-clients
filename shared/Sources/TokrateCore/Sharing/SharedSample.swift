@@ -7,7 +7,7 @@ public struct SharedSample: Encodable, Sendable {
     public let client: String
     public let clientVersion: String
     /// The release this build reports, in every upload and in the `User-Agent` of every community request.
-    public static let appVersion = "0.1.19"
+    public static let appVersion = "0.1.20"
     public let appVersion = SharedSample.appVersion
     public let parserVersion: String
     public let metricVersion: String

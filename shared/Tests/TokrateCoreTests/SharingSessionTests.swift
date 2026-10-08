@@ -132,7 +132,7 @@ final class SharingSessionTests: XCTestCase {
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
         XCTAssertEqual(samples.count, 1)
         XCTAssertEqual(Set(samples[0].keys), Set(["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]))
-        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.19")
+        XCTAssertEqual(samples[0]["appVersion"] as? String, "0.1.20")
         XCTAssertEqual(samples[0]["reasoningEffort"] as? String, "unknown")
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         let observed = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(samples[0]["observedAt"] as? String)))
@@ -416,7 +416,7 @@ final class SharingSessionTests: XCTestCase {
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
         let reported = try XCTUnwrap(SharedSample(metric(reasoningEffort: "ultra")))
-        XCTAssertEqual(reported.appVersion, "0.1.19")
+        XCTAssertEqual(reported.appVersion, "0.1.20")
         XCTAssertEqual(reported.reasoningEffort, "ultra")
         let missing = try XCTUnwrap(SharedSample(metric()))
         XCTAssertEqual(missing.reasoningEffort, "unknown")

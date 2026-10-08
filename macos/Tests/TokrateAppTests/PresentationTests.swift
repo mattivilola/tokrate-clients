@@ -307,7 +307,7 @@ final class PresentationTests: XCTestCase {
         let sample = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
         let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]
         XCTAssertEqual(Set(sample.keys), expected)
-        XCTAssertEqual(sample["appVersion"] as? String, "0.1.19")
+        XCTAssertEqual(sample["appVersion"] as? String, "0.1.20")
         XCTAssertEqual(sample["surface"] as? String, "cli")
         XCTAssertEqual(sample["inputTokens"] as? Int, 48_000)
         XCTAssertEqual(sample["cacheReadInputTokens"] as? Int, 36_000)

@@ -1,6 +1,6 @@
 # Tokrate desktop — Windows and Linux development
 
-Tauri 2 uses the system webview, a Rust monitor, and a small React + TypeScript tray UI. The native Swift Mac client is maintained separately. This client is version **0.1.19, pre-release alpha**; do not advertise stable platform support until the acceptance checklist passes.
+Tauri 2 uses the system webview, a Rust monitor, and a small React + TypeScript tray UI. The native Swift Mac client is maintained separately. This client is version **0.1.20, pre-release alpha**; do not advertise stable platform support until the acceptance checklist passes.
 
 ## Build
 

@@ -269,7 +269,7 @@ final class OpenCodeMonitorTests: XCTestCase {
         XCTAssertEqual(json["parserVersion"] as? String, "opencode-db-v1")
         XCTAssertEqual(json["metricVersion"] as? String, "opencode-observed-turn-v1")
         XCTAssertEqual(json["clientVersion"] as? String, "1.18.31")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.19")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.20")
         XCTAssertTrue(json["surface"] is NSNull)
         XCTAssertEqual(json["cacheWriteInputTokens"] as? Int, 0)
         XCTAssertEqual(json["inputTokens"] as? Int, 1_600)
