@@ -303,15 +303,19 @@ struct CommunityLine: Equatable {
         guard board.collectionEnabled,
               let id = cohort.communityBoardID,
               let match = board.cohorts.first(where: { $0.id == id }),
-              let community = match.medianThroughput, community.isFinite, community > 0 else { return nil }
+              let community = match.medianThroughput, community.isFinite, community > 0,
+              // A median the clients would never upload themselves is not shown.
+              community <= ResponseSpeed.maximumTokensPerSecond else { return nil }
         let localStats: MetricStats? = switch board.window {
         case "15m": local?.recent15Minutes.throughput
         case "24h", "24hr": local?.last24Hours.throughput
         default: nil
         }
         var position: Position?
-        if let localStats, localStats.count >= SpeedDelta.minimumTurns, let mine = localStats.median {
-            let percent = Int(((mine - community) / community * 100).rounded())
+        // The board comes from the network: a tiny median would make the percentage too large for an
+        // Int, so it is converted only when it fits, never trapped on.
+        if let localStats, localStats.count >= SpeedDelta.minimumTurns, let mine = localStats.median,
+           let percent = Int(exactly: ((mine - community) / community * 100).rounded()) {
             position = percent > 0 ? .faster(percent: percent) : percent < 0 ? .slower(percent: -percent) : .level
         }
         let caution: Caution? = board.state == "stale"

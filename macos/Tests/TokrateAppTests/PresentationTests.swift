@@ -289,6 +289,19 @@ final class PresentationTests: XCTestCase {
         XCTAssertNil(CommunityLine.make(board: try board(id: "[\"other\"]"), cohort: cohort, local: local))
     }
 
+    func testAnImplausibleCommunityMedianNeverCrashesTheLine() throws {
+        let cohort = ModelCohort(metric("1", rate: 60))
+        let id = try XCTUnwrap(cohort.communityBoardID)
+        let records = (1...5).map { metric("r\($0)", secondsAgo: Double($0) * 600, rate: 60) }
+        let local = DashboardSnapshot(records: records, range: .day, now: now).localPeriodComparison
+
+        // 60 / 1e-20 would be about 6e23 percent, far outside Int.
+        let tiny = try XCTUnwrap(CommunityLine.make(board: board(median: 1e-20, id: id), cohort: cohort, local: local))
+        XCTAssertNil(tiny.position)
+        // Above the speed the clients themselves treat as plausible, the median is not shown at all.
+        XCTAssertNil(CommunityLine.make(board: try board(median: 1e9, id: id), cohort: cohort, local: local))
+    }
+
     // MARK: Trend runs and the sample payload
 
     func testTrendRunsBreakOnlyAtLongGapsAndKeepSingleBuckets() {
