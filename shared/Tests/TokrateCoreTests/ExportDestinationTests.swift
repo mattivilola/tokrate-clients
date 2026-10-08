@@ -113,8 +113,28 @@ final class ExportDestinationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fresh), Data("through".utf8))
     }
 
-    func testTheRejectionsExplainThemselves() {
-        XCTAssertTrue(String(describing: ExportDestination.Rejection.insideSourceFolder("/home/me/.codex/sessions")).contains("/home/me/.codex/sessions"))
+    func testTheRejectionsExplainThemselvesNamingTheToolAndNeverAPath() throws {
         XCTAssertTrue(String(describing: ExportDestination.Rejection.notRegularFile).contains("regular file"))
+        let expected: [(URL, String)] = [
+            (folders.codex, "Codex sessions"), (folders.claudeCode, "Claude Code projects"), (folders.grokBuild, "Grok Build sessions"),
+            (folders.antigravity, "Antigravity data"), (folders.openCode, "OpenCode data")
+        ]
+        let homeComponents = [root.lastPathComponent, NSHomeDirectory()]
+        for (folder, name) in expected {
+            var message = ""
+            do {
+                _ = try ExportDestination.validated(folder.appendingPathComponent("export.jsonl"), sourceFolders: folders)
+                XCTFail("\(name) must be refused")
+            } catch {
+                message = String(describing: error)
+                XCTAssertEqual(error as? ExportDestination.Rejection, .insideSourceFolder(name))
+            }
+            XCTAssertTrue(message.contains("the \(name) folder"), message)
+            XCTAssertFalse(message.contains("/"), "no path in: \(message)")
+            for component in homeComponents { XCTAssertFalse(message.contains(component), "\(component) in: \(message)") }
+        }
+        for rejection in [ExportDestination.Rejection.notRegularFile, .missingFolder] {
+            XCTAssertFalse(String(describing: rejection).contains("/"))
+        }
     }
 }

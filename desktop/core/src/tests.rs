@@ -8994,3 +8994,26 @@ fn an_app_file_that_is_a_pipe_is_refused_without_waiting_for_a_writer() {
     let error = within_seconds(move || crate::read_private_file(&path, 1_024).unwrap_err());
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+#[test]
+fn the_queue_never_holds_more_than_its_cap_even_while_a_large_batch_is_appended() {
+    let (mut queue, _) = queue_with_jitter(0);
+    queue.enable(time("2026-10-03T09:59:00Z"));
+    let now = time("2026-10-03T10:30:00Z");
+    let completed = time("2026-10-03T10:01:00Z");
+    let turns: Vec<TurnMetric> = (0..MAX_PENDING_SAMPLES + 500)
+        .map(|index| metric(format!("turn-{index}"), completed))
+        .collect();
+    queue.enqueue(&turns, now);
+    assert_eq!(queue.len(), MAX_PENDING_SAMPLES);
+    assert_eq!(queue.peak_len(), MAX_PENDING_SAMPLES, "never one over");
+    // The oldest were dropped: the first 500 are gone, the newest remain.
+    let first = queue.batch(time("2026-10-03T11:00:00Z"));
+    assert_eq!(first.len(), 50);
+    let more: Vec<TurnMetric> = (0..10)
+        .map(|index| metric(format!("late-{index}"), completed))
+        .collect();
+    queue.enqueue(&more, now);
+    assert_eq!(queue.len(), MAX_PENDING_SAMPLES);
+    assert_eq!(queue.peak_len(), MAX_PENDING_SAMPLES);
+}

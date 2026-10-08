@@ -4,6 +4,7 @@ import { client } from "./metrics";
 import { useDashboard } from "./model/use-dashboard";
 import { useStore, type AppStore } from "./store/store";
 import { Community } from "./components/Community";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConsentSheet } from "./components/ConsentSheet";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
@@ -46,25 +47,51 @@ function Notices({ updates = true }: { updates?: boolean }) {
   );
 }
 
+/** Shown in place of the community card when it cannot be drawn (the board is data from a server). */
+export function CommunityUnavailable() {
+  return (
+    <section className="card community" aria-label="Community">
+      <p className="detail-fine" role="status">
+        Community data unavailable
+      </p>
+    </section>
+  );
+}
+
+function DataUnavailable() {
+  return (
+    <section className="card" aria-label="Measurements">
+      <p className="detail-fine" role="status">
+        These measurements could not be shown.
+      </p>
+    </section>
+  );
+}
+
 function Home() {
   const store = useAppStore();
   const dashboard = useDashboard(store);
   const board = useStore(store, (s) => s.snapshot.board);
+  const revision = useStore(store, (s) => s.snapshot.revision);
   return (
     <>
       <Header dashboard={dashboard} />
       <Notices />
       <main className="scroll home-scroll">
-        {dashboard.isAll ? (
-          <CompareAll dashboard={dashboard} board={board} />
-        ) : (
-          <>
-            <Hero dashboard={dashboard} />
-            <Trend dashboard={dashboard} />
-            <YourModels dashboard={dashboard} />
-          </>
-        )}
-        <Community dashboard={dashboard} />
+        <ErrorBoundary fallback={<DataUnavailable />} resetKey={revision}>
+          {dashboard.isAll ? (
+            <CompareAll dashboard={dashboard} board={board} />
+          ) : (
+            <>
+              <Hero dashboard={dashboard} />
+              <Trend dashboard={dashboard} />
+              <YourModels dashboard={dashboard} />
+            </>
+          )}
+        </ErrorBoundary>
+        <ErrorBoundary fallback={<CommunityUnavailable />} resetKey={board}>
+          <Community dashboard={dashboard} />
+        </ErrorBoundary>
       </main>
       <Footer />
     </>
@@ -110,6 +137,35 @@ function SmokeProbe() {
   return null;
 }
 
+/** Last resort when a whole view fails to render: the way to settings and to a retry stays. */
+function WindowFailed({ retry, kind }: { retry: () => void; kind: WindowKind }) {
+  const store = useAppStore();
+  return (
+    <main className="scroll home-scroll">
+      <section className="card" role="alert">
+        <p className="detail-fine">Something could not be shown.</p>
+        <p className="links">
+          <button type="button" className="inline-link" onClick={retry}>
+            Try again
+          </button>
+          {kind === "flyout" && (
+            <button
+              type="button"
+              className="inline-link"
+              onClick={() => {
+                store.openSettings();
+                retry();
+              }}
+            >
+              Open settings
+            </button>
+          )}
+        </p>
+      </section>
+    </main>
+  );
+}
+
 export function App({ store, kind }: { store: AppStore; kind: WindowKind }) {
   useEffect(() => store.start(), [store]);
   const view = useStore(store, (s) => s.ui.view);
@@ -134,18 +190,20 @@ export function App({ store, kind }: { store: AppStore; kind: WindowKind }) {
   return (
     <StoreContext.Provider value={store}>
       <div className={`app-shell ${kind === "history" ? "window-history" : "window-flyout"}`}>
-        {!ready ? null : kind === "history" ? (
-          <History />
-        ) : onboarding ? (
-          <>
-            <Notices />
-            <Onboarding />
-          </>
-        ) : view === "settings" ? (
-          <SettingsView />
-        ) : (
-          <Home />
-        )}
+        <ErrorBoundary fallback={(retry) => <WindowFailed retry={retry} kind={kind} />}>
+          {!ready ? null : kind === "history" ? (
+            <History />
+          ) : onboarding ? (
+            <>
+              <Notices />
+              <Onboarding />
+            </>
+          ) : view === "settings" ? (
+            <SettingsView />
+          ) : (
+            <Home />
+          )}
+        </ErrorBoundary>
         {sheetOpen && !onboarding && <ConsentSheet />}
         <SmokeProbe />
       </div>

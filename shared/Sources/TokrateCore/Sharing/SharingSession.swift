@@ -21,6 +21,8 @@ public final class SharingSession {
     /// The community board is fetched, and an upload attempted, at most this often.
     static let refreshInterval: TimeInterval = 30
     private static let maximumBatch = 50
+    /// Samples waiting in memory; the oldest are dropped first.
+    static let maximumQueued = 1_000
 
     public private(set) var isEnabled = false
     public private(set) var board: GlobalBoard?
@@ -39,6 +41,8 @@ public final class SharingSession {
     @ObservationIgnored private var lastBoardRefresh: Date?
     @ObservationIgnored private var lastUploadAttempt: Date?
     @ObservationIgnored private var isRefreshing = false
+    /// The most entries the queue has held at once, to show in tests that the cap is never exceeded.
+    @ObservationIgnored private(set) var largestQueue = 0
     /// The random delay of each upload slot, by the slot's boundary; kept for a day with the queue's own limit.
     @ObservationIgnored private var slotJitter: [Date: TimeInterval] = [:]
     @ObservationIgnored private let jitterSource: @Sendable () -> TimeInterval
@@ -91,9 +95,11 @@ public final class SharingSession {
         for metric in metrics where metric.completedAt >= consentStartedAt && metric.completedAt <= now && !seen.contains(metric.id) {
             guard let sample = SharedSample(metric) else { continue }
             seen.insert(metric.id)
+            // The cap holds at every moment, not after the batch: the oldest entry makes room.
+            if queue.count >= Self.maximumQueued { queue.removeFirst() }
             queue.append(Pending(localID: metric.id, sample: sample, completedAt: metric.completedAt, uploadableAt: uploadableAt(of: sample, queuedAt: now)))
+            largestQueue = max(largestQueue, queue.count)
         }
-        if queue.count > 1000 { queue = Array(queue.suffix(1000)) }
         // The monitor/history also deduplicates. Bound this session's defense against repeated records.
         if seen.count > 50_000 { seen = Set(queue.map(\.localID)) }
         pendingCount = queue.count

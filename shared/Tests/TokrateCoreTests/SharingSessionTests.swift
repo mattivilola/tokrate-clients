@@ -511,6 +511,25 @@ final class SharingSessionTests: XCTestCase {
         XCTAssertTrue(claude("claude-transcript-v2").isSupportedSourceTuple, "v2 stays displayable locally")
     }
 
+    func testTheQueueNeverHoldsMoreThanTheCapEvenWhileABatchIsAppended() async throws {
+        let transport = MockTransport()
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: { 0 })
+        session.enable(now: now, startPolling: false)
+        // 1,100 distinct turns in one batch: the output token count tells them apart.
+        let batch = (0..<1_100).map { index in
+            TurnMetric(id: "turn-\(index)", completedAt: now, model: "gpt-test", outputTokens: index + 1, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary", provider: "openai", delegatedOutputTokens: 0)
+        }
+        session.enqueue(batch, now: now)
+        XCTAssertEqual(session.largestQueue, SharingSession.maximumQueued, "never above the cap, not even for an instant")
+        XCTAssertEqual(session.pendingCount, 1_000)
+        // The oldest 100 made room: the first upload starts with the 101st turn.
+        await session.refresh(now: later)
+        let requests = await transport.snapshot()
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(uploads(requests).first?.httpBody)) as? [String: Any])
+        let tokens = try XCTUnwrap(object["samples"] as? [[String: Any]]).compactMap { $0["outputTokens"] as? Int }
+        XCTAssertEqual(tokens, Array(101...150))
+    }
+
     func testQueueIsBoundedAndExpiresAfterADay() {
         let session = SharingSession(identity: MemoryIdentity(), transport: MockTransport())
         session.enable(now: now, startPolling: false)

@@ -331,6 +331,9 @@ pub struct SharingQueue {
     /// The delay drawn for each slot that has queued samples, by the slot's boundary.
     jitters: HashMap<i64, Duration>,
     jitter_source: JitterSource,
+    /// The most samples the queue ever held at once.
+    #[cfg(test)]
+    peak_len: usize,
 }
 
 impl Default for SharingQueue {
@@ -361,6 +364,8 @@ impl SharingQueue {
             pending: VecDeque::new(),
             seen_local_ids: HashSet::new(),
             jitters: HashMap::new(),
+            #[cfg(test)]
+            peak_len: 0,
             jitter_source: Box::new(move || {
                 source().clamp(
                     Duration::zero(),
@@ -410,14 +415,19 @@ impl SharingQueue {
             self.seen_local_ids.insert(metric.id.clone());
             let source = &mut self.jitter_source;
             self.jitters.entry(slot).or_insert_with(|| source());
+            // The oldest go as the newest arrive, so the queue never holds more than the cap.
+            if self.pending.len() >= MAX_PENDING_SAMPLES {
+                self.pending.pop_front();
+            }
             self.pending.push_back(PendingSample {
                 local_id: metric.id.clone(),
                 sample,
                 slot,
             });
-        }
-        while self.pending.len() > MAX_PENDING_SAMPLES {
-            self.pending.pop_front();
+            #[cfg(test)]
+            {
+                self.peak_len = self.peak_len.max(self.pending.len());
+            }
         }
         self.forget_unused_jitters();
         if self.seen_local_ids.len() > MAX_SEEN_LOCAL_IDS {
@@ -472,6 +482,12 @@ impl SharingQueue {
 
     pub fn len(&self) -> usize {
         self.pending.len()
+    }
+
+    /// The most samples the queue ever held at once.
+    #[cfg(test)]
+    pub(crate) fn peak_len(&self) -> usize {
+        self.peak_len
     }
 
     pub fn is_empty(&self) -> bool {

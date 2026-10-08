@@ -1,5 +1,7 @@
 use crate::{
-    badge, flyout,
+    badge,
+    board::Board,
+    flyout,
     schedule::{self, PollSignal, Woken},
     watcher::{WatchTarget, Watchers},
     Shared,
@@ -163,7 +165,7 @@ pub struct Snapshot {
     status: String,
     monitor_status: String,
     pending: usize,
-    board: Option<serde_json::Value>,
+    board: Option<Board>,
     revision: u64,
     records_changed: bool,
     sources: Vec<SourceStatus>,
@@ -190,10 +192,13 @@ pub struct Runtime {
     status: String,
     pub monitor_status: String,
     queue: SharingQueue,
-    board: Option<serde_json::Value>,
+    board: Option<Board>,
     generation: u64,
     revision: u64,
     network: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// The saved settings file is behind the in-memory settings (a save failed after sharing was
+    /// turned off): the host writes it again as soon as it can.
+    settings_unsaved: bool,
     sharing_active: bool,
     smoke: bool,
     history_read_error: bool,
@@ -302,6 +307,7 @@ impl Runtime {
             generation: 0,
             revision: 0,
             network: None,
+            settings_unsaved: false,
             sharing_active: false,
             smoke: false,
             history_read_error,
@@ -431,21 +437,38 @@ impl Runtime {
         tokrate_core::write_private_file(self.dir.join("settings.json"), &bytes)
             .map_err(|_| "Could not save settings".into())
     }
-    pub fn update(&mut self, p: SettingsPatch) -> Result<(), String> {
-        let mut next = self.settings.clone();
-        if let Some(v) = p.sharing {
-            if v {
-                return Err("Community sharing requires the current informed consent".into());
-            }
-            if next.sharing {
-                next.sharing_consent = Some(SharingConsent {
-                    notice_version: SHARING_NOTICE_VERSION.into(),
-                    recorded_at: Utc::now().to_rfc3339(),
-                    action: SharingConsentAction::Withdrawn,
-                });
-            }
-            next.sharing = false;
+    /// Turns community sharing off in memory, at once: the task is aborted, the queue and board
+    /// are cleared and nothing is authorized any more, whether or not the setting can be written.
+    /// The saved file is brought up to date by the next successful save, which includes this
+    /// state; until then `settings_unsaved` makes the host retry it.
+    fn withdraw_sharing(&mut self, action: SharingConsentAction) {
+        if self.settings.sharing {
+            self.settings.sharing_consent = Some(SharingConsent {
+                notice_version: SHARING_NOTICE_VERSION.into(),
+                recorded_at: Utc::now().to_rfc3339(),
+                action,
+            });
         }
+        self.settings.sharing = false;
+        self.settings_unsaved = true;
+        self.stop_sharing();
+    }
+    /// Writes the settings, remembering whether the file is behind the in-memory state.
+    fn persist_settings(&mut self) -> Result<(), String> {
+        let saved = self.save_settings(&self.settings);
+        self.settings_unsaved = saved.is_err();
+        saved
+    }
+    pub fn update(&mut self, p: SettingsPatch) -> Result<(), String> {
+        let turning_off = p.sharing == Some(false);
+        if p.sharing == Some(true) {
+            return Err("Community sharing requires the current informed consent".into());
+        }
+        // Withdrawing takes effect before anything that can fail, including saving.
+        if turning_off {
+            self.withdraw_sharing(SharingConsentAction::Withdrawn);
+        }
+        let mut next = self.settings.clone();
         if let Some(v) = p.monitoring {
             next.monitoring = v
         }
@@ -470,11 +493,11 @@ impl Runtime {
             }
             next.days = v
         }
-        self.save_settings(&next)?;
+        let saved = self.save_settings(&next);
+        self.settings_unsaved = saved.is_err();
+        // A failed save leaves the other changes unapplied; sharing stays off if it was turned off.
+        saved?;
         self.settings = next;
-        if p.sharing == Some(false) {
-            self.stop_sharing();
-        }
         // The tray, the monitoring state or the selection may have changed.
         self.signal.request();
         Ok(())
@@ -509,9 +532,7 @@ impl Runtime {
         if self.smoke && accepted {
             return Err("Smoke runs cannot share".into());
         }
-        let mut next = self.settings.clone();
-        next.sharing = accepted;
-        next.sharing_consent = Some(SharingConsent {
+        let consent = SharingConsent {
             notice_version: SHARING_NOTICE_VERSION.into(),
             recorded_at: Utc::now().to_rfc3339(),
             action: if accepted {
@@ -519,11 +540,25 @@ impl Runtime {
             } else {
                 SharingConsentAction::Declined
             },
-        });
-        self.save_settings(&next)?;
-        self.settings = next;
+        };
+        if accepted {
+            // Persist the consent first; nothing starts unless it was saved.
+            let mut next = self.settings.clone();
+            next.sharing = true;
+            next.sharing_consent = Some(consent);
+            self.save_settings(&next)?;
+            self.settings = next;
+            self.settings_unsaved = false;
+            self.consent_prompt_required = false;
+            self.stop_sharing();
+            return Ok(());
+        }
+        // Declining stops everything in memory first, then records the choice. If it cannot be
+        // saved the choice stays pending on screen, and sharing stays off.
+        self.withdraw_sharing(SharingConsentAction::Declined);
+        self.settings.sharing_consent = Some(consent);
+        self.persist_settings()?;
         self.consent_prompt_required = false;
-        self.stop_sharing();
         Ok(())
     }
     fn stop_sharing(&mut self) {
@@ -605,6 +640,10 @@ impl Runtime {
     }
     fn poll_monitor_at(&mut self, now: DateTime<Utc>) -> Polled {
         self.absorb_signal();
+        if self.settings_unsaved {
+            // Sharing was turned off but the file still says otherwise: write it again.
+            let _ = self.persist_settings();
+        }
         let mut records = Vec::new();
         let mut failed = false;
         if self.settings.monitoring {
@@ -762,6 +801,9 @@ impl Runtime {
     /// Writes what the next launch needs when the app quits, so the files read since the last
     /// write are not read again.
     pub fn save_on_exit(&mut self) {
+        if self.settings_unsaved {
+            let _ = self.persist_settings();
+        }
         if self.history_read_error {
             return;
         }
@@ -1201,7 +1243,7 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
         tokio::time::sleep(schedule::sharing_delay(Utc::now(), last_board, next_upload)).await;
     }
 }
-async fn fetch_board(client: &reqwest::Client) -> Result<serde_json::Value, ()> {
+async fn fetch_board(client: &reqwest::Client) -> Result<Board, ()> {
     let response = client
         .get(format!("{API}/board"))
         .send()
@@ -1219,11 +1261,8 @@ async fn fetch_board(client: &reqwest::Client) -> Result<serde_json::Value, ()> 
         }
         bytes.extend_from_slice(&chunk)
     }
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
-    if value["schemaVersion"] != 1 || !value["cohorts"].is_array() {
-        return Err(());
-    }
-    Ok(value)
+    // Only the typed board leaves here; anything that does not fit it is no board.
+    Board::parse(&bytes).ok_or(())
 }
 
 #[cfg(test)]
@@ -1301,6 +1340,176 @@ mod tests {
         }
         assert!(!requests.concat().contains("reqwest"));
     }
+    /// A runtime that is sharing: consent accepted and saved, a community task running (it only
+    /// waits and reports through `stopped` when it is dropped), a queued sample and a board.
+    fn sharing_runtime(dir: &PathBuf) -> (Runtime, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .unwrap();
+        assert!(runtime.settings.sharing_authorized());
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Dropped(stopped.clone());
+        runtime.network = Some(tauri::async_runtime::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await
+        }));
+        runtime.sharing_active = true;
+        let now = Utc::now();
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        runtime.queue.enqueue(
+            &[turn(
+                "queued",
+                "codex",
+                "gpt-test",
+                now - chrono::Duration::minutes(1),
+            )],
+            now,
+        );
+        assert_eq!(runtime.queue.len(), 1);
+        runtime.board = Board::parse(br#"{"schemaVersion":1,"cohorts":[]}"#);
+        assert!(runtime.board.is_some());
+        (runtime, stopped)
+    }
+    /// Makes saving settings fail: a folder sits where the file belongs.
+    fn make_saving_fail(dir: &PathBuf) {
+        let _ = std::fs::remove_file(dir.join("settings.json"));
+        std::fs::create_dir(dir.join("settings.json")).unwrap();
+    }
+    fn make_saving_work(dir: &PathBuf) {
+        std::fs::remove_dir(dir.join("settings.json")).unwrap();
+    }
+    fn assert_sharing_stopped(runtime: &Runtime, stopped: &std::sync::atomic::AtomicBool) {
+        assert!(!runtime.settings.sharing);
+        assert!(!runtime.settings.sharing_authorized());
+        assert!(runtime.queue.is_empty());
+        assert!(runtime.board.is_none());
+        assert!(!runtime.sharing_active);
+        assert!(runtime.network.is_none());
+        for _ in 0..200 {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the community task was not aborted");
+    }
+
+    #[test]
+    fn turning_sharing_off_stops_everything_even_when_the_settings_cannot_be_saved() {
+        let dir = temporary();
+        let (mut runtime, stopped) = sharing_runtime(&dir);
+        make_saving_fail(&dir);
+        let patch = serde_json::from_value(serde_json::json!({"sharing": false})).unwrap();
+        assert_eq!(runtime.update(patch), Err("Could not save settings".into()));
+        assert_sharing_stopped(&runtime, &stopped);
+        assert!(runtime.settings_unsaved);
+        assert_eq!(
+            runtime.settings.sharing_consent.as_ref().unwrap().action,
+            SharingConsentAction::Withdrawn
+        );
+        // Nothing turns it back on, not even asking for it or retrying.
+        let on = serde_json::from_value(serde_json::json!({"sharing": true})).unwrap();
+        assert!(runtime.update(on).is_err());
+        assert!(!runtime.settings.sharing_authorized());
+        // Another change that does save writes the withdrawal with it.
+        make_saving_work(&dir);
+        let other = serde_json::from_value(serde_json::json!({"showSpeed": false})).unwrap();
+        runtime.update(other).unwrap();
+        assert!(!runtime.settings_unsaved);
+        let saved: Settings =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert!(!saved.sharing && !saved.sharing_authorized() && !saved.show_speed);
+        assert_eq!(
+            saved.sharing_consent.unwrap().action,
+            SharingConsentAction::Withdrawn
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_withdrawal_that_could_not_be_saved_is_written_by_the_next_poll() {
+        let dir = temporary();
+        let (mut runtime, _stopped) = sharing_runtime(&dir);
+        make_saving_fail(&dir);
+        let patch = serde_json::from_value(serde_json::json!({"sharing": false})).unwrap();
+        assert!(runtime.update(patch).is_err());
+        runtime.poll_monitor_at(Utc::now());
+        assert!(runtime.settings_unsaved, "still failing");
+        make_saving_work(&dir);
+        runtime.poll_monitor_at(Utc::now());
+        assert!(!runtime.settings_unsaved);
+        let saved: Settings =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert!(!saved.sharing_authorized());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn withdrawing_with_an_invalid_companion_change_still_stops_sharing() {
+        let dir = temporary();
+        let (mut runtime, stopped) = sharing_runtime(&dir);
+        let patch =
+            serde_json::from_value(serde_json::json!({"sharing": false, "days": 3})).unwrap();
+        assert!(runtime.update(patch).is_err());
+        assert_sharing_stopped(&runtime, &stopped);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn declining_consent_stops_everything_even_when_the_settings_cannot_be_saved() {
+        let dir = temporary();
+        let (mut runtime, stopped) = sharing_runtime(&dir);
+        runtime.consent_prompt_required = true;
+        make_saving_fail(&dir);
+        assert_eq!(
+            runtime.record_sharing_consent(false, SHARING_NOTICE_VERSION),
+            Err("Could not save settings".into())
+        );
+        assert_sharing_stopped(&runtime, &stopped);
+        assert_eq!(
+            runtime.settings.sharing_consent.as_ref().unwrap().action,
+            SharingConsentAction::Declined
+        );
+        assert!(
+            runtime.consent_prompt_required,
+            "the choice stays pending on screen"
+        );
+        assert!(runtime.settings_unsaved);
+        make_saving_work(&dir);
+        runtime
+            .record_sharing_consent(false, SHARING_NOTICE_VERSION)
+            .unwrap();
+        assert!(!runtime.consent_prompt_required && !runtime.settings_unsaved);
+        let saved: Settings =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert!(!saved.sharing_authorized());
+        assert_eq!(
+            saved.sharing_consent.unwrap().action,
+            SharingConsentAction::Declined
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn accepting_consent_still_saves_before_it_starts_anything() {
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        make_saving_fail(&dir);
+        assert!(runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .is_err());
+        assert!(!runtime.settings.sharing_authorized());
+        assert!(runtime.consent_prompt_required);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Settings that are a pipe or larger than the cap are unreadable like corrupt ones: defaults,
     /// sharing off, no consent prompt, and no wait for a writer.
     #[cfg(unix)]

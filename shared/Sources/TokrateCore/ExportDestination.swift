@@ -4,7 +4,8 @@ import Foundation
 /// never be one of the tool files Tokrate reads, and never something that is not a plain file.
 public enum ExportDestination {
     public enum Rejection: Error, Equatable, CustomStringConvertible {
-        /// The destination is, or is inside, a folder a coding tool keeps its sessions in.
+        /// The destination is, or is inside, a folder a coding tool keeps its sessions in. Carries the
+        /// tool's folder by name ("Codex sessions"), never its path, which would show the user's home.
         case insideSourceFolder(String)
         /// The destination exists and is a folder, FIFO, device or socket.
         case notRegularFile
@@ -14,7 +15,7 @@ public enum ExportDestination {
         public var description: String {
             switch self {
             case .insideSourceFolder(let folder):
-                "The export file must not be inside \(folder), where a coding tool keeps its data. Choose another --out location."
+                "The export file must not be inside the \(folder) folder, where the coding tool keeps its data. Choose another --out location."
             case .notRegularFile:
                 "The --out path exists and is not a regular file."
             case .missingFolder:
@@ -40,10 +41,15 @@ public enum ExportDestination {
             destination = destination.resolvingSymlinksInPath()
         }
         let path = destination.path
-        for root in [sourceFolders.codex, sourceFolders.claudeCode, sourceFolders.grokBuild, sourceFolders.antigravity, sourceFolders.openCode] {
+        let roots = [
+            ("Codex sessions", sourceFolders.codex), ("Claude Code projects", sourceFolders.claudeCode),
+            ("Grok Build sessions", sourceFolders.grokBuild), ("Antigravity data", sourceFolders.antigravity),
+            ("OpenCode data", sourceFolders.openCode)
+        ]
+        for (name, root) in roots {
             let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
             if path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/") {
-                throw Rejection.insideSourceFolder(root.standardizedFileURL.path)
+                throw Rejection.insideSourceFolder(name)
             }
         }
         var target = stat()
