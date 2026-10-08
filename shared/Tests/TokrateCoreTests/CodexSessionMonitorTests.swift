@@ -1,9 +1,15 @@
+import CryptoKit
 import Foundation
 import TokrateCore
 import XCTest
 
 @MainActor
 final class CodexSessionMonitorTests: XCTestCase {
+    /// A live response is identified by a digest of its session and response ids, never by them.
+    private func liveDigest(_ identity: String) -> String {
+        SHA256.hash(data: Data("response|\(identity)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     func testFreshTurnBypassesLargeArchiveWithinSixPollsAndHonorsByteBudget() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -123,7 +129,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         XCTAssertEqual(metrics.first { $0.outputTokens == 400 }?.responseOutputTokens, 400)
         XCTAssertEqual(metrics.first { $0.outputTokens == 400 }?.parserVersion, "codex-rollout-v2")
         // resp-before completed 90 s before liveSince and is filtered; resp-after is live exactly once.
-        XCTAssertEqual(responses.map(\.id), ["mon-session|resp-after"])
+        XCTAssertEqual(responses.map(\.id), [liveDigest("mon-session|resp-after")])
         XCTAssertEqual(responses.first?.outputTokens, 500)
         XCTAssertEqual(responses.first?.durationSeconds ?? 0, 11, accuracy: 0.001, "from task_started to the usage record")
         XCTAssertEqual(responses.first?.model, "gpt-test")
@@ -144,7 +150,7 @@ final class CodexSessionMonitorTests: XCTestCase {
         // The settled re-emission carries the turns again (same ids) once their delegated total is final.
         XCTAssertEqual(Set(laterMetrics.map(\.outputTokens)), [500, 600])
         XCTAssertEqual(laterMetrics.filter { $0.delegatedOutputTokens == nil }.map(\.outputTokens), [600])
-        XCTAssertEqual(laterResponses.map(\.id), ["mon-session|resp-later"])
+        XCTAssertEqual(laterResponses.map(\.id), [liveDigest("mon-session|resp-later")])
     }
 
     func testNotedAppendIsReadByTheNextPollWithoutWaitingForDiscovery() async throws {

@@ -542,8 +542,10 @@ public actor GrokSessionMonitor {
                 let usageDate = try? sessionFileDate(at: usageURL)
                 if let usageDate, usageDate != session.usageModifiedAt,
                    let size = try? sessionFileSize(at: usageURL), size <= Self.maximumUsageBytes, size <= budget {
-                    let data = try Data(contentsOf: usageURL, options: [.mappedIfSafe])
-                    budget -= data.count
+                    // A file that is not a regular one, or grew past the cap, holds no usable snapshot.
+                    let data: Data?
+                    do { data = try RegularFile.read(usageURL, maximumBytes: Self.maximumUsageBytes) } catch is RegularFile.Failure { data = nil }
+                    budget -= data?.count ?? 0
                     session.usageReadCheckedAt = now
                     if session.usageData != data {
                         session.usageData = data
@@ -651,11 +653,16 @@ public actor GrokSessionMonitor {
             session.summaryEffort = nil
             return
         }
-        guard size <= budget, let data = try? Data(contentsOf: summaryURL) else { return }
-        budget -= data.count
+        guard size <= budget else { return }
+        // A file that is not a regular one, or grew past the cap, holds no usable summary; any other
+        // failure is retried at the next poll.
+        let data: Data?
+        do { data = try RegularFile.read(summaryURL, maximumBytes: Self.maximumSummaryBytes) } catch is RegularFile.Failure { data = nil } catch { return }
+        budget -= data?.count ?? 0
         session.summaryModifiedAt = date
         session.summarySize = size
-        session.summaryEffort = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+        session.summaryEffort = data
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             .flatMap { $0["reasoning_effort"] as? String }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }

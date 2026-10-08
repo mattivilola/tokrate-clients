@@ -106,18 +106,18 @@ public struct CodexEventParser: Sendable {
             provider = payload["model_provider"] as? String == "openai" ? "openai" : "unknown"
             if let source = payload["source"] as? String, ["cli", "vscode", "exec", "desktop", "app"].contains(source) { sourceKind = "primary" }
             if let source = payload["source"] as? [String: Any], source["subagent"] != nil { isAgentSession = true }
-            if let id = payload["id"] as? String, !id.isEmpty { sessionIdentity = id }
+            if let id = Self.identifier(payload["id"]) { sessionIdentity = id }
             if let parent = payload["parent_thread_id"] as? String, !parent.isEmpty { isAgentSession = true }
             if let path = payload["agent_path"] as? String, !path.isEmpty { isAgentSession = true }
             if let path = payload["agent_path"] as? [Any], !path.isEmpty { isAgentSession = true }
             // Children's `session_id` is the root thread; the parent thread is the fallback.
-            let rootID = Self.nonEmpty(payload["session_id"] as? String)
+            let rootID = Self.identifier(payload["session_id"])
             if isAgentSession {
                 let spawn = ((payload["source"] as? [String: Any])?["subagent"] as? [String: Any])?["thread_spawn"]
-                if spawn is [String: Any], let root = rootID ?? Self.nonEmpty(payload["parent_thread_id"] as? String) {
+                if spawn is [String: Any], let root = rootID ?? Self.identifier(payload["parent_thread_id"]) {
                     delegatedRootKey = DelegationRoot.key(client: TurnMetric.codexClient, rawSessionID: root)
                 }
-            } else if let root = rootID ?? Self.nonEmpty(payload["id"] as? String) {
+            } else if let root = rootID ?? Self.identifier(payload["id"]) {
                 primaryRootKey = DelegationRoot.key(client: TurnMetric.codexClient, rawSessionID: root)
             }
             return nil
@@ -127,7 +127,7 @@ public struct CodexEventParser: Sendable {
         if emittedTurnIDs.count > 8192 { emittedTurnIDs.removeAll(keepingCapacity: true) }
 
         if eventType == "turn_context" {
-            guard let turnID = payload["turn_id"] as? String, !turnID.isEmpty else { return nil }
+            guard let turnID = Self.identifier(payload["turn_id"]) else { return nil }
             var state = turns[turnID, default: TurnState()]
             updateModel(payload["model"] as? String, in: &state)
             updateReasoningEffort(payload["effort"], in: &state)
@@ -141,7 +141,7 @@ public struct CodexEventParser: Sendable {
         }
 
         if eventType == "token_usage_record" {
-            guard let turnID = payload["turn_id"] as? String, !turnID.isEmpty else { return nil }
+            guard let turnID = Self.identifier(payload["turn_id"]) else { return nil }
             var state = turns[turnID, default: TurnState()]
             consumeResponseUsage(payload, completedAt: parseDate(event["timestamp"]), turnID: turnID, state: &state)
             if let usage = payload["turn_token_usage"] as? [String: Any],
@@ -158,8 +158,7 @@ public struct CodexEventParser: Sendable {
 
         guard eventType == "event_msg",
               let subtype = payload["type"] as? String,
-              let turnID = payload["turn_id"] as? String,
-              !turnID.isEmpty
+              let turnID = Self.identifier(payload["turn_id"])
         else { return nil }
 
         let eventDate = parseDate(event["timestamp"])
@@ -265,11 +264,16 @@ public struct CodexEventParser: Sendable {
     /// The local pseudonym of one turn: a metric id for a primary turn, a work id for a child's.
     private func workID(_ turnID: String) -> String {
         let identity = sessionIdentity ?? sourceIdentity
-        return SHA256.hash(data: Data("\(identity)|\(turnID)".utf8)).map { String(format: "%02x", $0) }.joined()
+        return SHA256.hexDigest(of: "\(identity)|\(turnID)")
     }
 
-    private static func nonEmpty(_ value: String?) -> String? {
-        value.flatMap { $0.isEmpty ? nil : $0 }
+    /// Session, turn and response ids are kept as dictionary keys and in digests: none may be empty
+    /// or longer than `maximumIdentifierBytes`, so a 1 MiB line cannot pin that much memory.
+    static let maximumIdentifierBytes = 512
+
+    private static func identifier(_ value: Any?) -> String? {
+        guard let value = value as? String, !value.isEmpty, value.utf8.count <= maximumIdentifierBytes else { return nil }
+        return value
     }
 
     /// Tracks which record the next response answers. Model output items fix the response's start;
@@ -296,7 +300,7 @@ public struct CodexEventParser: Sendable {
         let started = responseStartedAt ?? lastTriggerAt
         responseStartedAt = nil
         guard let completedAt, let started,
-              let responseID = payload["response_id"] as? String, !responseID.isEmpty, responseID.count <= 200,
+              let responseID = Self.identifier(payload["response_id"]),
               let usage = payload["usage"] as? [String: Any],
               let tokens = nonnegativeInteger(usage["output_tokens"]),
               !state.seenResponseIDs.contains(responseID) else { return }
@@ -310,7 +314,7 @@ public struct CodexEventParser: Sendable {
         state.responseCount += 1
         guard !isAgentSession, !state.modelWasAmbiguous, let model = state.model else { return }
         completedResponses.append(LiveResponse(
-            id: "\(sessionIdentity ?? sourceIdentity)|\(responseID)",
+            id: SHA256.hexDigest(of: "response|\(sessionIdentity ?? sourceIdentity)|\(responseID)"),
             model: model,
             provider: provider,
             client: TurnMetric.codexClient,

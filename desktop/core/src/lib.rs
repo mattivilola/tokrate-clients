@@ -49,8 +49,8 @@ pub use selector::{
     TrayReadingKind, AUTO_LEAD_SECONDS, AUTO_WINDOW_MINUTES,
 };
 pub use sharing::{
-    signed_request, SharedSample, SharedSampleEnvelope, SharingQueue, SignedRequest, APP_VERSION,
-    MAX_PENDING_SAMPLES,
+    example_request_json, signed_request, SharedSample, SharedSampleEnvelope, SharingQueue,
+    SignedRequest, APP_VERSION, MAX_PENDING_SAMPLES,
 };
 pub use sources::{SourceCheckpoints, SourceMonitor, WatchFolder};
 

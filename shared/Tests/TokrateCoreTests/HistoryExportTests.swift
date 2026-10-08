@@ -68,7 +68,8 @@ final class HistoryExportTests: XCTestCase {
         let consent = now.addingTimeInterval(-3_600)
         session.enable(now: consent, startPolling: false)
         session.enqueue(metrics, now: now)
-        await session.refresh(now: now)
+        // Uploads leave once the turn's five-minute bucket has closed.
+        await session.refresh(now: now.addingTimeInterval(400))
         let firstUpload = await transport.firstUpload()
         let upload = try XCTUnwrap(firstUpload)
         let live = try XCTUnwrap(object(upload)["samples"] as? [[String: Any]])

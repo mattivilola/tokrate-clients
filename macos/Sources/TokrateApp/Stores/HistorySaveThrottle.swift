@@ -12,7 +12,8 @@ struct HistorySaveThrottle: Equatable {
     private var hasUnsavedRecords = false
     private var lastSave: Date?
 
-    mutating func noteNewRecords() {
+    /// Something the file does not have yet: new records, or records that expired out of the history.
+    mutating func noteUnsavedChanges() {
         hasUnsavedRecords = true
     }
 

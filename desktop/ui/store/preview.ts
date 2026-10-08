@@ -1,5 +1,6 @@
 import { communityId, type LiveResponse, type Metric } from "../metrics";
 import { parseSelection } from "../response";
+import sentExample from "./sent-example.json?raw";
 import type {
   Board,
   Bridge,
@@ -418,6 +419,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     },
     setDashboardFilters: async () => {},
     retrySharing: async () => read(null),
+    sentExample: async () => sentExample,
     chooseFolder: async (source) => {
       custom[source] = "~/Example/log-folder";
       return read(null);

@@ -19,6 +19,12 @@ const MAX_EXECUTORS: usize = 10_000;
 const MAX_CACHED_GENERATIONS: usize = 4_096;
 /// A blob above this size is treated as unreadable instead of being loaded.
 const MAX_BLOB_BYTES: i64 = 8 * 1_048_576;
+/// A database whose blobs add up to more than this in one read is skipped like one with too many
+/// rows: the row limits alone would allow gigabytes.
+const MAX_SNAPSHOT_BYTES: usize = 256 * 1_048_576;
+/// Longest execution id, variant or model decoded from a blob. A longer one makes the blob
+/// unreadable instead of being kept in memory.
+const MAX_DECODED_STRING_BYTES: usize = 512;
 
 /// Why a database was skipped for this poll.
 #[derive(Debug)]
@@ -118,11 +124,26 @@ pub(crate) struct Snapshot {
     pub bytes_read: usize,
 }
 
+/// The `has_subtrajectory` flag as read by [`truthy`], without materializing a value that could
+/// not be true: only a number or short text can be.
+const FLAG_COLUMN: &str = "CASE typeof(has_subtrajectory) \
+    WHEN 'integer' THEN has_subtrajectory WHEN 'real' THEN has_subtrajectory \
+    WHEN 'text' THEN CASE WHEN length(has_subtrajectory) <= 16 THEN has_subtrajectory END END";
+
 /// Reads one database. Never writes: the connection is read-only, honours the write-ahead log
 /// (no `immutable`) and waits at most half a second for a lock.
 pub(crate) fn read_database(
     path: &Path,
     cache: &mut GenerationCache,
+) -> Result<Snapshot, ReadError> {
+    read_database_within(path, cache, MAX_SNAPSHOT_BYTES)
+}
+
+/// [`read_database`] with its own limit on the blob bytes one read may load.
+pub(crate) fn read_database_within(
+    path: &Path,
+    cache: &mut GenerationCache,
+    max_bytes: usize,
 ) -> Result<Snapshot, ReadError> {
     let mut connection = open_read_only(path)?;
     // One read transaction so steps, executions and generations belong together.
@@ -139,11 +160,11 @@ pub(crate) fn read_database(
         return Ok(snapshot);
     }
 
-    let mut statement = transaction.prepare(
-        "SELECT idx, has_subtrajectory, \
+    let mut statement = transaction.prepare(&format!(
+        "SELECT idx, {FLAG_COLUMN}, \
          CASE WHEN length(metadata) <= ?1 THEN metadata END, length(metadata) \
          FROM steps ORDER BY idx LIMIT ?2",
-    )?;
+    ))?;
     let mut rows = statement.query(rusqlite::params![MAX_BLOB_BYTES, MAX_STEPS as i64 + 1])?;
     while let Some(row) = rows.next()? {
         if snapshot.steps.len() >= MAX_STEPS {
@@ -160,6 +181,9 @@ pub(crate) fn read_database(
             (None, Some(_)) => return Err(ReadError::Undecodable),
         };
         snapshot.bytes_read += blob.len();
+        if snapshot.bytes_read > max_bytes {
+            return Err(ReadError::TooLarge);
+        }
         let step = decode_step(idx, truthy(&flag), &blob).ok_or(ReadError::Undecodable)?;
         snapshot.steps.push(step);
     }
@@ -180,6 +204,9 @@ pub(crate) fn read_database(
             continue;
         };
         snapshot.bytes_read += blob.len();
+        if snapshot.bytes_read > max_bytes {
+            return Err(ReadError::TooLarge);
+        }
         // An unreadable executor row leaves its execution unfinished as far as Tokrate knows.
         if let Some(executor) = decode_executor(&blob) {
             snapshot.executors.push(executor);
@@ -214,6 +241,9 @@ pub(crate) fn read_database(
                 Some(None) => cache.remember_unreadable(idx),
                 Some(Some(blob)) => {
                     snapshot.bytes_read += blob.len();
+                    if snapshot.bytes_read > max_bytes {
+                        return Err(ReadError::TooLarge);
+                    }
                     match decode_generation(&blob) {
                         Some(generation) => cache.remember(idx, generation),
                         // An unreadable generation leaves its model calls without a model.
@@ -254,7 +284,7 @@ fn decode_step(idx: i64, has_subtrajectory: bool, blob: &[u8]) -> Option<Step> {
         Ok(Step {
             idx,
             has_subtrajectory,
-            execution_id: message.string(12)?.map(str::to_owned),
+            execution_id: bounded(message.string(12)?)?,
             // A missing 20.3 is generation 0.
             generation: match message.message(20)? {
                 Some(generation) => {
@@ -268,6 +298,15 @@ fn decode_step(idx: i64, has_subtrajectory: bool, blob: &[u8]) -> Option<Step> {
         })
     })();
     step.ok()
+}
+
+/// A string read from a blob and kept, or `Malformed` when it is longer than
+/// [`MAX_DECODED_STRING_BYTES`].
+fn bounded(value: Option<&str>) -> Result<Option<String>, Malformed> {
+    match value {
+        Some(value) if value.len() > MAX_DECODED_STRING_BYTES => Err(Malformed),
+        other => Ok(other.map(str::to_owned)),
+    }
 }
 
 /// A token counter: absent means 0; a value that does not fit a signed 64-bit integer is
@@ -294,18 +333,18 @@ fn timestamp(message: &Message, number: u32) -> Result<Option<DateTime<Utc>>, Ma
 fn decode_executor(blob: &[u8]) -> Option<Executor> {
     let message = Message::parse(blob)?;
     let executor = (|| -> Result<Option<Executor>, Malformed> {
-        let Some(id) = message.string(9)? else {
+        let Some(id) = bounded(message.string(9)?)? else {
             return Ok(None);
         };
         let variant = match message.message(10)? {
             Some(selection) => match selection.message(1)? {
-                Some(variant) => variant.string(28)?.map(str::to_owned),
+                Some(variant) => bounded(variant.string(28)?)?,
                 None => None,
             },
             None => None,
         };
         Ok(Some(Executor {
-            id: id.to_owned(),
+            id,
             state: message.varint(1)?.unwrap_or(0),
             variant,
         }))
@@ -322,7 +361,7 @@ fn decode_generation(blob: &[u8]) -> Option<Generation> {
                 gemini_only: false,
             });
         };
-        let model = inner.string(19)?.map(str::to_owned);
+        let model = bounded(inner.string(19)?)?;
         let mut flags = Vec::new();
         for pair in inner.messages(20)? {
             if pair.string(1)? == Some("used_non_gemini_model") {

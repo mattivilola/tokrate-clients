@@ -124,6 +124,8 @@ export interface Bridge {
   /** The flyout's coding-tool and provider filters, which the tray value follows. */
   setDashboardFilters(tool: ToolFilter, provider: ProviderFilter): Promise<void>;
   retrySharing(): Promise<Snapshot>;
+  /** The example upload of "See exactly what is sent": JSON text from the shell's real serializer. */
+  sentExample(): Promise<string>;
   chooseFolder(source: SourceId): Promise<Snapshot>;
   resetFolder(source: SourceId): Promise<Snapshot>;
   openWebsite(page: WebsitePage): Promise<void>;
@@ -179,6 +181,12 @@ export interface UpdateUiState {
   progress: { downloaded: number; total: number };
 }
 
+/** The example upload shown by "See exactly what is sent". */
+export interface SentExampleState {
+  text: string | null;
+  failed: boolean;
+}
+
 export interface AppState {
   snapshot: Snapshot;
   loaded: boolean;
@@ -187,5 +195,6 @@ export interface AppState {
   error: string;
   busy: boolean;
   update: UpdateUiState;
+  sentExample: SentExampleState;
   ui: UiState;
 }

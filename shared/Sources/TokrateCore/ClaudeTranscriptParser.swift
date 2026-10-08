@@ -454,7 +454,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             turn = state
         }
         completedResponses.append(LiveResponse(
-            id: "\(track.sessionID ?? sourceIdentity)|\(track.agentID ?? "")|\(track.id)",
+            id: SHA256.hexDigest(of: "response|\(track.sessionID ?? sourceIdentity)|\(track.agentID ?? "")|\(track.id)"),
             model: track.model,
             provider: track.provider ?? "unknown",
             client: "claude-code",
@@ -569,7 +569,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         let material = scope == .subagent
             ? "\(identity)|\(state.agentID ?? "")|\(state.userTurnID)"
             : "\(identity)|\(state.userTurnID)"
-        return SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
+        return SHA256.hexDigest(of: material)
     }
 
     private func isAcceptedRecord(_ event: [String: Any]) -> Bool {

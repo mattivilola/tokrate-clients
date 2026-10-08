@@ -5006,6 +5006,8 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "libc",
+ "rand 0.8.8",
  "rusqlite",
  "serde",
  "serde_json",

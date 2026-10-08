@@ -18,43 +18,21 @@ export const SURFACE_NOTICE =
 export const PROMPT_CACHE_NOTICE =
   "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache.";
 
-/** Obviously fake values in the exact shape of the shared allowlist (see core/src/sharing.rs). */
-export function buildSentExample(): string {
-  return JSON.stringify(
-    {
-      schemaVersion: 1,
-      sentAt: "2000-01-01T00:00:00Z",
-      samples: [
-        {
-          sampleId: "00000000-0000-0000-0000-000000000000",
-          observedAt: "2000-01-01T00:05:00Z",
-          client: "example-tool",
-          clientVersion: "0.0.0",
-          appVersion: "0.0.0",
-          parserVersion: "example-parser-v0",
-          metricVersion: "example-metric-v0",
-          model: "example-model",
-          provider: "example-provider",
-          providerRegion: null,
-          reasoningEffort: "example-effort",
-          sourceKind: "example",
-          outputTokens: 123,
-          reasoningOutputTokens: 45,
-          durationMs: 6789,
-          ttftMs: null,
-          responseOutputTokens: 100,
-          responseDurationMs: 4321,
-          responseCount: 2,
-          delegatedOutputTokens: 0,
-          surface: "cli",
-          inputTokens: 456,
-          cacheReadInputTokens: 300,
-          cacheWriteInputTokens: null,
-        },
-      ],
-    },
-    null,
-    2,
+/** Explains the example's fields, what the model name is, and how precisely the time is sent. */
+export const FIELD_DESCRIPTION =
+  "Region is derived by the server, not sent by the app. The Amazon Bedrock region (providerRegion) is the one the model id itself names and is null for every other route. Model names are sent as your coding tool reports them, so a custom deployment name is shared as is; a name with unusual characters is sent as “unknown”. Uploads leave after each five-minute period ends, so the time of a turn is not sent more precisely than its five-minute period.";
+
+/**
+ * The example upload with obviously fake values, as the shell prints it from the serializer that
+ * builds real requests (`example_request_json` in core/src/sharing.rs), so it cannot drift.
+ */
+export function SentExample() {
+  const store = useAppStore();
+  const { text, failed } = useStore(store, (s) => s.sentExample);
+  return (
+    <pre className="payload" tabIndex={0} aria-label="Example payload with fake values">
+      {text ?? (failed ? "The example could not be loaded." : "Loading the example…")}
+    </pre>
   );
 }
 
@@ -119,14 +97,8 @@ export function SharingChoice({
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>
-          <pre className="payload" tabIndex={0} aria-label="Example payload with fake values">
-            {buildSentExample()}
-          </pre>
-          <p className="detail-fine">
-            Region is derived by the server, not sent by the app. The Amazon Bedrock region
-            (providerRegion) is the one the model id itself names and is null for every other
-            route.
-          </p>
+          <SentExample />
+          <p className="detail-fine">{FIELD_DESCRIPTION}</p>
           <p className="detail-fine">
             A persistent pseudonymous signing key identifies this installation across reports.
             Its private key stays in your operating system’s secure credential store, and

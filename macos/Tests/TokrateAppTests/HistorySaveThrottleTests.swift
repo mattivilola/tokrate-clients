@@ -8,7 +8,7 @@ final class HistorySaveThrottleTests: XCTestCase {
 
     /// The polling loop's decision at one poll: note records, write when due.
     private func poll(_ throttle: inout HistorySaveThrottle, at now: Date, records: Bool) -> Bool {
-        if records { throttle.noteNewRecords() }
+        if records { throttle.noteUnsavedChanges() }
         guard throttle.isDue(now: now) else { return false }
         throttle.didSave(at: now, succeeded: true)
         return true
@@ -46,9 +46,19 @@ final class HistorySaveThrottleTests: XCTestCase {
         XCTAssertFalse(poll(&throttle, at: at(40), records: false))
     }
 
+    func testExpiredRecordsAreWrittenWhileNoRecordArrives() {
+        var throttle = HistorySaveThrottle()
+        XCTAssertTrue(poll(&throttle, at: at(0), records: true))
+        XCTAssertFalse(throttle.isDue(now: at(3600)), "an idle poll without changes writes nothing")
+        // The poll loop notes a prune that removed records exactly like new ones.
+        throttle.noteUnsavedChanges()
+        XCTAssertTrue(throttle.isDue(now: at(3600)))
+        XCTAssertEqual(throttle.dueAt(now: at(3600)), at(10), "the earlier write is long past, so it is due now")
+    }
+
     func testAFailedWriteIsRetriedAfterTheIntervalNotAtEveryPoll() {
         var throttle = HistorySaveThrottle()
-        throttle.noteNewRecords()
+        throttle.noteUnsavedChanges()
         XCTAssertTrue(throttle.isDue(now: at(0)))
         throttle.didSave(at: at(0), succeeded: false)
         XCTAssertFalse(throttle.isDue(now: at(2)))
@@ -58,9 +68,9 @@ final class HistorySaveThrottleTests: XCTestCase {
 
     func testAClockThatMovedBackwardsDoesNotStallTheWrite() {
         var throttle = HistorySaveThrottle()
-        throttle.noteNewRecords()
+        throttle.noteUnsavedChanges()
         throttle.didSave(at: at(100), succeeded: true)
-        throttle.noteNewRecords()
+        throttle.noteUnsavedChanges()
         XCTAssertTrue(throttle.isDue(now: at(50)))
     }
 

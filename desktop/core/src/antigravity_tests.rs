@@ -1,7 +1,7 @@
 //! Tests for the protobuf reader, the Antigravity database reader, the execution/turn builder
 //! and the monitor, over synthetic SQLite databases with hand-encoded protobuf blobs.
 
-use crate::antigravity_db::{read_database, GenerationCache};
+use crate::antigravity_db::{read_database, read_database_within, GenerationCache, ReadError};
 use crate::antigravity_turns::turn_id;
 use crate::monitor::SourceChange;
 use crate::protobuf::{Malformed, Message};
@@ -1113,6 +1113,90 @@ fn malformed_blobs_are_skipped_without_panicking() {
     let mut monitor = AntigravityMonitor::new(fixture.root());
     let turns = poll(&mut monitor, now());
     assert_eq!(turns.len(), 1, "only the healthy database is measured");
+}
+
+#[test]
+fn strings_decoded_from_blobs_are_bounded() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    let long = |length: usize| "x".repeat(length);
+    // At the limit everything is kept.
+    db.step(&StepSpec::new(0, &long(512)));
+    db.executor(0, &executor_blob(4, &long(512), Some(&long(512))));
+    db.generation(0, &generation_blob(&long(512), Some("false")));
+    db.step(&StepSpec::new(1, "e").usage(10, 0));
+    let snapshot = read_database(&db.path, &mut GenerationCache::default()).unwrap();
+    assert_eq!(
+        snapshot.steps[0].execution_id.as_deref(),
+        Some(long(512).as_str())
+    );
+    assert_eq!(snapshot.executors[0].id.len(), 512);
+    assert_eq!(snapshot.executors[0].variant.as_ref().unwrap().len(), 512);
+    assert_eq!(snapshot.generations[&0].model.as_ref().unwrap().len(), 512);
+
+    // Over it, an executor or generation is unreadable (its execution stays unfinished, its
+    // calls have no model) and a step cannot be attributed, so the database is skipped.
+    db.executor(0, &executor_blob(4, &long(513), None));
+    db.executor(1, &executor_blob(4, "short", Some(&long(513))));
+    db.generation(0, &generation_blob(&long(513), Some("false")));
+    let snapshot = read_database(&db.path, &mut GenerationCache::default()).unwrap();
+    assert!(snapshot.executors.is_empty());
+    assert!(snapshot.generations.is_empty());
+    db.step(&StepSpec::new(0, &long(513)));
+    assert!(matches!(
+        read_database(&db.path, &mut GenerationCache::default()),
+        Err(ReadError::Undecodable)
+    ));
+}
+
+#[test]
+fn the_subtrajectory_flag_is_read_without_loading_oversized_values() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    let flag = |idx: i64, value: rusqlite::types::Value| {
+        db.connection
+            .execute(
+                "INSERT OR REPLACE INTO steps (idx, has_subtrajectory, metadata) VALUES (?1, ?2, ?3)",
+                params![idx, value, StepSpec::new(idx, "e").blob()],
+            )
+            .unwrap();
+    };
+    use rusqlite::types::Value;
+    flag(0, Value::Integer(1));
+    flag(1, Value::Integer(0));
+    flag(2, Value::Real(1.0));
+    flag(3, Value::Text("true".into()));
+    flag(4, Value::Text(" TRUE ".into()));
+    flag(5, Value::Text("true".to_owned() + &" ".repeat(1_000_000)));
+    flag(6, Value::Blob(vec![1; 1_000_000]));
+    flag(7, Value::Null);
+    let snapshot = read_database(&db.path, &mut GenerationCache::default()).unwrap();
+    let flags: Vec<bool> = snapshot
+        .steps
+        .iter()
+        .map(|step| step.has_subtrajectory)
+        .collect();
+    assert_eq!(flags, [true, false, true, true, true, false, false, false]);
+}
+
+#[test]
+fn a_read_is_skipped_once_its_blobs_exceed_the_byte_budget() {
+    let fixture = Fixture::new();
+    let db = fixture.primary();
+    for idx in 0..10 {
+        db.step(&StepSpec::new(idx, "e"));
+    }
+    db.executor(0, &executor_blob(4, "e", None));
+    let mut cache = GenerationCache::default();
+    let loaded = read_database_within(&db.path, &mut cache, usize::MAX).unwrap();
+    assert!(loaded.bytes_read > 10);
+    for budget in [loaded.bytes_read - 1, 10, 0] {
+        assert!(matches!(
+            read_database_within(&db.path, &mut cache, budget),
+            Err(ReadError::TooLarge)
+        ));
+    }
+    assert!(read_database_within(&db.path, &mut cache, loaded.bytes_read).is_ok());
 }
 
 #[test]

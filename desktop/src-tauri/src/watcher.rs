@@ -212,6 +212,20 @@ fn coalesce(
     }
 }
 
+/// Why a watcher could not start, for the log. Only the kind is named: the `notify` error's own
+/// text appends the paths it concerns (project folders and session ids below a source root) and
+/// its generic variant carries a free-form message.
+fn error_reason(kind: &notify::ErrorKind) -> String {
+    match kind {
+        notify::ErrorKind::Generic(_) => "watcher error".into(),
+        notify::ErrorKind::Io(error) => format!("I/O error: {:?}", error.kind()),
+        notify::ErrorKind::PathNotFound => "folder not found".into(),
+        notify::ErrorKind::WatchNotFound => "watch not found".into(),
+        notify::ErrorKind::InvalidConfig(_) => "invalid watcher configuration".into(),
+        notify::ErrorKind::MaxFilesWatch => "OS file watch limit reached".into(),
+    }
+}
+
 /// A running watcher; dropping it stops the watch and, with it, the coalescing thread.
 struct Active {
     root: PathBuf,
@@ -298,7 +312,8 @@ impl Watchers {
                 }
                 Err(error) => {
                     eprintln!(
-                        "tokrate: cannot watch the {source} folder ({error}); checking it every {} s",
+                        "tokrate: cannot watch the {source} folder ({}); checking it every {} s",
+                        error_reason(&error.kind),
                         IDLE_POLL_INTERVAL.as_secs()
                     );
                     self.failed.insert(source, target.root.clone());
@@ -651,5 +666,32 @@ mod tests {
         let signal = Arc::new(PollSignal::default());
         watchers.sync(&target(Path::new("/unwatchable"), false), &signal);
         assert!(!watchers.fallback_rescan_due());
+    }
+
+    #[test]
+    fn a_start_failure_is_logged_by_kind_without_paths_or_messages() {
+        let secret = "/home/someone/.claude/projects/-home-someone-secret/0b1f.jsonl";
+        let errors = [
+            notify::Error::generic(secret).add_path(PathBuf::from(secret)),
+            notify::Error::io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                secret,
+            ))
+            .add_path(PathBuf::from(secret)),
+            notify::Error::path_not_found().add_path(PathBuf::from(secret)),
+            notify::Error::watch_not_found().add_path(PathBuf::from(secret)),
+            notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(PathBuf::from(secret)),
+            notify::Error::new(notify::ErrorKind::InvalidConfig(Config::default()))
+                .add_path(PathBuf::from(secret)),
+        ];
+        for error in &errors {
+            let reason = error_reason(&error.kind);
+            assert!(
+                !reason.contains("secret") && !reason.contains("/home"),
+                "{reason}"
+            );
+        }
+        assert_eq!(error_reason(&errors[1].kind), "I/O error: PermissionDenied");
+        assert_eq!(error_reason(&errors[4].kind), "OS file watch limit reached");
     }
 }

@@ -17,6 +17,7 @@ export const tauriBridge: Bridge = {
   setDashboardFilters: (tool, provider) =>
     invoke("set_dashboard_filters", { tool, provider }),
   retrySharing: () => invoke<Snapshot>("retry_sharing"),
+  sentExample: () => invoke<string>("sent_example"),
   chooseFolder: (source) => invoke<Snapshot>("choose_folder", { source }),
   resetFolder: (source) => invoke<Snapshot>("reset_folder", { source }),
   openWebsite: (page) => invoke("open_website", { page }),

@@ -11,18 +11,38 @@ public protocol SharingTransport: Sendable {
 }
 
 public struct URLSessionSharingTransport: SharingTransport {
+    /// A larger response is refused while it streams in, not after it has been buffered.
+    static let maximumResponseBytes = 1_048_576
+    /// Names the app and its release only. The system default would add the app's build number and the
+    /// CFNetwork and Darwin versions.
+    static let userAgent = "Tokrate/\(SharedSample.appVersion)"
+
     private let session: URLSession
     public init() {
+        self.init(protocolClasses: nil)
+    }
+    /// `protocolClasses` replaces the network for tests.
+    init(protocolClasses: [AnyClass]?) {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
         config.urlCache = nil
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 30
+        if let protocolClasses { config.protocolClasses = protocolClasses }
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
     public func send(_ request: URLRequest) async throws -> (Data, Int) {
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse, data.count <= 1_048_576 else { throw URLError(.badServerResponse) }
+        var request = request
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let response = response as? HTTPURLResponse,
+              response.expectedContentLength <= Self.maximumResponseBytes else { throw URLError(.badServerResponse) }
+        var data = Data()
+        for try await byte in bytes {
+            // Leaving the loop abandons the stream, which cancels the transfer.
+            guard data.count < Self.maximumResponseBytes else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
         return (data, response.statusCode)
     }
 }

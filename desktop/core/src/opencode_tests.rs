@@ -1412,6 +1412,219 @@ fn the_queries_select_only_listed_json_paths_and_never_the_part_table() {
     assert_eq!(source.matches("json_extract(m.data").count(), 14);
 }
 
+// ---- bounded reads ---------------------------------------------------------------------------
+
+fn read_all(db: &Database) -> crate::opencode_db::Read {
+    crate::opencode_db::read_database(
+        &db.path,
+        crate::opencode_db::MessageScope::CreatedSince(0),
+        true,
+        &|_| false,
+    )
+    .unwrap()
+}
+
+fn assistant_data(extra: Value) -> String {
+    let mut data = json!({
+        "role": "assistant",
+        "parentID": USER,
+        "modelID": "claude-opus-4-6",
+        "providerID": "anthropic",
+        "finish": "stop",
+        "time": {"created": 1_000, "completed": 5_000},
+        "tokens": {"output": 100, "reasoning": 0, "input": 10, "cache": {"read": 0, "write": 0}}
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        data[key] = value.clone();
+    }
+    data.to_string()
+}
+
+#[test]
+fn ids_and_values_over_their_limit_never_leave_sqlite() {
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    let long = |length: usize| "x".repeat(length);
+    db.session(SESSION, None, VERSION);
+    db.session(&long(513), None, VERSION);
+    db.session("ses_long_parent", Some(&long(513)), VERSION);
+    db.session("ses_long_version", Some(SESSION), &long(201));
+    db.session("ses_edge", Some(&long(512)), &long(200));
+    db.raw_message("msg_ok", SESSION, 1_000, 1_000, &assistant_data(json!({})));
+    db.raw_message(
+        &long(513),
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({})),
+    );
+    db.raw_message(
+        &long(512),
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({})),
+    );
+    db.raw_message(
+        "msg_session",
+        &long(513),
+        1_000,
+        1_000,
+        &assistant_data(json!({})),
+    );
+    db.raw_message(
+        "msg_values",
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({
+            "parentID": long(513),
+            "modelID": long(201),
+            "providerID": long(201),
+            "variant": long(201),
+            "finish": long(201),
+        })),
+    );
+    db.raw_message(
+        "msg_error",
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({"error": {"name": long(201)}})),
+    );
+    db.raw_message(
+        "msg_unnamed_error",
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({"error": {"name": ""}})),
+    );
+    db.raw_message(
+        "msg_count",
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({"tokens": {"output": long(201), "reasoning": 0}})),
+    );
+    db.raw_message(
+        "msg_role",
+        SESSION,
+        1_000,
+        1_000,
+        &assistant_data(json!({"role": long(201)})),
+    );
+
+    let read = read_all(&db);
+    let mut sessions: Vec<_> = read.sessions.iter().map(|s| s.id.as_str()).collect();
+    sessions.sort();
+    // A session with an over-long id or parent id is skipped; an over-long version is only empty.
+    assert_eq!(
+        sessions,
+        ["ses_edge", "ses_long_version", "ses_primary"]
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    let version = |id: &str| {
+        read.sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .version
+            .len()
+    };
+    assert_eq!(version("ses_long_version"), 0);
+    assert_eq!(version("ses_edge"), 200);
+    assert_eq!(
+        read.sessions
+            .iter()
+            .find(|s| s.id == "ses_edge")
+            .unwrap()
+            .parent_id,
+        Some(long(512))
+    );
+
+    let message = |id: &str| read.messages.iter().find(|m| m.id == id);
+    let assistant = |id: &str| match &message(id).unwrap().kind {
+        crate::opencode_db::MessageKind::Assistant(assistant) => assistant.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(message("msg_ok").is_some());
+    assert!(message(&long(512)).is_some());
+    assert!(message(&long(513)).is_none());
+    assert!(message("msg_session").is_none());
+    // Over-long text is absent, an over-long error name still marks the message failed, and an
+    // over-long count is invalid rather than zero.
+    let values = assistant("msg_values");
+    assert_eq!(values.parent_id, None);
+    assert_eq!(values.model, None);
+    assert_eq!(values.provider, None);
+    assert_eq!(values.variant, None);
+    assert_eq!(values.finish, None);
+    assert!(!values.malformed);
+    assert!(assistant("msg_error").failed);
+    assert!(!assistant("msg_unnamed_error").failed);
+    assert!(assistant("msg_count").malformed);
+    assert!(message("msg_role").is_none());
+}
+
+#[test]
+fn a_read_stops_at_its_byte_budget_and_keeps_the_newest_messages() {
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    db.session(SESSION, None, VERSION);
+    for index in 0..100 {
+        db.raw_message(
+            &format!("msg_{index:03}"),
+            SESSION,
+            1_000 + index,
+            1_000 + index,
+            &assistant_data(json!({"modelID": format!("model-{index:03}")})),
+        );
+    }
+    let read = |budget| {
+        crate::opencode_db::read_database_within(
+            &db.path,
+            crate::opencode_db::MessageScope::CreatedSince(0),
+            true,
+            &|_| false,
+            budget,
+        )
+        .unwrap()
+    };
+    let all = read(usize::MAX);
+    assert_eq!(all.messages.len(), 100);
+    let per_message = all.bytes_read / 101;
+    let bounded = read(per_message * 10);
+    assert!((10..=12).contains(&bounded.messages.len()));
+    assert!(bounded.bytes_read <= per_message * 12);
+    // The newest are kept.
+    assert_eq!(bounded.messages[0].id, "msg_099");
+    assert_eq!(read(0).messages.len(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_database_or_log_that_is_a_fifo_is_not_opened() {
+    use crate::tests::{make_fifo, within_seconds};
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.root()).unwrap();
+    make_fifo(&fixture.root().join("opencode.db"));
+    let mut monitor = fixture.monitor();
+    // The read fails like any unreadable database; the poll does not wait for a writer.
+    let records = within_seconds(move || monitor.poll(now()).unwrap());
+    assert!(records.is_empty());
+    assert!(!OpenCodeMonitor::has_database(&fixture.root()));
+
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    standard(&db, t0());
+    make_fifo(&crate::sqlite_read::wal_path(&db.path));
+    let path = db.path.clone();
+    let opened = within_seconds(move || crate::sqlite_read::open_read_only(&path).is_err());
+    assert!(opened);
+}
+
 // ---- integration with the rest of the core ---------------------------------------------------
 
 #[test]

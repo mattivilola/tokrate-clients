@@ -91,6 +91,7 @@ export class AppStore {
         status: "Loading update preferences…",
         progress: { downloaded: 0, total: 0 },
       },
+      sentExample: { text: null, failed: false },
       ui: {
         view: options.initialView ?? "home",
         toolFilter: "all",
@@ -129,6 +130,7 @@ export class AppStore {
     // A reloaded webview starts with "all" while the shell may still hold the old filters.
     this.reportFilters();
     void this.refresh();
+    void this.loadSentExample();
     const onVisible = () => {
       if (!document.hidden) void this.refresh();
     };
@@ -289,6 +291,15 @@ export class AppStore {
       this.set({ error: MONITOR_UNREACHABLE });
     }
   };
+
+  /** Fetched once: the example is fixed text from the shell's serializer, not part of the poll. */
+  private async loadSentExample() {
+    try {
+      this.set({ sentExample: { text: await this.bridge.sentExample(), failed: false } });
+    } catch {
+      this.set({ sentExample: { text: null, failed: true } });
+    }
+  }
 
   // --- updates ------------------------------------------------------------
   async loadUpdatePreferences() {

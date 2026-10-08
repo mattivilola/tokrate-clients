@@ -43,6 +43,7 @@ function bridge(over: Partial<Bridge> = {}): Bridge {
       (current = snapshot({ consentPromptRequired: false })),
     setDashboardFilters: async () => {},
     retrySharing: unused,
+    sentExample: async () => '{"example": true}',
     chooseFolder: unused,
     resetFolder: unused,
     openWebsite: async () => {},
@@ -132,6 +133,31 @@ describe("AppStore", () => {
     stop();
   });
 
+  it("loads the example upload from the shell once, at start", async () => {
+    const example = vi.fn(async () => "{\n  \"schemaVersion\": 1\n}");
+    const store = new AppStore(bridge({ sentExample: example }));
+    expect(store.getState().sentExample).toEqual({ text: null, failed: false });
+    const stop = store.start();
+    await vi.waitFor(() =>
+      expect(store.getState().sentExample).toEqual({
+        text: "{\n  \"schemaVersion\": 1\n}",
+        failed: false,
+      }),
+    );
+    await store.refresh();
+    expect(example).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("marks the example as failed when the shell cannot produce it", async () => {
+    const store = new AppStore(bridge({ sentExample: () => Promise.reject(new Error("gone")) }));
+    const stop = store.start();
+    await vi.waitFor(() =>
+      expect(store.getState().sentExample).toEqual({ text: null, failed: true }),
+    );
+    stop();
+  });
+
   it("survives a failed filter report", async () => {
     const store = new AppStore(
       bridge({ setDashboardFilters: () => Promise.reject(new Error("gone")) }),
@@ -203,7 +229,7 @@ describe("AppStore", () => {
     expect(store.getState().ui.chartMetric).toBe("response");
   });
 
-  it("uses the consent notice version 3", () => {
+  it("uses the consent notice version 4", () => {
     expect(SHARING_NOTICE_VERSION).toBe("2026-10-06-v4");
   });
 

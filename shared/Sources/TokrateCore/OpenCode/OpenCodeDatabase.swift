@@ -45,8 +45,8 @@ final class OpenCodeDatabase {
 
     /// Strings are cut in SQL: ids and enums are short, and nothing longer is kept anyway.
     private static let maximumStringCharacters = 200
-    /// A full read keeps only this many of the newest messages.
-    static let maximumFullReadMessages = 100_000
+    /// A read keeps only this many of the newest messages, full or incremental.
+    static let maximumReadMessages = 100_000
     private static let sessionChunk = 400
 
     private static func text(_ path: String) -> String {
@@ -78,19 +78,22 @@ final class OpenCodeDatabase {
         try database.readTransaction(body)
     }
 
-    /// The newest messages created at or after `milliseconds`, for a full read.
-    func messages(createdSince milliseconds: Int64) throws -> [MessageRow] {
+    /// The newest messages created at or after `milliseconds`, for a full read. More than `limit` in the
+    /// window are not held in memory: the newest win.
+    func messages(createdSince milliseconds: Int64, limit: Int = maximumReadMessages) throws -> [MessageRow] {
         try database.query(
-            Self.messageSelect + " WHERE time_created >= ?1 AND json_valid(data) ORDER BY time_created DESC, id LIMIT \(Self.maximumFullReadMessages)",
+            Self.messageSelect + " WHERE time_created >= ?1 AND json_valid(data) ORDER BY time_created DESC, id LIMIT \(limit)",
             bindings: [.integer(milliseconds)], map: Self.messageRow
         )
     }
 
-    /// The messages updated at or after `milliseconds`, for an incremental read.
-    func messages(updatedSince milliseconds: Int64) throws -> [MessageRow] {
+    /// The newest messages updated at or after `updated` and created at or after `created`, for an
+    /// incremental read. Bounded like a full read: more than `limit` are not held in memory, the newest
+    /// created win, and the next full read applies the same bound.
+    func messages(updatedSince updated: Int64, createdSince created: Int64, limit: Int = maximumReadMessages) throws -> [MessageRow] {
         try database.query(
-            Self.messageSelect + " WHERE time_updated >= ?1 AND json_valid(data) ORDER BY time_updated, id",
-            bindings: [.integer(milliseconds)], map: Self.messageRow
+            Self.messageSelect + " WHERE time_updated >= ?1 AND time_created >= ?2 AND json_valid(data) ORDER BY time_created DESC, id LIMIT \(limit)",
+            bindings: [.integer(updated), .integer(created)], map: Self.messageRow
         )
     }
 

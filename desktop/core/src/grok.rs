@@ -4,12 +4,12 @@ use crate::model::{
     RESPONSE_MIN_OUTPUT_TOKENS,
 };
 use crate::monitor::{SourceChange, DISCOVERY_INTERVAL_SECONDS};
-use crate::reader::{file_identity, FileIdentity, MAX_LINE_BYTES};
+use crate::reader::{file_identity, open_regular_file, read_capped, FileIdentity, MAX_LINE_BYTES};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -146,8 +146,7 @@ impl EventReader {
         if budget == 0 {
             return Ok(());
         }
-        let mut file = File::open(&self.path)?;
-        let metadata = file.metadata()?;
+        let (mut file, metadata) = open_regular_file(&self.path)?;
         let identity = file_identity(&metadata);
         if metadata.len() < self.offset
             || (self.identity.is_some() && identity.is_some() && self.identity != identity)
@@ -417,7 +416,9 @@ struct UsageTurn {
     input_tokens: Option<i64>,
     cached_read_tokens: Option<i64>,
     incomplete: Option<bool>,
-    model_usage: Option<Value>,
+    /// The row's only model, as `single_model_key` reads it from `modelUsage`. The rest of that
+    /// object is not kept.
+    model: Option<String>,
     model_calls: ModelCalls,
 }
 
@@ -480,7 +481,7 @@ impl UsageSnapshot {
                     input_tokens: value.get("inputTokens").and_then(Value::as_i64),
                     cached_read_tokens: value.get("cachedReadTokens").and_then(Value::as_i64),
                     incomplete: value.get("usageIsIncomplete").and_then(Value::as_bool),
-                    model_usage: value.get("modelUsage").cloned(),
+                    model: single_model_key(value.get("modelUsage")),
                     model_calls: ModelCalls::parse(value.get("modelCalls")),
                 })
             })
@@ -539,8 +540,7 @@ impl UsageReader {
         if budget == 0 {
             return Ok(());
         }
-        let mut file = File::open(&self.path)?;
-        let metadata = file.metadata()?;
+        let (mut file, metadata) = open_regular_file(&self.path)?;
         if metadata.len() > MAX_USAGE_BYTES {
             self.pending.clear();
             self.refreshing = false;
@@ -644,7 +644,7 @@ impl SummaryReader {
 
     fn poll(&mut self, budget: usize) {
         self.bytes_read_last_poll = 0;
-        let Ok(metadata) = fs::metadata(&self.path) else {
+        let Ok((file, metadata)) = open_regular_file(&self.path) else {
             self.observed_len = None;
             self.observed_modified = None;
             self.effort = None;
@@ -663,7 +663,8 @@ impl SummaryReader {
         if metadata.len() as usize > budget {
             return;
         }
-        let Ok(bytes) = fs::read(&self.path) else {
+        // A file that grew past the size just checked is left for the next poll to measure.
+        let Ok(Some(bytes)) = read_capped(file, MAX_SUMMARY_BYTES.min(budget as u64)) else {
             return;
         };
         self.bytes_read_last_poll = bytes.len();
@@ -767,7 +768,7 @@ impl GrokSession {
                 continue;
             }
             let id = digest_id(&self.key, turn.number, turn.completed_at);
-            let model = single_model_key(row.model_usage.as_ref());
+            let model = row.model.clone();
             let reasoning_tokens = row
                 .reasoning_tokens
                 .filter(|value| (0..=output_tokens).contains(value));

@@ -8,11 +8,12 @@ use crate::model::{
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use ed25519_dalek::{Signer, SigningKey};
+use rand::{rngs::OsRng, Rng};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
 pub const APP_VERSION: &str = "0.1.19";
@@ -20,6 +21,11 @@ pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
 const QUEUE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
+/// Samples are timed to this period (`observedAt` is floored to it).
+const OBSERVED_PERIOD_SECONDS: i64 = 300;
+/// A period's samples leave this much longer after it ended, at most, so the moment a request is
+/// sent says no more than the period does.
+const MAX_UPLOAD_JITTER_MS: i64 = 60_000;
 const MAX_SEEN_LOCAL_IDS: usize = 50_000;
 /// The upper bound the service accepts for delegated subagent output of one turn.
 const MAX_DELEGATED_OUTPUT_TOKENS: i64 = 100_000_000;
@@ -246,12 +252,7 @@ pub fn signed_request(
             "a request must contain between 1 and 50 samples",
         ));
     }
-    let body_value: Value = serde_json::to_value(SharedSampleEnvelope {
-        schema_version: 1,
-        sent_at: format_date(now),
-        samples: samples.to_vec(),
-    })?;
-    let body = serde_json::to_vec(&body_value)?;
+    let body = serde_json::to_vec(&envelope_value(samples, now)?)?;
     if body.len() > MAX_REQUEST_BYTES {
         return Err(CoreError::InvalidRequest(
             "the signed request exceeds 65,536 bytes",
@@ -266,22 +267,102 @@ pub fn signed_request(
     })
 }
 
+/// The envelope as the JSON value that is sent: the one place it is built, so the body of a
+/// request and the consent example cannot differ.
+fn envelope_value(samples: &[SharedSample], now: DateTime<Utc>) -> Result<Value, CoreError> {
+    Ok(serde_json::to_value(SharedSampleEnvelope {
+        schema_version: 1,
+        sent_at: format_date(now),
+        samples: samples.to_vec(),
+    })?)
+}
+
+/// The "See exactly what is sent" example: obviously fake values (nothing here comes from the
+/// user's history) run through the real allowlist and the real envelope, pretty-printed. The
+/// fields therefore cannot drift from what a request carries.
+pub fn example_request_json() -> String {
+    let mut metric = TurnMetric::new(
+        "example-local-id-never-uploaded".to_owned(),
+        DateTime::<Utc>::from_timestamp(1_767_268_980, 0).expect("a valid example time"),
+        Some("example-model".to_owned()),
+        1_234,
+        20.0,
+        Some(0.84),
+        61.7,
+        None,
+        Some("1.2.3".to_owned()),
+        Some(400),
+        Some("primary".to_owned()),
+        Some("openai".to_owned()),
+        Some("medium".to_owned()),
+    );
+    metric.response_output_tokens = Some(1_000);
+    metric.response_duration_seconds = Some(12.5);
+    metric.response_count = Some(3);
+    metric.delegated_output_tokens = Some(0);
+    metric.surface = Some(ToolSurface::Cli);
+    metric.set_prompt_cache(Some(48_000), Some(36_000), None);
+    let sample = SharedSample::from_metric(
+        &metric,
+        Uuid::parse_str("00000000-0000-4000-8000-000000000000").expect("a valid example id"),
+    )
+    .expect("the example metric is shareable");
+    let sent_at = DateTime::<Utc>::from_timestamp(1_767_269_100, 0).expect("a valid example time");
+    let envelope = envelope_value(&[sample], sent_at).expect("the example envelope encodes");
+    serde_json::to_string_pretty(&envelope).expect("a JSON value prints")
+}
+
+/// Draws the delay after the end of a five-minute period at which that period's samples leave.
+type JitterSource = Box<dyn FnMut() -> Duration + Send>;
+
 /// Memory-only queue for post-consent turns. No key material or account identity is stored here.
-#[derive(Default)]
+/// A sample waits until its five-minute period (`observedAt`) has ended and a random delay of up
+/// to a minute, the same for every sample of the period, has passed: an upload then reveals the
+/// period and nothing finer.
 pub struct SharingQueue {
     enabled_since: Option<DateTime<Utc>>,
     pending: VecDeque<PendingSample>,
     seen_local_ids: HashSet<String>,
+    /// The delay drawn for each period that has queued samples, by the period's start.
+    jitters: HashMap<i64, Duration>,
+    jitter_source: JitterSource,
+}
+
+impl Default for SharingQueue {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct PendingSample {
     local_id: String,
     sample: SharedSample,
+    /// Start of the sample's five-minute period, in seconds since the epoch.
+    period: i64,
 }
 
 impl SharingQueue {
+    /// A queue whose delays come from the operating system's entropy.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_jitter_source(|| {
+            Duration::milliseconds(OsRng.gen_range(0..MAX_UPLOAD_JITTER_MS))
+        })
+    }
+
+    /// A queue with its own delay source (tests); every delay is held to 0 to 60 s.
+    pub fn with_jitter_source(mut source: impl FnMut() -> Duration + Send + 'static) -> Self {
+        Self {
+            enabled_since: None,
+            pending: VecDeque::new(),
+            seen_local_ids: HashSet::new(),
+            jitters: HashMap::new(),
+            jitter_source: Box::new(move || {
+                source().clamp(
+                    Duration::zero(),
+                    Duration::milliseconds(MAX_UPLOAD_JITTER_MS),
+                )
+            }),
+        }
     }
 
     pub fn enable(&mut self, now: DateTime<Utc>) {
@@ -295,6 +376,7 @@ impl SharingQueue {
         self.enabled_since = None;
         self.pending.clear();
         self.seen_local_ids.clear();
+        self.jitters.clear();
     }
 
     pub fn enqueue(&mut self, metrics: &[TurnMetric], now: DateTime<Utc>) {
@@ -317,15 +399,22 @@ impl SharingQueue {
             let Some(sample) = SharedSample::from_metric(metric, Uuid::new_v4()) else {
                 continue;
             };
+            let Some(period) = observed_period(&sample) else {
+                continue;
+            };
             self.seen_local_ids.insert(metric.id.clone());
+            let source = &mut self.jitter_source;
+            self.jitters.entry(period).or_insert_with(|| source());
             self.pending.push_back(PendingSample {
                 local_id: metric.id.clone(),
                 sample,
+                period,
             });
         }
         while self.pending.len() > MAX_PENDING_SAMPLES {
             self.pending.pop_front();
         }
+        self.forget_unused_jitters();
         if self.seen_local_ids.len() > MAX_SEEN_LOCAL_IDS {
             self.seen_local_ids = self
                 .pending
@@ -335,11 +424,27 @@ impl SharingQueue {
         }
     }
 
-    /// Returns up to 50 pending samples. Unacknowledged samples keep their UUID for retries.
+    /// When a pending sample may leave: its period's end plus the delay drawn for the period.
+    fn eligible_at(&self, pending: &PendingSample) -> DateTime<Utc> {
+        let jitter = self
+            .jitters
+            .get(&pending.period)
+            .copied()
+            .unwrap_or_else(Duration::zero);
+        DateTime::<Utc>::from_timestamp(pending.period + OBSERVED_PERIOD_SECONDS, 0)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC)
+            + jitter
+    }
+
+    /// Returns up to 50 pending samples whose period has ended and whose delay has passed, in
+    /// the order they were queued. The ones of one period become eligible together, so they
+    /// leave in one request (more than 50 take the next). Unacknowledged samples keep their UUID
+    /// for retries.
     pub fn batch(&mut self, now: DateTime<Utc>) -> Vec<SharedSample> {
         self.prune(now);
         self.pending
             .iter()
+            .filter(|pending| self.eligible_at(pending) <= now)
             .take(MAX_BATCH_SAMPLES)
             .map(|pending| pending.sample.clone())
             .collect()
@@ -349,6 +454,16 @@ impl SharingQueue {
         let acknowledged: HashSet<Uuid> = sample_ids.iter().copied().collect();
         self.pending
             .retain(|pending| !acknowledged.contains(&pending.sample.sample_id));
+    }
+
+    /// The earliest moment after `now` at which a waiting sample becomes eligible; `None` when
+    /// none is waiting. Samples that are eligible already are not counted: a batch takes them.
+    pub fn next_eligible_after(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.pending
+            .iter()
+            .map(|pending| self.eligible_at(pending))
+            .filter(|at| *at > now)
+            .min()
     }
 
     pub fn len(&self) -> usize {
@@ -366,6 +481,12 @@ impl SharingQueue {
             };
             now.timestamp() - observed_at.timestamp() <= QUEUE_RETENTION_SECONDS
         });
+        self.forget_unused_jitters();
+    }
+
+    fn forget_unused_jitters(&mut self) {
+        let periods: HashSet<i64> = self.pending.iter().map(|pending| pending.period).collect();
+        self.jitters.retain(|period, _| periods.contains(period));
     }
 }
 
@@ -385,6 +506,13 @@ fn safe_identifier(value: &str, maximum: usize, plus_allowed: bool) -> bool {
                 || matches!(byte, b'.' | b'_' | b'-')
                 || plus_allowed && byte == b'+'
         })
+}
+
+/// Start of the five-minute period a sample is timed to, in seconds since the epoch.
+fn observed_period(sample: &SharedSample) -> Option<i64> {
+    DateTime::parse_from_rfc3339(&sample.observed_at)
+        .ok()
+        .map(|observed_at| observed_at.timestamp())
 }
 
 fn format_date(date: DateTime<Utc>) -> String {

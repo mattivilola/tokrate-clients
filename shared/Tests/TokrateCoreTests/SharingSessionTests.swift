@@ -1,6 +1,6 @@
 import CryptoKit
 import Foundation
-import TokrateCore
+@testable import TokrateCore
 import XCTest
 
 private final class MemoryIdentity: SharingIdentity, @unchecked Sendable {
@@ -32,9 +32,26 @@ private actor MockTransport: SharingTransport {
     func isSuspended() -> Bool { continuation != nil }
 }
 
+/// A scripted random source: hands out the given delays in order and counts the draws.
+private final class ScriptedJitter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var delays: [TimeInterval]
+    private var drawn = 0
+    init(_ delays: [TimeInterval]) { self.delays = delays }
+    var draws: Int { lock.withLock { drawn } }
+    func next() -> TimeInterval {
+        lock.withLock {
+            drawn += 1
+            return delays.isEmpty ? 0 : delays.removeFirst()
+        }
+    }
+}
+
 @MainActor
 final class SharingSessionTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_791_020_401)
+    /// After the five-minute bucket of `now` has closed, whatever its random delay.
+    private var later: Date { now.addingTimeInterval(500) }
     private func metric(id: String = "LOCAL_PRIVATE_DIGEST", date: Date? = nil, model: String? = "gpt-test", reasoningEffort: String? = nil, delegated: Int? = 0) -> TurnMetric {
         TurnMetric(id: id, completedAt: date ?? now, model: model, outputTokens: 100, durationSeconds: 10, codexTTFTSeconds: 1, turnThroughputTPS: 10, clientVersion: "0.159.2", sourceKind: "primary", provider: "openai", reasoningEffort: reasoningEffort, delegatedOutputTokens: delegated)
     }
@@ -62,7 +79,7 @@ final class SharingSessionTests: XCTestCase {
         ], now: now.addingTimeInterval(1))
         XCTAssertEqual(session.pendingCount, 2)
 
-        await session.refresh(now: now.addingTimeInterval(2))
+        await session.refresh(now: later)
 
         XCTAssertTrue(session.requiresUpdate)
         XCTAssertFalse(session.isEnabled)
@@ -73,9 +90,9 @@ final class SharingSessionTests: XCTestCase {
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests.first?.httpMethod, "POST")
 
-        session.enable(now: now.addingTimeInterval(30), startPolling: false)
-        session.enqueue([metric(id: "after-block", date: now.addingTimeInterval(31))], now: now.addingTimeInterval(31))
-        await session.refresh(now: now.addingTimeInterval(31))
+        session.enable(now: later.addingTimeInterval(30), startPolling: false)
+        session.enqueue([metric(id: "after-block", date: later.addingTimeInterval(31))], now: later.addingTimeInterval(31))
+        await session.refresh(now: later.addingTimeInterval(31))
         XCTAssertEqual(identity.calls, 1)
         XCTAssertEqual(session.pendingCount, 0)
         let afterRetry = await transport.snapshot()
@@ -104,7 +121,7 @@ final class SharingSessionTests: XCTestCase {
         session.enable(now: now, startPolling: false)
         session.enqueue([metric(id: "old", date: now.addingTimeInterval(-1)), metric(), metric()], now: now)
         XCTAssertEqual(session.pendingCount, 1)
-        await session.refresh(now: now)
+        await session.refresh(now: later)
         let requests = await transport.snapshot()
         XCTAssertEqual(requests.count, 2)
         let request = requests[0], body = try XCTUnwrap(request.httpBody)
@@ -124,9 +141,175 @@ final class SharingSessionTests: XCTestCase {
         XCTAssertNotNil(session.board)
         session.disable()
         XCTAssertNil(session.board)
-        await session.refresh(now: now.addingTimeInterval(100))
+        await session.refresh(now: later.addingTimeInterval(100))
         let after = await transport.snapshot()
         XCTAssertEqual(after.count, 2)
+    }
+
+    // MARK: Upload timing
+
+    /// The start of the five-minute bucket that `now` is in.
+    private var bucket: Date { Date(timeIntervalSince1970: floor(now.timeIntervalSince1970 / 300) * 300) }
+    private func uploads(_ requests: [URLRequest]) -> [URLRequest] { requests.filter { $0.httpMethod == "POST" } }
+    private func uploadCount(_ transport: MockTransport) async -> Int { uploads(await transport.snapshot()).count }
+    private func sampleCount(_ request: URLRequest) throws -> Int {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        return try XCTUnwrap(object["samples"] as? [[String: Any]]).count
+    }
+
+    func testASampleIsNotUploadedBeforeItsBucketHasClosedAndItsRandomDelayHasPassed() async {
+        let transport = MockTransport()
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: ScriptedJitter([42]).next)
+        session.enable(now: bucket, startPolling: false)
+        session.enqueue([metric(date: bucket.addingTimeInterval(10))], now: bucket.addingTimeInterval(10))
+
+        // The bucket closes at +300 s; this bucket's delay is 42 s.
+        await session.refresh(now: bucket.addingTimeInterval(299))
+        await session.refresh(now: bucket.addingTimeInterval(341.9))
+        var requests = await transport.snapshot()
+        XCTAssertTrue(uploads(requests).isEmpty)
+        XCTAssertEqual(session.pendingCount, 1, "the sample waits in the queue")
+
+        await session.refresh(now: bucket.addingTimeInterval(342))
+        requests = await transport.snapshot()
+        XCTAssertEqual(uploads(requests).count, 1)
+        XCTAssertEqual(session.pendingCount, 0)
+    }
+
+    func testSamplesOfOneBucketLeaveTogetherAndShareOneRandomDelay() async throws {
+        let transport = MockTransport()
+        let jitter = ScriptedJitter([10, 50])
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: jitter.next)
+        session.enable(now: bucket, startPolling: false)
+        let enqueuedAt = bucket.addingTimeInterval(320)
+        session.enqueue([
+            metric(id: "a", date: bucket.addingTimeInterval(5)),
+            metric(id: "b", date: bucket.addingTimeInterval(120)),
+            metric(id: "c", date: bucket.addingTimeInterval(299)),
+            metric(id: "next", date: bucket.addingTimeInterval(310))
+        ], now: enqueuedAt)
+        XCTAssertEqual(jitter.draws, 2, "one draw per bucket")
+
+        // The first bucket is uploadable from +310 s, the next from +650 s.
+        await session.refresh(now: bucket.addingTimeInterval(310))
+        var requests = uploads(await transport.snapshot())
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(try sampleCount(requests[0]), 3, "one batch for the whole bucket")
+        XCTAssertEqual(session.pendingCount, 1)
+
+        await session.refresh(now: bucket.addingTimeInterval(649))
+        let uploadsSoFar = await uploadCount(transport)
+        XCTAssertEqual(uploadsSoFar, 1)
+        await session.refresh(now: bucket.addingTimeInterval(650))
+        requests = uploads(await transport.snapshot())
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(try sampleCount(requests[1]), 1)
+        XCTAssertEqual(jitter.draws, 2)
+    }
+
+    func testABucketLargerThanTheRequestCapLeavesInBatchesOfFifty() async throws {
+        let transport = MockTransport()
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: ScriptedJitter([0]).next)
+        session.enable(now: bucket, startPolling: false)
+        session.enqueue((0..<60).map { metric(id: "m\($0)", date: bucket.addingTimeInterval(5)) }, now: bucket.addingTimeInterval(10))
+        await session.refresh(now: bucket.addingTimeInterval(300))
+        await session.refresh(now: bucket.addingTimeInterval(330))
+        let requests = uploads(await transport.snapshot())
+        XCTAssertEqual(try requests.map(sampleCount), [50, 10])
+    }
+
+    func testTheBoardIsFetchedAtItsOwnCadenceWhetherOrNotAnythingIsUploaded() async {
+        let transport = MockTransport()
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: ScriptedJitter([0]).next)
+        session.enable(now: bucket, startPolling: false)
+        // Nothing queued, then a sample that is still waiting for its bucket to close.
+        await session.refresh(now: bucket)
+        session.enqueue([metric(date: bucket.addingTimeInterval(1))], now: bucket.addingTimeInterval(1))
+        await session.refresh(now: bucket.addingTimeInterval(10))
+        await session.refresh(now: bucket.addingTimeInterval(29.9))
+        await session.refresh(now: bucket.addingTimeInterval(30))
+        await session.refresh(now: bucket.addingTimeInterval(60))
+        var requests = await transport.snapshot()
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "GET"], "every 30 s, and no upload yet")
+
+        // Once uploadable, the upload goes out at its own moment and the board keeps its schedule.
+        await session.refresh(now: bucket.addingTimeInterval(300))
+        await session.refresh(now: bucket.addingTimeInterval(310))
+        await session.refresh(now: bucket.addingTimeInterval(330))
+        requests = await transport.snapshot()
+        XCTAssertEqual(requests.suffix(3).map(\.httpMethod), ["POST", "GET", "GET"])
+        XCTAssertEqual(requests.filter { $0.httpMethod == "GET" }.count, 5)
+    }
+
+    func testTheLoopWakesAtTheNextEligibilityNotFasterThanTheBoardCadence() async {
+        let transport = MockTransport()
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: ScriptedJitter([42]).next)
+        session.enable(now: bucket, startPolling: false)
+        session.enqueue([metric(date: bucket.addingTimeInterval(10))], now: bucket.addingTimeInterval(10))
+        await session.refresh(now: bucket.addingTimeInterval(300))
+        XCTAssertEqual(session.secondsUntilNextRefresh(now: bucket.addingTimeInterval(300)), 30, accuracy: 0.001, "the board is due first")
+        await session.refresh(now: bucket.addingTimeInterval(330))
+        XCTAssertEqual(session.secondsUntilNextRefresh(now: bucket.addingTimeInterval(330)), 12, accuracy: 0.001, "the sample leaves at +342 s, before the board")
+    }
+
+    func testAFailedUploadIsRetriedAfterThirtySecondsNotAtOnce() async {
+        let transport = MockTransport()
+        await transport.configure(uploadStatus: 503)
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: ScriptedJitter([0]).next)
+        session.enable(now: bucket, startPolling: false)
+        session.enqueue([metric(date: bucket.addingTimeInterval(10))], now: bucket.addingTimeInterval(10))
+        await session.refresh(now: bucket.addingTimeInterval(300))
+        XCTAssertEqual(session.secondsUntilNextRefresh(now: bucket.addingTimeInterval(300)), 30, accuracy: 0.001)
+        await session.refresh(now: bucket.addingTimeInterval(310))
+        let uploadsSoFar = await uploadCount(transport)
+        XCTAssertEqual(uploadsSoFar, 1)
+        await session.refresh(now: bucket.addingTimeInterval(330))
+        let uploadsAfterRetry = await uploadCount(transport)
+        XCTAssertEqual(uploadsAfterRetry, 2)
+        XCTAssertEqual(session.pendingCount, 1)
+    }
+
+    func testDisablingClearsQueuedSamplesAndTheirRandomDelays() async {
+        let transport = MockTransport()
+        let jitter = ScriptedJitter([5, 6])
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: jitter.next)
+        session.enable(now: bucket, startPolling: false)
+        session.enqueue([metric(id: "waiting", date: bucket.addingTimeInterval(10))], now: bucket.addingTimeInterval(10))
+        XCTAssertEqual(session.pendingCount, 1)
+        session.disable()
+        XCTAssertEqual(session.pendingCount, 0)
+        await session.refresh(now: bucket.addingTimeInterval(400))
+        let afterDisable = await transport.snapshot()
+        XCTAssertTrue(afterDisable.isEmpty, "nothing is sent after the switch is turned off")
+
+        // Switching on again starts from nothing, including a fresh delay for the same bucket.
+        session.enable(now: bucket.addingTimeInterval(20), startPolling: false)
+        session.enqueue([metric(id: "waiting", date: bucket.addingTimeInterval(30))], now: bucket.addingTimeInterval(30))
+        XCTAssertEqual(jitter.draws, 2)
+        await session.refresh(now: bucket.addingTimeInterval(305.9))
+        let early = await transport.snapshot()
+        XCTAssertTrue(uploads(early).isEmpty)
+        await session.refresh(now: bucket.addingTimeInterval(306))
+        let sent = await transport.snapshot()
+        XCTAssertEqual(uploads(sent).count, 1)
+    }
+
+    func testTheRandomDelayIsClampedToOneMinuteAndTheDefaultSourceIsUniformWithinIt() {
+        XCTAssertEqual(SharingSession.maximumJitterSeconds, 60)
+        let draws = (0..<2_000).map { _ in SharingSession.secureRandomJitter() }
+        XCTAssertTrue(draws.allSatisfy { $0 >= 0 && $0 < 60 })
+        XCTAssertGreaterThan(Set(draws).count, 1_900, "not a constant")
+        XCTAssertTrue(draws.contains { $0 < 10 } && draws.contains { $0 > 50 })
+    }
+
+    func testAnOutOfRangeRandomSourceCannotDelayAnUploadBeyondOneMinute() async {
+        let transport = MockTransport()
+        let session = SharingSession(identity: MemoryIdentity(), transport: transport, jitter: { 10_000 })
+        session.enable(now: bucket, startPolling: false)
+        session.enqueue([metric(date: bucket.addingTimeInterval(10))], now: bucket.addingTimeInterval(10))
+        await session.refresh(now: bucket.addingTimeInterval(360))
+        let requests = await transport.snapshot()
+        XCTAssertEqual(uploads(requests).count, 1)
     }
 
     func testUploadReportsOnlyAllowlistedEffortAndUsesUnknownFallback() throws {
@@ -154,7 +337,7 @@ final class SharingSessionTests: XCTestCase {
         session.enqueue([metric(id: "turn", delegated: 250), metric(id: "turn", delegated: 300), metric(id: "turn", delegated: nil)], now: now)
         XCTAssertEqual(session.pendingCount, 1)
 
-        await session.refresh(now: now)
+        await session.refresh(now: later)
         let requests = await transport.snapshot()
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests[0].httpBody)) as? [String: Any])
         let samples = try XCTUnwrap(object["samples"] as? [[String: Any]])
@@ -170,9 +353,9 @@ final class SharingSessionTests: XCTestCase {
         let session = SharingSession(identity: identity, transport: transport)
         session.enable(now: now, startPolling: false)
         session.enqueue([metric()], now: now)
-        await session.refresh(now: now)
-        await session.refresh(now: now.addingTimeInterval(1))
-        await session.refresh(now: now.addingTimeInterval(30))
+        await session.refresh(now: later)
+        await session.refresh(now: later.addingTimeInterval(1))
+        await session.refresh(now: later.addingTimeInterval(30))
         let requests = await transport.snapshot()
         XCTAssertEqual(requests.count, 4)
         func sampleID(_ request: URLRequest) throws -> String {
@@ -192,7 +375,7 @@ final class SharingSessionTests: XCTestCase {
         let session = SharingSession(identity: identity, transport: transport)
         session.enable(now: now, startPolling: false)
         session.enqueue([metric()], now: now)
-        let task = Task { await session.refresh(now: now) }
+        let task = Task { await session.refresh(now: later) }
         while !(await transport.isSuspended()) { await Task.yield() }
         session.disable()
         await transport.resume()

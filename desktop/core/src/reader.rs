@@ -4,9 +4,9 @@ use crate::model::{ResponseMetric, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const MAX_LINE_BYTES: usize = 1_048_576;
 const DEFAULT_TAIL_BYTES: u64 = 262_144;
@@ -31,6 +31,38 @@ pub(crate) fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
             .ok()
             .map(|created| FileIdentity(format!("{created:?}")))
     }
+}
+
+/// Opens a source file for reading and returns it with its metadata, refusing anything but a
+/// regular file. A symlink is followed like everywhere else a source file is stat-ed; only a
+/// target that is not a regular file (a FIFO, a device, a folder) is refused. On Unix the open is
+/// non-blocking and the type is checked on the handle itself, so a FIFO swapped in after a path
+/// check cannot make the open, and the poll waiting on it, block forever.
+pub(crate) fn open_regular_file(path: &Path) -> io::Result<(File, Metadata)> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok((file, metadata))
+}
+
+/// Everything `file` has left, or `None` when it holds more than `cap` bytes. Reads at most
+/// `cap + 1` bytes, so the cap holds even if the file grew after its size was checked.
+pub(crate) fn read_capped(file: File, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= cap).then_some(bytes))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -193,7 +225,7 @@ impl IncrementalReader {
         }
         // Query size and identity from an open handle. Windows path metadata can lag an
         // append while another process still has the JSONL writer open.
-        let metadata = File::open(&self.path)?.metadata()?;
+        let (_, metadata) = open_regular_file(&self.path)?;
         let current_size = metadata.len();
         let current_identity = file_identity(&metadata);
         if current_size < self.resume_at.unwrap_or(self.offset)
@@ -228,7 +260,7 @@ impl IncrementalReader {
 
         let mut read_budget = max_bytes;
         if self.startup == Startup::Alignment {
-            let mut file = File::open(&self.path)?;
+            let (mut file, _) = open_regular_file(&self.path)?;
             file.seek(SeekFrom::Start(self.offset.saturating_sub(1)))?;
             let mut previous = [0_u8; 1];
             let count = file.read(&mut previous)?;
@@ -333,7 +365,7 @@ impl IncrementalReader {
     }
 
     fn read_at(&self, offset: u64, count: usize) -> io::Result<Vec<u8>> {
-        let mut file = File::open(&self.path)?;
+        let (mut file, _) = open_regular_file(&self.path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0_u8; count];
         let mut read = 0;

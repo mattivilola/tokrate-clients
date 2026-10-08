@@ -86,6 +86,31 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(drained.first).durationSeconds, 19, accuracy: 0.001, "timed from the interruption record")
     }
 
+    /// The live-response id of `identity`: a digest, so no session, agent or message id leaves the parser.
+    private func liveDigest(_ identity: String) -> String {
+        SHA256.hash(data: Data("response|\(identity)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func testLiveResponseIdsAreDigestsOfTheSessionAgentAndMessageNotThePathOrIdentifiers() throws {
+        func liveID(sidechain: Bool, source: String = "/Users/private/transcript-secret.jsonl", message: String = "m1") throws -> String {
+            var parser = ClaudeTranscriptParser(sourceIdentity: source, scope: sidechain ? .subagent : .primary)
+            _ = parser.consume(line: try user(at: 0, id: "prompt", sidechain: sidechain, rootPrompt: true))
+            _ = parser.consume(line: try assistant(at: 10, id: message, output: 500, stop: "end_turn", sidechain: sidechain))
+            _ = parser.pollEnded(now: base, isFinal: true)
+            return try XCTUnwrap(parser.drainCompletedResponses().first).id
+        }
+        let primary = try liveID(sidechain: false)
+        XCTAssertEqual(primary, liveDigest("\(sessionID)||m1"))
+        let subagent = try liveID(sidechain: true)
+        XCTAssertEqual(subagent, liveDigest("\(sessionID)|\(agentID)|m1"))
+        for id in [primary, subagent] {
+            XCTAssertNotNil(id.range(of: "^[0-9a-f]{64}$", options: .regularExpression))
+            XCTAssertFalse(id.contains(sessionID) || id.contains("private") || id.contains("|"))
+        }
+        XCTAssertNotEqual(primary, subagent)
+        XCTAssertNotEqual(primary, try liveID(sidechain: false, message: "m2"))
+    }
+
     func testParentRecordSetsTheResponseStartAndMidResponseRecordsDoNotMoveIt() throws {
         var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
         _ = parser.consume(line: try user(at: 0, id: "prompt"))
@@ -1144,7 +1169,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let first = parser.drainCompletedResponses()
         XCTAssertEqual(first.count, 1)
         let response = try XCTUnwrap(first.first)
-        XCTAssertEqual(response.id, "\(sessionID)||\(anthropicMessage)")
+        XCTAssertEqual(response.id, liveDigest("\(sessionID)||\(anthropicMessage)"))
         XCTAssertEqual(response.model, "claude-sonnet-5-5")
         XCTAssertEqual(response.provider, "anthropic")
         XCTAssertEqual(response.client, "claude-code")
@@ -1159,7 +1184,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
 
         let metric = try XCTUnwrap(parser.pollEnded(now: base, isFinal: false))
         let last = try XCTUnwrap(parser.drainCompletedResponses().first)
-        XCTAssertEqual(last.id, "\(sessionID)||msg_01ZYXWVUTSRQPONMLKJIHGFE")
+        XCTAssertEqual(last.id, liveDigest("\(sessionID)||msg_01ZYXWVUTSRQPONMLKJIHGFE"))
         XCTAssertEqual(last.completedAt, metric.completedAt)
         XCTAssertEqual(last.durationSeconds, 8, accuracy: 0.001)
         XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
@@ -1180,7 +1205,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(metric.responseDurationSeconds), 18, accuracy: 0.001)
         XCTAssertEqual(metric.responseCount, 2)
         let responses = parser.drainCompletedResponses()
-        XCTAssertEqual(responses.map(\.id), ["\(sessionID)|\(agentID)|s1", "\(sessionID)|\(agentID)|s2"])
+        XCTAssertEqual(responses.map(\.id), ["s1", "s2"].map { liveDigest("\(sessionID)|\(agentID)|\($0)") })
         XCTAssertEqual(Set(responses.map(\.sourceKind)), ["subagent"])
         XCTAssertEqual(Set(responses.map(\.metricVersion)), ["claude-observed-subagent-turn-v1"])
         XCTAssertEqual(Set(responses.map(\.client)), ["claude-code"])

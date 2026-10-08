@@ -210,6 +210,11 @@ final class SyntheticAntigravityDatabase {
         }
     }
 
+    /// Runs raw SQL, for building tables too large to fill one row at a time.
+    func execute(_ sql: String) throws {
+        try withConnection { try Self.run($0, sql) }
+    }
+
     // MARK: Blobs
 
     static func executorBlob(id: String, state: UInt64, variant: String?) -> Data {

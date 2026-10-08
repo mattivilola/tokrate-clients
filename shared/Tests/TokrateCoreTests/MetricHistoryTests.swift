@@ -17,6 +17,18 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertTrue(history.records.isEmpty)
     }
 
+    func testPruneReportsHowManyRecordsItRemoved() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let kept = metric(id: "kept", at: now.addingTimeInterval(-6 * 24 * 60 * 60))
+        var history = MetricHistory(records: [kept], now: now)
+        XCTAssertEqual(history.prune(now: now), 0, "nothing expired, so the saved copy is still current")
+        // A week later the record has aged out while the app sat idle.
+        let later = now.addingTimeInterval(2 * 24 * 60 * 60)
+        XCTAssertEqual(history.prune(now: later), 1)
+        XCTAssertTrue(history.records.isEmpty)
+        XCTAssertEqual(history.prune(now: later), 0)
+    }
+
     func testRecordsSavedBeforeResponseSpeedDecodeWithNilFieldsAndTheLegacyParserVersion() throws {
         // History written before multi-client support and before response speed: no client,
         // parserVersion, metricVersion or any response field.

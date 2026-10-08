@@ -60,6 +60,11 @@ fn set_dashboard_filters(
         .unwrap()
         .set_dashboard_filters(&tool, &provider)
 }
+/// The "See exactly what is sent" example, produced by the serializer that builds real requests.
+#[tauri::command]
+fn sent_example() -> String {
+    tokrate_core::example_request_json()
+}
 #[tauri::command]
 fn retry_sharing(app: tauri::AppHandle, state: State<Shared>) -> Snapshot {
     runtime::restart_sharing(&app);
@@ -279,6 +284,7 @@ fn main() {
             record_sharing_consent,
             set_dashboard_filters,
             retry_sharing,
+            sent_example,
             update_preferences,
             set_automatic_update_checks,
             check_update,

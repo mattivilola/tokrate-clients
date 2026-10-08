@@ -11,6 +11,9 @@ pub const MIN_POLL_SPACING: Duration = Duration::from_secs(2);
 /// The longest the monitor sleeps with nothing pending. A poll also ages the live value and moves
 /// the Auto model selection, which must not stall while the folders are quiet.
 pub const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// The community board is fetched this often while sharing is on, whether or not anything was
+/// uploaded.
+pub const BOARD_INTERVAL: Duration = Duration::from_secs(30);
 /// More changed paths than this are dropped in favour of a request to rescan.
 pub const MAX_PENDING_PATHS: usize = 4_096;
 
@@ -34,6 +37,31 @@ pub fn poll_delay(
         .to_std()
         .unwrap_or(Duration::ZERO)
         .min(IDLE_POLL_INTERVAL)
+}
+
+/// Whether the sharing loop fetches the community board now: it has not yet, or the interval since
+/// the last fetch (`last_board`) has passed. A clock that moved backwards fetches again.
+pub fn board_due(now: DateTime<Utc>, last_board: Option<DateTime<Utc>>) -> bool {
+    last_board.map_or(true, |last| {
+        now < last || now - last >= span(BOARD_INTERVAL)
+    })
+}
+
+/// How long the sharing loop sleeps after its work at `now`: until the next board fetch, or until
+/// `next_upload` (the next time a waiting sample becomes eligible; `None` when none waits) when
+/// that comes first. Never longer than the board interval, so an upload that failed is retried at
+/// that cadence and the loop never polls faster than the next thing that can happen.
+pub fn sharing_delay(
+    now: DateTime<Utc>,
+    last_board: Option<DateTime<Utc>>,
+    next_upload: Option<DateTime<Utc>>,
+) -> Duration {
+    let board_at = last_board.map_or(now, |last| last + span(BOARD_INTERVAL));
+    let due = next_upload.map_or(board_at, |upload| upload.min(board_at));
+    (due - now)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+        .min(BOARD_INTERVAL)
 }
 
 /// What ended a wait.
@@ -222,5 +250,31 @@ mod tests {
         let wake = signal.take();
         assert!(wake.change.must_rescan);
         assert!(wake.change.paths.is_empty());
+    }
+
+    #[test]
+    fn the_board_is_fetched_every_interval_whatever_was_uploaded() {
+        assert!(board_due(at(0), None));
+        assert!(!board_due(at(29), Some(at(0))));
+        assert!(board_due(at(30), Some(at(0))));
+        assert!(board_due(at(-5), Some(at(0))), "a clock that went back");
+    }
+
+    #[test]
+    fn the_sharing_loop_sleeps_until_the_next_board_fetch_or_eligible_sample() {
+        let delay = |now: i64, board: Option<i64>, upload: Option<i64>| {
+            sharing_delay(at(now), board.map(at), upload.map(at))
+        };
+        // Nothing waits: the board cadence alone.
+        assert_eq!(delay(10, Some(0), None), Duration::from_secs(20));
+        // A sample becomes eligible first: wake for it, not faster.
+        assert_eq!(delay(10, Some(0), Some(14)), Duration::from_secs(4));
+        // A far-away sample never stretches the board cadence.
+        assert_eq!(delay(10, Some(0), Some(500)), Duration::from_secs(20));
+        assert_eq!(delay(10, Some(0), Some(30)), Duration::from_secs(20));
+        // Before the first fetch the board is due at once.
+        assert_eq!(delay(10, None, Some(12)), Duration::ZERO);
+        // A backwards clock cannot stretch the wait past the interval.
+        assert_eq!(delay(-100, Some(0), None), Duration::from_secs(30));
     }
 }

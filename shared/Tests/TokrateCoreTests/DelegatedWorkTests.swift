@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import TokrateCore
@@ -6,6 +7,11 @@ import XCTest
 /// `thread_spawn` child turns are attributed to the primary turn that started them. Time is driven
 /// by the `now:` of each monitor poll; every timestamp is an offset in seconds from `origin`.
 final class DelegatedWorkTests: XCTestCase {
+    /// A live response is identified by a digest of its session and response ids, never by them.
+    private func liveDigest(_ identity: String) -> String {
+        SHA256.hash(data: Data("response|\(identity)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Whole seconds, so transcript timestamps (millisecond precision) round-trip exactly.
     private let origin = Date(timeIntervalSince1970: Date.now.timeIntervalSince1970.rounded(.down))
     private let settle = DelegationAttributor.settleSeconds
@@ -199,7 +205,7 @@ final class DelegatedWorkTests: XCTestCase {
         XCTAssertEqual(first.metrics.count, 1, "child sessions emit no TurnMetric")
         XCTAssertEqual(first.metrics.first?.outputTokens, 300)
         XCTAssertNil(first.metrics.first?.delegatedOutputTokens)
-        XCTAssertEqual(first.responses.map(\.id), ["root-1|resp-t1"], "child sessions emit no live responses")
+        XCTAssertEqual(first.responses.map(\.id), [liveDigest("root-1|resp-t1")], "child sessions emit no live responses")
 
         let early = try await monitor.poll(now: at(60 + settle - 1))
         XCTAssertTrue(early.metrics.isEmpty)

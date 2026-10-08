@@ -1951,8 +1951,8 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let recent = metric("recent", now + Duration::seconds(2));
     queue.enqueue(&[old, recent.clone()], now + Duration::seconds(3));
     assert_eq!(queue.len(), 1);
-    let first = queue.batch(now + Duration::seconds(3));
-    let retry = queue.batch(now + Duration::seconds(3));
+    let first = queue.batch(now + Duration::minutes(7));
+    let retry = queue.batch(now + Duration::minutes(7));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
     assert_eq!(first[0].app_version, "0.1.19");
     queue.disable();
@@ -5334,7 +5334,7 @@ fn sharing_queue_waits_for_final_primary_turns_and_shares_each_turn_once() {
         at + Duration::seconds(41),
     );
     assert_eq!(queue.len(), 2);
-    let batch = queue.batch(at + Duration::seconds(42));
+    let batch = queue.batch(at + Duration::minutes(7));
     let delegated: Vec<Option<i64>> = batch
         .iter()
         .map(|sample| sample.delegated_output_tokens)
@@ -8340,4 +8340,433 @@ fn history_keeps_a_settled_delegated_total_when_the_same_turn_arrives_without_on
     let mut fresh = History::default();
     fresh.merge(&[provisional], now);
     assert_eq!(fresh.records()[0].delegated_output_tokens, None);
+}
+
+// ---- bounded source reads and ids ------------------------------------------------------------
+
+/// A named pipe: opening it for reading blocks until something writes to it.
+#[cfg(unix)]
+pub(crate) fn make_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+}
+
+/// Runs `work` on another thread and fails the test, instead of hanging it, when it blocks.
+#[cfg(unix)]
+pub(crate) fn within_seconds<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver
+        .recv_timeout(StdDuration::from_secs(20))
+        .expect("blocked on a file that is not a regular file")
+}
+
+#[cfg(unix)]
+#[test]
+fn only_regular_files_are_opened_for_reading() {
+    use crate::reader::open_regular_file;
+    use std::os::unix::fs::symlink;
+    let temp = TestDir::new();
+    let file = temp.path().join("file");
+    fs::write(&file, b"data").unwrap();
+    let fifo = temp.path().join("fifo");
+    make_fifo(&fifo);
+    let link_to_file = temp.path().join("link-to-file");
+    symlink(&file, &link_to_file).unwrap();
+    let link_to_fifo = temp.path().join("link-to-fifo");
+    symlink(&fifo, &link_to_fifo).unwrap();
+    let directory = temp.path().to_path_buf();
+
+    let results = within_seconds(move || {
+        [file, link_to_file, fifo, link_to_fifo, directory]
+            .map(|path| open_regular_file(&path).map(|(_, metadata)| metadata.len()))
+    });
+    // A symlink to a regular file is followed, as everywhere else a source file is stat-ed.
+    assert_eq!(results[0].as_ref().unwrap(), &4);
+    assert_eq!(results[1].as_ref().unwrap(), &4);
+    for refused in &results[2..] {
+        assert_eq!(
+            refused.as_ref().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        open_regular_file(&temp.path().join("missing"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn a_capped_read_never_returns_more_than_the_cap_even_if_the_file_grew() {
+    use crate::reader::{open_regular_file, read_capped};
+    let temp = TestDir::new();
+    let path = temp.path().join("file");
+    fs::write(&path, vec![b'x'; 10]).unwrap();
+    let read = |cap| read_capped(open_regular_file(&path).unwrap().0, cap).unwrap();
+    assert_eq!(read(10).unwrap().len(), 10);
+    assert_eq!(read(11).unwrap().len(), 10);
+    assert!(read(9).is_none());
+    assert!(read(0).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn grok_never_blocks_on_a_session_file_that_is_a_fifo() {
+    let temp = TestDir::new();
+    let root = temp.path().to_path_buf();
+    let events = grok_turn_events("fifo", 0, "completed");
+    let usage = grok_usage("fifo", 0, 50);
+    let directory = write_grok_session(&root, "fifo", &events, &usage);
+    // A summary pipe is skipped, and the session is still measured without an effort.
+    make_fifo(&directory.join("summary.json"));
+    let now = time("2026-10-03T10:00:06Z");
+    let mut monitor = GrokMonitor::new(root.clone());
+    let (monitor, records) = within_seconds(move || {
+        let records = monitor.poll(now).unwrap();
+        (monitor, records)
+    });
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].reasoning_effort, None);
+
+    // Files replaced by pipes after the session was discovered are never opened blocking.
+    for name in ["usage.json", "events.jsonl", "summary.json"] {
+        let path = directory.join(name);
+        let _ = fs::remove_file(&path);
+        make_fifo(&path);
+    }
+    let mut monitor = monitor;
+    monitor.note_changes(&changed(&[
+        &directory.join("usage.json"),
+        &directory.join("events.jsonl"),
+        &directory.join("summary.json"),
+    ]));
+    let records = within_seconds(move || {
+        let records = monitor.poll(now + Duration::seconds(1)).unwrap();
+        for _ in 0..3 {
+            monitor.poll(now + Duration::seconds(2)).unwrap();
+        }
+        records
+    });
+    assert!(records.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_transcript_replaced_by_a_fifo_does_not_block_the_reader() {
+    let temp = TestDir::new();
+    let path = temp.path().join("rollout.jsonl");
+    fs::write(
+        &path,
+        jsonl(&[claude_user("2026-10-03T10:00:00Z", "a", json!("go"))]),
+    )
+    .unwrap();
+    let mut reader = crate::reader::IncrementalReader::beginning_claude(path.clone());
+    fs::remove_file(&path).unwrap();
+    make_fifo(&path);
+    let error = within_seconds(move || reader.poll(8_192, time("2026-10-03T10:00:06Z")).err());
+    assert_eq!(error.unwrap().kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn grok_keeps_only_the_single_model_key_of_a_usage_row() {
+    let cases = [
+        // A blank key is ignored; the one other key is the model.
+        (
+            json!({"": {}, "grok-4": {"prompt": "secret"}}),
+            Some("grok-4"),
+        ),
+        (json!({"g".repeat(81): {}}), None),
+        (json!({"not a model!": {}}), None),
+        (json!({"grok-4": {}, "grok-3": {}}), None),
+        (json!(["grok-4"]), None),
+        (json!({}), None),
+    ];
+    for (model_usage, expected) in cases {
+        let temp = TestDir::new();
+        let mut usage = grok_usage("model", 0, 50);
+        usage["turns"][0]["modelUsage"] = model_usage.clone();
+        let events = grok_turn_events("model", 0, "completed");
+        write_grok_session(temp.path(), "model", &events, &usage);
+        let mut monitor = GrokMonitor::new(temp.path().to_path_buf());
+        let records = monitor.poll(time("2026-10-03T10:00:06Z")).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].model.as_deref(), expected, "{model_usage}");
+    }
+}
+
+#[test]
+fn ids_from_source_logs_are_kept_only_up_to_512_bytes() {
+    let at = "2026-10-03T10:00:00Z";
+    let end = "2026-10-03T10:00:01Z";
+    let codex = |turn_id: &str| {
+        let mut parser = crate::parser::CodexEventParser::new("file".into());
+        parser.consume(&event(
+            "event_msg",
+            json!({ "type": "task_started", "turn_id": turn_id, "started_at": at }),
+            at,
+        ));
+        parser.consume(&event(
+            "token_usage_record",
+            json!({ "turn_id": turn_id, "turn_token_usage": { "output_tokens": 20 } }),
+            at,
+        ));
+        parser.consume(&event(
+            "event_msg",
+            json!({ "type": "task_complete", "turn_id": turn_id, "started_at": at,
+                    "completed_at": end, "duration_ms": 1000 }),
+            end,
+        ))
+    };
+    assert!(codex(&"t".repeat(512)).is_some());
+    assert!(codex(&"t".repeat(513)).is_none());
+
+    let claude = |message_id: &str| {
+        let mut parser = claude_parser();
+        parser.consume_settled(&claude_user(at, "human", json!("go")));
+        parser.consume_settled(&assistant_end(end, message_id))
+    };
+    assert!(claude(&"m".repeat(512)).is_some());
+    assert!(claude(&"m".repeat(513)).is_none());
+
+    let grok = |session_id: &str| {
+        let temp = TestDir::new();
+        let events = grok_turn_events(session_id, 0, "completed");
+        write_grok_session(
+            temp.path(),
+            "session",
+            &events,
+            &grok_usage(session_id, 0, 50),
+        );
+        let mut monitor = GrokMonitor::new(temp.path().to_path_buf());
+        monitor.poll(time("2026-10-03T10:00:06Z")).unwrap().len()
+    };
+    assert_eq!(grok(&"s".repeat(512)), 1);
+    assert_eq!(grok(&"s".repeat(513)), 0);
+}
+
+#[test]
+fn the_consent_example_is_the_real_envelope_with_fake_values() {
+    let text = crate::example_request_json();
+    assert!(text.contains("\n  \"samples\""), "pretty-printed");
+    let example: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(example["schemaVersion"], 1);
+    assert_eq!(example["sentAt"], "2026-01-01T12:05:00Z");
+    let samples = example["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 1);
+    let sample = samples[0].as_object().unwrap();
+
+    // Exactly the fields a real sample carries, nothing added and nothing missing.
+    let now = time("2026-10-03T12:00:00Z");
+    let real = crate::SharedSample::from_metric(&metric("local-id", now), Uuid::new_v4()).unwrap();
+    let real = serde_json::to_value(real).unwrap();
+    let keys = |object: &serde_json::Map<String, Value>| object.keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(sample), keys(real.as_object().unwrap()));
+
+    // Obviously fake, allowlisted values; the local id is never part of it.
+    assert_eq!(sample["sampleId"], "00000000-0000-4000-8000-000000000000");
+    assert_eq!(sample["observedAt"], "2026-01-01T12:00:00Z");
+    assert_eq!(sample["model"], "example-model");
+    assert_eq!(sample["appVersion"], crate::APP_VERSION);
+    assert_eq!(sample["durationMs"], 20_000.0);
+    assert_eq!(sample["ttftMs"], 840.0);
+    assert_eq!(sample["delegatedOutputTokens"], 0);
+    assert_eq!(sample["surface"], "cli");
+    assert_eq!(sample["inputTokens"], 48_000);
+    assert_eq!(sample["cacheReadInputTokens"], 36_000);
+    assert_eq!(sample["cacheWriteInputTokens"], Value::Null);
+    assert_eq!(sample["providerRegion"], Value::Null);
+    assert!(!text.contains("local-id"));
+}
+
+#[test]
+fn the_sent_example_of_the_browser_preview_matches_the_real_one() {
+    // The dev preview has no shell to ask, so it shows this copy of the example.
+    // Regenerate it with `UPDATE_SENT_EXAMPLE=1 cargo test sent_example` after a change.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui/store/sent-example.json");
+    let real = crate::example_request_json();
+    if std::env::var_os("UPDATE_SENT_EXAMPLE").is_some() {
+        fs::write(&path, format!("{real}\n")).unwrap();
+    }
+    assert_eq!(
+        fs::read_to_string(&path).unwrap().trim_end(),
+        real,
+        "ui/store/sent-example.json is out of date: run `UPDATE_SENT_EXAMPLE=1 cargo test sent_example` in desktop/core"
+    );
+}
+
+// ---- uploads leave after the sample's five-minute period ------------------------------------------
+
+/// A queue whose delay is `seconds` and that counts how often a delay was drawn.
+fn queue_with_jitter(
+    seconds: i64,
+) -> (SharingQueue, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let draws = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = draws.clone();
+    let queue = SharingQueue::with_jitter_source(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Duration::seconds(seconds)
+    });
+    (queue, draws)
+}
+
+#[test]
+fn a_sample_is_not_uploaded_before_its_period_ended_plus_its_delay() {
+    let (mut queue, _) = queue_with_jitter(30);
+    queue.enable(time("2026-10-03T09:59:00Z"));
+    // Completed in the period 10:00:00 to 10:05:00.
+    let completed = time("2026-10-03T10:03:47Z");
+    queue.enqueue(&[metric("turn", completed)], completed);
+    assert_eq!(queue.len(), 1);
+    let eligible = time("2026-10-03T10:05:30Z");
+    assert_eq!(queue.next_eligible_after(completed), Some(eligible));
+    // Neither the period's own end nor the second before the delay has passed.
+    for early in [
+        "2026-10-03T10:03:48Z",
+        "2026-10-03T10:05:00Z",
+        "2026-10-03T10:05:29Z",
+    ] {
+        assert!(queue.batch(time(early)).is_empty(), "{early}");
+    }
+    assert_eq!(queue.len(), 1, "waiting samples stay queued");
+    assert_eq!(
+        queue.next_eligible_after(time("2026-10-03T10:05:29Z")),
+        Some(eligible)
+    );
+    // From the eligible instant on it leaves, and an unacknowledged one is offered again.
+    let batch = queue.batch(eligible);
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].observed_at, "2026-10-03T10:00:00Z");
+    assert_eq!(
+        queue.batch(eligible + Duration::seconds(30))[0].sample_id,
+        batch[0].sample_id
+    );
+    assert_eq!(
+        queue.next_eligible_after(eligible),
+        None,
+        "nothing else is waiting"
+    );
+    queue.ack(&[batch[0].sample_id]);
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn the_samples_of_one_period_share_one_delay_and_leave_in_one_batch() {
+    let (mut queue, draws) = queue_with_jitter(17);
+    queue.enable(time("2026-10-03T09:59:00Z"));
+    let now = time("2026-10-03T10:09:00Z");
+    // Three turns of the period 10:00 to 10:05, one of the period 10:05 to 10:10.
+    let turns = [
+        metric("a", time("2026-10-03T10:00:10Z")),
+        metric("b", time("2026-10-03T10:02:00Z")),
+        metric("c", time("2026-10-03T10:04:59Z")),
+        metric("d", time("2026-10-03T10:07:00Z")),
+    ];
+    queue.enqueue(&turns, now);
+    assert_eq!(
+        draws.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "one draw per period"
+    );
+
+    let first_period = time("2026-10-03T10:05:17Z");
+    assert!(queue.batch(first_period - Duration::seconds(1)).is_empty());
+    let batch = queue.batch(first_period);
+    assert_eq!(batch.len(), 3, "the period leaves together");
+    assert!(batch
+        .iter()
+        .all(|sample| sample.observed_at == "2026-10-03T10:00:00Z"));
+    assert_eq!(
+        queue.next_eligible_after(first_period),
+        Some(time("2026-10-03T10:10:17Z"))
+    );
+    queue.ack(
+        &batch
+            .iter()
+            .map(|sample| sample.sample_id)
+            .collect::<Vec<_>>(),
+    );
+    let later = queue.batch(time("2026-10-03T10:10:17Z"));
+    assert_eq!(later.len(), 1);
+    assert_eq!(later[0].observed_at, "2026-10-03T10:05:00Z");
+
+    // Samples queued later for a period that already has its delay keep it.
+    queue.enqueue(&[metric("e", time("2026-10-03T10:08:30Z"))], now);
+    assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[test]
+fn more_than_fifty_samples_of_one_period_follow_in_the_next_batch() {
+    let (mut queue, _) = queue_with_jitter(0);
+    queue.enable(time("2026-10-03T09:59:00Z"));
+    let now = time("2026-10-03T10:04:00Z");
+    let turns: Vec<TurnMetric> = (0..70)
+        .map(|index| metric(format!("turn-{index}"), time("2026-10-03T10:01:00Z")))
+        .collect();
+    queue.enqueue(&turns, now);
+    let eligible = time("2026-10-03T10:05:00Z");
+    let first = queue.batch(eligible);
+    assert_eq!(first.len(), 50);
+    queue.ack(
+        &first
+            .iter()
+            .map(|sample| sample.sample_id)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(queue.batch(eligible).len(), 20);
+}
+
+#[test]
+fn the_upload_delay_is_between_zero_and_sixty_seconds_whatever_the_source_says() {
+    for (drawn, expected) in [(-30, 0), (0, 0), (60, 60), (500, 60)] {
+        let (mut queue, _) = queue_with_jitter(drawn);
+        queue.enable(time("2026-10-03T09:59:00Z"));
+        let completed = time("2026-10-03T10:01:00Z");
+        queue.enqueue(&[metric("turn", completed)], completed);
+        assert_eq!(
+            queue.next_eligible_after(completed),
+            Some(time("2026-10-03T10:05:00Z") + Duration::seconds(expected)),
+            "{drawn}"
+        );
+    }
+}
+
+#[test]
+fn the_default_upload_delay_is_random_within_a_minute() {
+    let completed = time("2026-10-03T10:01:00Z");
+    let end = time("2026-10-03T10:05:00Z");
+    let mut delays = HashSet::new();
+    for _ in 0..40 {
+        let mut queue = SharingQueue::new();
+        queue.enable(time("2026-10-03T09:59:00Z"));
+        queue.enqueue(&[metric("turn", completed)], completed);
+        let delay = queue.next_eligible_after(completed).unwrap() - end;
+        assert!(
+            delay >= Duration::zero() && delay < Duration::seconds(60),
+            "{delay}"
+        );
+        delays.insert(delay.num_milliseconds());
+    }
+    assert!(delays.len() > 20, "the delay varies between queues");
+}
+
+#[test]
+fn turning_sharing_off_clears_waiting_samples_and_their_delays() {
+    let (mut queue, draws) = queue_with_jitter(10);
+    queue.enable(time("2026-10-03T09:59:00Z"));
+    let completed = time("2026-10-03T10:01:00Z");
+    queue.enqueue(&[metric("turn", completed)], completed);
+    assert_eq!(queue.len(), 1);
+    queue.disable();
+    assert!(queue.is_empty());
+    assert_eq!(queue.next_eligible_after(completed), None);
+    assert!(queue.batch(time("2026-10-03T11:00:00Z")).is_empty());
+    // A new session starts with a new delay for the same period.
+    queue.enable(time("2026-10-03T10:00:30Z"));
+    queue.enqueue(&[metric("turn-2", completed)], completed);
+    assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

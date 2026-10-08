@@ -123,10 +123,7 @@ fn refresh_idle_candidates_from_open_handles(
         // Windows directory-entry metadata can remain stale while another process still has the
         // transcript open. Probe only unchanged, already-tracked idle files during the existing
         // five-minute discovery pass; the normal reader then handles any detected change.
-        let Ok(handle) = fs::File::open(&candidate.path) else {
-            continue;
-        };
-        let Ok(metadata) = handle.metadata() else {
+        let Ok((_, metadata)) = crate::reader::open_regular_file(&candidate.path) else {
             continue;
         };
         candidate.identity = file_identity(&metadata);

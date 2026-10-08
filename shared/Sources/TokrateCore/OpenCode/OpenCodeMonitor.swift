@@ -131,7 +131,7 @@ public actor OpenCodeMonitor {
             defer { database.close() }
             snapshot = try database.readTransaction {
                 var snapshot = Snapshot()
-                snapshot.messages = full ? try database.messages(createdSince: cutoff) : try database.messages(updatedSince: from)
+                snapshot.messages = full ? try database.messages(createdSince: cutoff) : try database.messages(updatedSince: from, createdSince: cutoff)
                 // Sessions the index lacks, then their ancestors (a subagent's parents lead to the primary session).
                 var wanted = Set(snapshot.messages.map(\.sessionID)).subtracting(known)
                 for _ in 0..<16 where !wanted.isEmpty {
@@ -157,7 +157,7 @@ public actor OpenCodeMonitor {
         for (id, row) in snapshot.sessions { sessions[id] = OpenCodeSession(row: row) }
         for row in snapshot.messages {
             let message = OpenCodeMessage(row: row)
-            if message.rowCreatedMs < cutoff { messages.removeValue(forKey: message.id) } else { messages[message.id] = message }
+            messages[message.id] = message
             watermark = max(watermark ?? row.timeUpdated, row.timeUpdated)
         }
         prune(cutoff: cutoff)

@@ -323,7 +323,8 @@ final class HistoryStore {
                 // turn arrives first without its delegated total, and its settled re-emission shares it.
                 let known = Dictionary(self.history.records.map { ($0.id, $0.isDelegationFinal) }, uniquingKeysWith: { first, _ in first })
                 self.sharing.enqueue(newRecords.filter { $0.isDelegationFinal && known[$0.id] != true })
-                self.history.prune()
+                // Expired records leave the file within the seven days promised, also while no record arrives.
+                let expiredRecords = self.history.prune()
                 for record in newRecords { self.history.upsert(record) }
                 // After the records are in the history, so a checkpoint never claims a file whose
                 // records are not.
@@ -345,7 +346,7 @@ final class HistoryStore {
                 // A replay that just finished adds files to the checkpoints without a new record, so the
                 // set is also written when the monitors go quiet; during a replay every poll would change it.
                 let isIdle = monitorDeadlines.min().map { $0 > polledAt } ?? true
-                if !newRecords.isEmpty { self.saveThrottle.noteNewRecords() }
+                if !newRecords.isEmpty || expiredRecords > 0 { self.saveThrottle.noteUnsavedChanges() }
                 if self.saveThrottle.isDue(now: polledAt)
                     || (isIdle && self.checkpoints.pathDigests != self.savedCheckpointPaths) {
                     self.saveHistory(now: polledAt)

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import TokrateCore
 import XCTest
@@ -300,7 +301,11 @@ final class CodexEventParserTests: XCTestCase {
         XCTAssertNil(metric.providerRegion)
 
         let responses = parser.drainCompletedResponses()
-        XCTAssertEqual(responses.map(\.id), ["synthetic-session|resp-1", "synthetic-session|resp-3", "synthetic-session|resp-5", "synthetic-session|resp-6"])
+        // Ids are digests: neither the session id, nor the file path, nor the response id is in them.
+        XCTAssertEqual(responses.map(\.id), ["resp-1", "resp-3", "resp-5", "resp-6"].map { digest("response|synthetic-session|\($0)") })
+        for response in responses {
+            XCTAssertNotNil(response.id.range(of: "^[0-9a-f]{64}$", options: .regularExpression))
+        }
         XCTAssertEqual(responses.map(\.outputTokens), [341, 400, 300, 250])
         XCTAssertEqual(responses.map(\.durationSeconds), [10, 8, 600, 8])
         XCTAssertEqual(responses.map(\.completedAt), [11, 33, 1_300, 1_318].map { epoch.addingTimeInterval($0) })
@@ -493,6 +498,74 @@ final class CodexEventParserTests: XCTestCase {
         let zero = try XCTUnwrap(promptCacheMetric(usages: [["output_tokens": 50, "input_tokens": 100, "cached_input_tokens": 0]]))
         XCTAssertEqual(zero.inputTokens, 100)
         XCTAssertEqual(zero.cacheReadInputTokens, 0)
+    }
+
+    private func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func testAResponseFromAFileWithoutASessionIdIsIdentifiedByADigestNotThePath() throws {
+        var parser = CodexEventParser(sourceIdentity: "/Users/private/rollout-secret.jsonl")
+        _ = parser.consume(line: try event(type: "session_meta", payload: ["source": "vscode", "model_provider": "openai"]))
+        _ = parser.consume(line: try at(0, "event_msg", ["type": "task_started", "turn_id": "turn-1"]))
+        _ = parser.consume(line: try at(0, "turn_context", ["turn_id": "turn-1", "model": "gpt-test", "effort": "high"]))
+        _ = parser.consume(line: try responseUsage(10, response: "resp-1", output: 300, cumulative: 300))
+        let id = try XCTUnwrap(parser.drainCompletedResponses().first).id
+        XCTAssertEqual(id, digest("response|/Users/private/rollout-secret.jsonl|resp-1"))
+        XCTAssertFalse(id.contains("private"))
+        XCTAssertFalse(id.contains("|"))
+    }
+
+    func testIdentifiersAboveTheByteLimitAreNeverRetained() throws {
+        let limit = CodexEventParser.maximumIdentifierBytes
+        let atLimit = String(repeating: "a", count: limit)
+        let overLimit = String(repeating: "b", count: limit + 1)
+        // Multi-byte characters count by bytes, not characters.
+        let overLimitInBytes = String(repeating: "é", count: limit / 2 + 1)
+        var parser = CodexEventParser(sourceIdentity: "file")
+        _ = parser.consume(line: try event(type: "session_meta", payload: ["id": "session", "source": "vscode", "model_provider": "openai"]))
+        for turn in [overLimit, overLimitInBytes] {
+            _ = parser.consume(line: try started(turn))
+            _ = parser.consume(line: try event(type: "turn_context", payload: ["turn_id": turn, "model": "gpt-test"]))
+            _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": turn, "turn_token_usage": ["output_tokens": 100]]))
+            XCTAssertNil(parser.consume(line: try event(type: "event_msg", payload: [
+                "type": "task_complete", "turn_id": turn, "started_at": "2026-10-03T10:00:00Z",
+                "completed_at": "2026-10-03T10:00:10Z", "duration_ms": 10_000
+            ])), "a turn whose id is too long is ignored altogether")
+        }
+        _ = parser.consume(line: try started(atLimit))
+        _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": atLimit, "turn_token_usage": ["output_tokens": 100]]))
+        XCTAssertEqual(parser.consume(line: try event(type: "event_msg", payload: [
+            "type": "task_complete", "turn_id": atLimit, "started_at": "2026-10-03T10:00:00Z",
+            "completed_at": "2026-10-03T10:00:10Z", "duration_ms": 10_000
+        ]))?.outputTokens, 100)
+    }
+
+    func testAResponseIdAboveTheByteLimitIsNotCounted() throws {
+        var parser = CodexEventParser(sourceIdentity: "file")
+        try begin(&parser)
+        _ = parser.consume(line: try item(1, "message", role: "user"))
+        _ = parser.consume(line: try responseUsage(11, response: String(repeating: "r", count: CodexEventParser.maximumIdentifierBytes + 1), output: 300, cumulative: 300))
+        let metric = try XCTUnwrap(complete(&parser, at: 12))
+        XCTAssertNil(metric.responseCount)
+        XCTAssertTrue(parser.drainCompletedResponses().isEmpty)
+    }
+
+    func testAnOversizedSessionIdDoesNotBecomeTheSessionIdentityOrDelegationRoot() throws {
+        var parser = CodexEventParser(sourceIdentity: "file")
+        let huge = String(repeating: "s", count: CodexEventParser.maximumIdentifierBytes + 1)
+        _ = parser.consume(line: try event(type: "session_meta", payload: ["id": huge, "session_id": huge, "source": "vscode", "model_provider": "openai"]))
+        _ = parser.consume(line: try started("turn-1"))
+        _ = parser.consume(line: try event(type: "token_usage_record", payload: ["turn_id": "turn-1", "turn_token_usage": ["output_tokens": 100]]))
+        let metric = try XCTUnwrap(parser.consume(line: try event(type: "event_msg", payload: [
+            "type": "task_complete", "turn_id": "turn-1", "started_at": "2026-10-03T10:00:00Z",
+            "completed_at": "2026-10-03T10:00:10Z", "duration_ms": 10_000
+        ])))
+        XCTAssertEqual(metric.id, digest("file|turn-1"), "identified by the file, as when the session names no id")
+        XCTAssertTrue(parser.drainDelegationEvents().allSatisfy { event in
+            if case .primaryTurn = event { return false }
+            return true
+        })
     }
 
     private func started(_ turnID: String) throws -> Data {

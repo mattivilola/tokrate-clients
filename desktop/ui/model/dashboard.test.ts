@@ -14,10 +14,11 @@ import { chartCopy } from "../components/Trend";
 import { CLIENT_ORDER, buildDashboard, communityLine } from "./dashboard";
 import {
   DELEGATED_NOTICE,
+  FIELD_DESCRIPTION,
   PROMPT_CACHE_NOTICE,
   SURFACE_NOTICE,
-  buildSentExample,
 } from "../components/SharingChoice";
+import sentExample from "../store/sent-example.json?raw";
 import { EFFICIENCY_EXPLANATION, EFFICIENCY_INSUFFICIENT } from "../metrics";
 import { PROVIDER_TITLES, SOURCE_TITLES, folderName, readout, signedPercent } from "./format";
 import { monitoringState, sharingState } from "./status";
@@ -493,8 +494,8 @@ describe("efficiency indicator", () => {
 });
 
 describe("sharing notice", () => {
-  it("shows delegated output tokens in the example payload and the notice", () => {
-    const sample = JSON.parse(buildSentExample()).samples[0];
+  it("shows delegated output tokens in the preview example payload and the notice", () => {
+    const sample = JSON.parse(sentExample).samples[0];
     expect(sample).toHaveProperty("delegatedOutputTokens");
     expect(sample).toHaveProperty("surface");
     for (const key of ["inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]) {
@@ -508,6 +509,11 @@ describe("sharing notice", () => {
   it("states the prompt-cache token counts in the notice", () => {
     expect(PROMPT_CACHE_NOTICE).toBe(
       "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache.",
+    );
+  });
+  it("describes the example's fields, the model name and the upload timing", () => {
+    expect(FIELD_DESCRIPTION).toBe(
+      "Region is derived by the server, not sent by the app. The Amazon Bedrock region (providerRegion) is the one the model id itself names and is null for every other route. Model names are sent as your coding tool reports them, so a custom deployment name is shared as is; a name with unusual characters is sent as “unknown”. Uploads leave after each five-minute period ends, so the time of a turn is not sent more precisely than its five-minute period.",
     );
   });
   it("states the surface category in the notice", () => {

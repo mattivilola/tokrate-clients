@@ -454,6 +454,23 @@ final class OpenCodeMonitorTests: XCTestCase {
         XCTAssertEqual(try onlyMetric(full).outputTokens, 400, "the full re-read rebuilt the index")
     }
 
+    func testBothReadsKeepOnlyTheNewestCreatedMessagesWhenThereAreMoreThanTheLimit() throws {
+        let database = try makeDatabase()
+        try database.addSession("ses1")
+        for index in 0..<6 {
+            try database.put(assistant("msg_\(index)", created: Double(index), completed: Double(index) + 1, updated: Double(100 + index)))
+        }
+        let reader = try OpenCodeDatabase(url: OpenCodeMonitor.databaseURL(root: root))
+        defer { reader.close() }
+        let since = SyntheticOpenCodeDatabase.milliseconds(0)
+        XCTAssertEqual(try reader.messages(createdSince: since, limit: 3).map(\.id), ["msg_5", "msg_4", "msg_3"])
+        XCTAssertEqual(try reader.messages(updatedSince: SyntheticOpenCodeDatabase.milliseconds(100), createdSince: since, limit: 3).map(\.id), ["msg_5", "msg_4", "msg_3"])
+        // Updated recently but created before the window: not read, the index drops it anyway.
+        XCTAssertEqual(try reader.messages(updatedSince: SyntheticOpenCodeDatabase.milliseconds(100), createdSince: SyntheticOpenCodeDatabase.milliseconds(4)).map(\.id), ["msg_5", "msg_4"])
+        XCTAssertEqual(try reader.messages(updatedSince: SyntheticOpenCodeDatabase.milliseconds(104), createdSince: since).map(\.id), ["msg_5", "msg_4"])
+        XCTAssertEqual(OpenCodeDatabase.maximumReadMessages, 100_000)
+    }
+
     func testMessagesOlderThanSevenDaysAreNotIndexed() async throws {
         let database = try makeDatabase()
         try addStandardTurn(database)

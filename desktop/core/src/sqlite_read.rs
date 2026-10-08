@@ -39,9 +39,22 @@ pub(crate) fn read_only_uri(path: &Path) -> Option<String> {
     Some(encoded)
 }
 
+/// Whether `path` is a regular file (following a symlink, like every other source file) or does
+/// not exist. SQLite opens its files blocking, so a FIFO named like the database or its log would
+/// stall the poll that opens it.
+fn is_regular_or_absent(path: &Path) -> bool {
+    fs::metadata(path).map_or(true, |metadata| metadata.is_file())
+}
+
 /// Opens a database without any way to write: a read-only `file:` URI with `mode=ro` (never
-/// `immutable`, which would ignore the write-ahead log) and a busy timeout of half a second.
+/// `immutable`, which would ignore the write-ahead log) and a busy timeout of half a second. The
+/// database and its write-ahead log must be regular files.
 pub(crate) fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
+    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+        || !is_regular_or_absent(&wal_path(path))
+    {
+        return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
+    }
     let uri =
         read_only_uri(path).ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY

@@ -35,9 +35,14 @@ public struct MetricHistory: Sendable {
         if records.count > Self.maximumRecords { records = Array(records.prefix(Self.maximumRecords)) }
     }
 
-    public mutating func prune(now: Date = .now) {
+    /// Drops the records outside the retention window and returns how many it removed, so a caller that
+    /// persists the history knows the saved copy is stale.
+    @discardableResult
+    public mutating func prune(now: Date = .now) -> Int {
         let cutoff = now.addingTimeInterval(-Self.retention)
+        let before = records.count
         records.removeAll { $0.completedAt < cutoff || $0.completedAt > now }
+        return before - records.count
     }
 
     public mutating func reset() {

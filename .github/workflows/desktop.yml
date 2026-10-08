@@ -26,14 +26,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           workspaces: |
@@ -42,7 +44,7 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf xvfb dbus-x11
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: desktop
       - run: npm test
         working-directory: desktop
@@ -88,7 +90,7 @@ jobs:
         run: python desktop/scripts/native-smoke.py desktop/src-tauri/target/release/tokrate-desktop.exe
       - name: Upload native installer packages
         if: always() && (steps.bundle_release.outcome == 'success' || steps.bundle_pr.outcome == 'success')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tokrate-0.1.19-${{ matrix.artifact }}-${{ steps.bundle_release.outputs.flavor || steps.bundle_pr.outputs.flavor }}
           path: |
@@ -99,7 +101,7 @@ jobs:
           retention-days: 7
       - name: Upload native smoke diagnostics
         if: always() && (steps.linux_smoke.outcome == 'failure' || steps.windows_smoke.outcome == 'failure')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tokrate-native-smoke-diagnostics-${{ matrix.artifact }}
           path: ${{ runner.temp }}/tokrate-native-smoke-${{ matrix.artifact }}.json

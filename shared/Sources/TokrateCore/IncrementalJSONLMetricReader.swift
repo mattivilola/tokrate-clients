@@ -112,7 +112,7 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
             return parser.pollEnded(now: now, isFinal: isFinalRead).map { [$0] } ?? []
         }
         let count = Int(min(UInt64(maxBytes), size - offset))
-        let handle = try FileHandle(forReadingFrom: url)
+        let handle = try RegularFile.open(url)
         defer { try? handle.close() }
         try handle.seek(toOffset: offset)
         let bytes = try handle.readDraining(upToCount: count)

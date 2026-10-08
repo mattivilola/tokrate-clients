@@ -7,7 +7,7 @@ import {
   PROMPT_CACHE_NOTICE,
   REGION_NOTICE,
   SURFACE_NOTICE,
-  buildSentExample,
+  SentExample,
 } from "./SharingChoice";
 import { useStore } from "../store/store";
 import type { SourceId, SourceStatus } from "../store/types";
@@ -221,9 +221,7 @@ export function SettingsView() {
             recalled by the switch.
           </p>
           <Disclosure label="See exactly what is sent">
-            <pre className="payload" tabIndex={0} aria-label="Example payload with fake values">
-              {buildSentExample()}
-            </pre>
+            <SentExample />
           </Disclosure>
         </Section>
 

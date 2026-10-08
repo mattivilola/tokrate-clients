@@ -4,7 +4,9 @@
 //! here (locked, corrupt, schema mismatch) leaves the database unread until its next change. The
 //! message `data` column is JSON: only the fixed set of paths listed in the metrics contract is
 //! extracted in SQL with `json_extract`, so prompts, responses and everything else in it never
-//! leave SQLite. The `part` table and every other column are never selected.
+//! leave SQLite. The `part` table and every other column are never selected. Every value is
+//! bounded in SQL as well (an id or text over its limit never leaves SQLite), and a read stops at
+//! a byte budget, so a database cannot make a read hold more than a fixed amount of memory.
 
 use crate::sqlite_read::open_read_only;
 use rusqlite::types::Value;
@@ -18,6 +20,16 @@ const MAX_SESSIONS: usize = 100_000;
 const MAX_TOKEN_COUNT: i64 = 100_000_000;
 const SESSION_FETCH_CHUNK: usize = 400;
 const MAX_IDENTIFIER_BYTES: usize = 120;
+/// Longest row id, session id or parent id read, in characters (the bound of the other sources'
+/// ids). A message or session with a longer one is skipped; a longer parent id never reads as "no
+/// parent", which would turn a subagent session into a primary one.
+const MAX_ID_CHARS: usize = 512;
+/// Longest role, model, provider, variant, finish, error name, version or number read, in
+/// characters. Nothing legitimate is longer; longer text is read as absent (a number as invalid).
+const MAX_VALUE_CHARS: usize = 200;
+/// A read stops after this many bytes of values, keeping the newest messages like
+/// [`MAX_MESSAGES`] does.
+const MAX_READ_BYTES: usize = 64 * 1_048_576;
 
 /// One row of `session`: only what decides whether and how its messages are measured.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,14 +105,70 @@ pub(crate) struct Read {
 /// The session ids a read must fetch rows for because the index does not have them yet.
 pub(crate) type SessionLookup<'a> = &'a dyn Fn(&str) -> bool;
 
-const MESSAGE_COLUMNS: &str = "m.id, m.session_id, m.time_created, m.time_updated, \
-    json_extract(m.data, '$.role'), json_extract(m.data, '$.parentID'), \
-    json_extract(m.data, '$.modelID'), json_extract(m.data, '$.providerID'), \
-    json_extract(m.data, '$.variant'), json_extract(m.data, '$.finish'), \
-    json_extract(m.data, '$.error.name'), json_extract(m.data, '$.time.created'), \
-    json_extract(m.data, '$.time.completed'), json_extract(m.data, '$.tokens.output'), \
-    json_extract(m.data, '$.tokens.reasoning'), json_extract(m.data, '$.tokens.input'), \
-    json_extract(m.data, '$.tokens.cache.read'), json_extract(m.data, '$.tokens.cache.write')";
+/// The values of a message row. Each JSON path is extracted once, here, and bounded where the
+/// result is selected by [`message_columns`].
+const MESSAGE_FIELDS: &str = "m.id AS id, m.session_id AS session_id, \
+    m.time_created AS time_created, m.time_updated AS time_updated, \
+    json_extract(m.data, '$.role') AS role, json_extract(m.data, '$.parentID') AS parent_id, \
+    json_extract(m.data, '$.modelID') AS model, json_extract(m.data, '$.providerID') AS provider, \
+    json_extract(m.data, '$.variant') AS variant, json_extract(m.data, '$.finish') AS finish, \
+    json_extract(m.data, '$.error.name') AS error_name, \
+    json_extract(m.data, '$.time.created') AS created, \
+    json_extract(m.data, '$.time.completed') AS completed, \
+    json_extract(m.data, '$.tokens.output') AS output, \
+    json_extract(m.data, '$.tokens.reasoning') AS reasoning, \
+    json_extract(m.data, '$.tokens.input') AS input, \
+    json_extract(m.data, '$.tokens.cache.read') AS cache_read, \
+    json_extract(m.data, '$.tokens.cache.write') AS cache_write";
+
+/// The columns [`decode_message`] reads, each bounded: text is NULL when longer than
+/// [`MAX_VALUE_CHARS`] (an id: [`MAX_ID_CHARS`]), a number is an empty string, which is not a
+/// number, so a value too long to be one stays invalid instead of reading as absent.
+fn message_columns() -> String {
+    let text =
+        |column: &str, max: usize| format!("CASE WHEN length({column}) <= {max} THEN {column} END");
+    let number = |column: &str| {
+        format!("CASE WHEN {column} IS NULL OR length({column}) <= {MAX_VALUE_CHARS} THEN {column} ELSE '' END")
+    };
+    let integer =
+        |column: &str| format!("CASE WHEN typeof({column}) = 'integer' THEN {column} END");
+    [
+        "id".to_owned(),
+        "session_id".to_owned(),
+        integer("time_created"),
+        integer("time_updated"),
+        text("role", MAX_VALUE_CHARS),
+        text("parent_id", MAX_ID_CHARS),
+        text("model", MAX_VALUE_CHARS),
+        text("provider", MAX_VALUE_CHARS),
+        text("variant", MAX_VALUE_CHARS),
+        text("finish", MAX_VALUE_CHARS),
+        // Only whether a non-empty name is present is used.
+        "CASE WHEN typeof(error_name) = 'text' AND length(error_name) > 0 THEN 1 ELSE 0 END"
+            .to_owned(),
+        number("created"),
+        number("completed"),
+        number("output"),
+        number("reasoning"),
+        number("input"),
+        number("cache_read"),
+        number("cache_write"),
+    ]
+    .join(", ")
+}
+
+/// The columns of a session and the conditions that bound them. A session whose id or parent id is
+/// too long is skipped, and so are its messages. A version that is too long reads as empty: the
+/// session stays in the tree but is not measured.
+fn session_query(condition: &str) -> String {
+    format!(
+        "SELECT id, CASE WHEN typeof(parent_id) = 'text' THEN parent_id END, \
+         CASE WHEN typeof(version) = 'text' THEN \
+         CASE WHEN length(version) <= {MAX_VALUE_CHARS} THEN version ELSE '' END END \
+         FROM session WHERE typeof(id) = 'text' AND length(id) <= {MAX_ID_CHARS} \
+         AND (typeof(parent_id) != 'text' OR length(parent_id) <= {MAX_ID_CHARS}) AND {condition}"
+    )
+}
 
 /// Opens the database read-only and reads messages in one transaction. With `full`, every session
 /// row is read too; otherwise only the sessions the new messages name that `known` does not have.
@@ -110,12 +178,24 @@ pub(crate) fn read_database(
     full: bool,
     known: SessionLookup,
 ) -> rusqlite::Result<Read> {
+    read_database_within(path, scope, full, known, MAX_READ_BYTES)
+}
+
+/// [`read_database`] with its own byte budget: messages and sessions are read, newest first,
+/// until their values add up to `max_bytes`.
+pub(crate) fn read_database_within(
+    path: &Path,
+    scope: MessageScope,
+    full: bool,
+    known: SessionLookup,
+    max_bytes: usize,
+) -> rusqlite::Result<Read> {
     let mut connection = open_read_only(path)?;
     let transaction = connection.transaction()?;
     let mut read = Read::default();
-    read_messages(&transaction, scope, &mut read)?;
+    read_messages(&transaction, scope, &mut read, max_bytes)?;
     if full {
-        read_all_sessions(&transaction, &mut read)?;
+        read_all_sessions(&transaction, &mut read, max_bytes)?;
     } else {
         // Sessions the new messages name, and the ancestors of those, until nothing is missing.
         let mut wanted: Vec<String> = Vec::new();
@@ -146,6 +226,7 @@ fn read_messages(
     connection: &Connection,
     scope: MessageScope,
     read: &mut Read,
+    max_bytes: usize,
 ) -> rusqlite::Result<()> {
     // `json_valid` keeps one corrupt row from failing the whole statement.
     let (filter, first, second) = match scope {
@@ -160,8 +241,11 @@ fn read_messages(
         ),
     };
     let sql = format!(
-        "SELECT {MESSAGE_COLUMNS} FROM message m WHERE {filter} AND json_valid(m.data) \
-         ORDER BY m.time_created DESC LIMIT {limit}",
+        "SELECT {columns} FROM (SELECT {MESSAGE_FIELDS} FROM message m WHERE {filter} \
+         AND json_valid(m.data) AND length(m.id) <= {MAX_ID_CHARS} \
+         AND length(m.session_id) <= {MAX_ID_CHARS} ORDER BY m.time_created DESC LIMIT {limit}) \
+         ORDER BY time_created DESC",
+        columns = message_columns(),
         limit = MAX_MESSAGES + 1,
     );
     let mut statement = connection.prepare(&sql)?;
@@ -170,7 +254,7 @@ fn read_messages(
         MessageScope::UpdatedSince { .. } => statement.query(rusqlite::params![first, second])?,
     };
     while let Some(row) = rows.next()? {
-        if read.messages.len() >= MAX_MESSAGES {
+        if read.messages.len() >= MAX_MESSAGES || read.bytes_read >= max_bytes {
             break;
         }
         let values: Vec<Value> = (0..18)
@@ -184,14 +268,19 @@ fn read_messages(
     Ok(())
 }
 
-fn read_all_sessions(connection: &Connection, read: &mut Read) -> rusqlite::Result<()> {
+fn read_all_sessions(
+    connection: &Connection,
+    read: &mut Read,
+    max_bytes: usize,
+) -> rusqlite::Result<()> {
     let mut statement = connection.prepare(&format!(
-        "SELECT id, parent_id, version FROM session LIMIT {}",
+        "{} LIMIT {}",
+        session_query("1"),
         MAX_SESSIONS + 1
     ))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
-        if read.sessions.len() >= MAX_SESSIONS {
+        if read.sessions.len() >= MAX_SESSIONS || read.bytes_read >= max_bytes {
             break;
         }
         if let Some(session) = decode_session(&row.get::<_, Value>(0)?, &row.get(1)?, &row.get(2)?)
@@ -211,9 +300,8 @@ fn read_sessions(
     let mut found = Vec::new();
     for chunk in ids.chunks(SESSION_FETCH_CHUNK) {
         let placeholders = vec!["?"; chunk.len()].join(",");
-        let mut statement = connection.prepare(&format!(
-            "SELECT id, parent_id, version FROM session WHERE id IN ({placeholders})"
-        ))?;
+        let mut statement =
+            connection.prepare(&session_query(&format!("id IN ({placeholders})")))?;
         let mut rows = statement.query(rusqlite::params_from_iter(chunk.iter()))?;
         while let Some(row) = rows.next()? {
             if let Some(session) =
@@ -316,7 +404,7 @@ fn decode_message(values: &[Value]) -> Option<MessageRow> {
                 provider: identifier(&values[7]),
                 variant: identifier(&values[8]),
                 finish: text(&values[9]),
-                failed: text(&values[10]).is_some(),
+                failed: matches!(values[10], Value::Integer(1)),
                 created_ms: created_ms.unwrap_or(row_created_ms),
                 completed_ms: completed.ok().flatten(),
                 output_tokens: output.saturating_add(reasoning),

@@ -1089,6 +1089,8 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
         Ok(c) => c,
         Err(_) => return,
     };
+    // Wall-clock time of the last board fetch: the board follows its own cadence, not uploads.
+    let mut last_board: Option<DateTime<Utc>> = None;
     loop {
         let batch = {
             let mut s = shared.lock().unwrap();
@@ -1141,25 +1143,37 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
                 }
             }
         }
-        let board_request = {
+        if schedule::board_due(Utc::now(), last_board) {
+            let board_request = {
+                let s = shared.lock().unwrap();
+                authorized_effect(s.valid(generation), || fetch_board(&client))
+            };
+            let Some(board_request) = board_request else {
+                return;
+            };
+            let board = board_request.await;
+            {
+                let mut s = shared.lock().unwrap();
+                if !s.valid(generation) {
+                    return;
+                }
+                s.board = board.ok();
+                if s.board.is_none() {
+                    s.status = "Community unavailable. Local monitoring continues.".into()
+                }
+            }
+            last_board = Some(Utc::now());
+        }
+        // Samples whose five-minute period has not ended wait in the queue; the loop wakes when the
+        // next one becomes eligible, or for the board, whichever is first.
+        let next_upload = {
             let s = shared.lock().unwrap();
-            authorized_effect(s.valid(generation), || fetch_board(&client))
-        };
-        let Some(board_request) = board_request else {
-            return;
-        };
-        let board = board_request.await;
-        {
-            let mut s = shared.lock().unwrap();
             if !s.valid(generation) {
                 return;
             }
-            s.board = board.ok();
-            if s.board.is_none() {
-                s.status = "Community unavailable. Local monitoring continues.".into()
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(30)).await;
+            s.queue.next_eligible_after(Utc::now())
+        };
+        tokio::time::sleep(schedule::sharing_delay(Utc::now(), last_board, next_upload)).await;
     }
 }
 async fn fetch_board(client: &reqwest::Client) -> Result<serde_json::Value, ()> {

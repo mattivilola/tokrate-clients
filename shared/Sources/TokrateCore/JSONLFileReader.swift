@@ -92,7 +92,7 @@ public struct JSONLFileReader: Sendable {
             if isCaughtUp { return [] }
         }
         if tailStartup == .alignment {
-            let handle = try FileHandle(forReadingFrom: url)
+            let handle = try RegularFile.open(url)
             defer { try? handle.close() }
             try handle.seek(toOffset: offset - 1)
             let previous = try handle.readDraining(upToCount: 1)
@@ -104,7 +104,7 @@ public struct JSONLFileReader: Sendable {
         guard readBudget > 0 else { return [] }
 
         let count = Int(min(UInt64(readBudget), currentSize - offset))
-        let handle = try FileHandle(forReadingFrom: url)
+        let handle = try RegularFile.open(url)
         defer { try? handle.close() }
         try handle.seek(toOffset: offset)
         let bytes = try handle.readDraining(upToCount: count)
@@ -135,7 +135,7 @@ public struct JSONLFileReader: Sendable {
 
     /// Reads only a bounded first line before seeking; no turn state is seeded from history.
     private mutating func prepareRecentTail(currentSize: UInt64, maxBytes: Int) throws {
-        let handle = try FileHandle(forReadingFrom: url)
+        let handle = try RegularFile.open(url)
         defer { try? handle.close() }
         try handle.seek(toOffset: offset)
         let bytes = try handle.readDraining(upToCount: Int(min(UInt64(maxBytes), currentSize - offset)))
@@ -182,7 +182,7 @@ public struct JSONLFileReader: Sendable {
     /// the parser knows the session the appended records belong to. The cursor stays where the
     /// checkpoint put it. Returns the bytes read.
     private mutating func restoreHeader(currentSize: UInt64) throws -> Int {
-        let handle = try FileHandle(forReadingFrom: url)
+        let handle = try RegularFile.open(url)
         defer { try? handle.close() }
         let limit = min(offset, UInt64(Self.maximumLineBytes) + 1)
         var header = Data()

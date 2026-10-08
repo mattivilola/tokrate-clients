@@ -1,0 +1,32 @@
+{
+  "samples": [
+    {
+      "appVersion": "0.1.19",
+      "cacheReadInputTokens": 36000,
+      "cacheWriteInputTokens": null,
+      "client": "codex",
+      "clientVersion": "1.2.3",
+      "delegatedOutputTokens": 0,
+      "durationMs": 20000.0,
+      "inputTokens": 48000,
+      "metricVersion": "turn-v1",
+      "model": "example-model",
+      "observedAt": "2026-01-01T12:00:00Z",
+      "outputTokens": 1234,
+      "parserVersion": "codex-rollout-v2",
+      "provider": "openai",
+      "providerRegion": null,
+      "reasoningEffort": "medium",
+      "reasoningOutputTokens": 400,
+      "responseCount": 3,
+      "responseDurationMs": 12500.0,
+      "responseOutputTokens": 1000,
+      "sampleId": "00000000-0000-4000-8000-000000000000",
+      "sourceKind": "primary",
+      "surface": "cli",
+      "ttftMs": 840.0
+    }
+  ],
+  "schemaVersion": 1,
+  "sentAt": "2026-01-01T12:05:00Z"
+}
