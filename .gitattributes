@@ -1,0 +1,2 @@
+# Golden files compared byte for byte with generated output keep LF on every platform.
+desktop/ui/store/sent-example.json text eol=lf
