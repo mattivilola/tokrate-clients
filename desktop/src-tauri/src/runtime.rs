@@ -17,7 +17,7 @@ use tauri::Manager;
 use tokrate_core::{
     signed_request, tray_reading, AntigravityMonitor, AutoSelector, History, LiveResponses,
     ModelKey, OpenCodeMonitor, ProviderBadge, ResponseMetric, SelectionMode, SharingQueue,
-    SourceChange, SourceCheckpoints, SourceMonitor, TrayReadingKind, TurnMetric,
+    SourceChange, SourceCheckpoints, SourceMonitor, TrayReadingKind, TurnMetric, APP_VERSION,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
@@ -315,7 +315,10 @@ impl Runtime {
         ] {
             std::fs::create_dir_all(root)?;
         }
-        std::fs::write(dir.join("settings.json"), serde_json::to_vec(&settings)?)?;
+        tokrate_core::write_private_file(
+            dir.join("settings.json"),
+            &serde_json::to_vec(&settings)?,
+        )?;
         let mut result = Self::load(dir)?;
         result.smoke = true;
         Ok(result)
@@ -337,7 +340,7 @@ impl Runtime {
         {
             return Err("Smoke state invalid".into());
         }
-        std::fs::write(
+        tokrate_core::write_private_file(
             self.dir.join("smoke-result.json"),
             b"{\"nativeWebview\":true,\"parsedFixture\":true,\"sharingOff\":true,\"updatesOff\":true}",
         )
@@ -410,7 +413,7 @@ impl Runtime {
     }
     fn save_settings(&self, settings: &Settings) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(settings).map_err(|_| "Settings invalid")?;
-        std::fs::write(self.dir.join("settings.json"), bytes)
+        tokrate_core::write_private_file(self.dir.join("settings.json"), &bytes)
             .map_err(|_| "Could not save settings".into())
     }
     pub fn update(&mut self, p: SettingsPatch) -> Result<(), String> {
@@ -665,7 +668,10 @@ impl Runtime {
                 .map(|record| record.client.as_str())
                 .collect();
             let evidence = serde_json::json!({"records": self.history.records().len(), "sources": sources, "sharing": self.settings.sharing, "monitorStatus": self.monitor_status});
-            let _ = std::fs::write(self.dir.join("smoke-state.json"), evidence.to_string());
+            let _ = tokrate_core::write_private_file(
+                self.dir.join("smoke-state.json"),
+                evidence.to_string().as_bytes(),
+            );
         }
         Polled {
             tray: self.tray_state(now),
@@ -1053,6 +1059,15 @@ pub fn restart_sharing(app: &tauri::AppHandle) {
         sharing_loop(inner, generation).await
     }));
 }
+/// The HTTP client of every community request. It identifies itself as `Tokrate/<version>` and
+/// nothing else (no library name or version), like the Mac client.
+fn sharing_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(format!("Tokrate/{APP_VERSION}"))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(20))
+}
 async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
     let identity_loader = {
         let s = shared.lock().unwrap();
@@ -1080,12 +1095,7 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
         s.sharing_active = true;
         s.status = "Sharing new turns".into();
     }
-    let client = match reqwest::Client::builder()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
-        .build()
-    {
+    let client = match sharing_client_builder().build() {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -1208,6 +1218,98 @@ mod tests {
         let p = std::env::temp_dir().join(format!("tokrate-host-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+    /// What the sharing client puts on the wire: a local plain-HTTP server records the header
+    /// lines of one GET and one POST (the https-only rule is lifted for the test only).
+    #[tokio::test]
+    async fn sharing_requests_identify_only_as_tokrate_with_the_app_version() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    received.extend_from_slice(&buffer[..count]);
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+                requests.push(String::from_utf8(received).unwrap());
+            }
+            requests
+        });
+        let client = sharing_client_builder().https_only(false).build().unwrap();
+        let base = format!("http://{address}");
+        client.get(format!("{base}/board")).send().await.unwrap();
+        client
+            .post(format!("{base}/samples"))
+            .header("Content-Type", "application/json")
+            .header("X-Tokrate-Key", "key")
+            .header("X-Tokrate-Signature", "signature")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        let requests = server.join().unwrap();
+        for (request, expected) in [
+            (&requests[0], vec!["accept", "host", "user-agent"]),
+            (
+                &requests[1],
+                vec![
+                    "accept",
+                    "content-length",
+                    "content-type",
+                    "host",
+                    "user-agent",
+                    "x-tokrate-key",
+                    "x-tokrate-signature",
+                ],
+            ),
+        ] {
+            let mut names = Vec::new();
+            let mut user_agents = Vec::new();
+            for line in request.lines().skip(1).take_while(|line| !line.is_empty()) {
+                let (name, value) = line.split_once(':').unwrap();
+                names.push(name.to_ascii_lowercase());
+                if name.eq_ignore_ascii_case("user-agent") {
+                    user_agents.push(value.trim().to_owned());
+                }
+            }
+            names.sort();
+            assert_eq!(names, expected, "{request}");
+            assert_eq!(user_agents, [format!("Tokrate/{APP_VERSION}")]);
+        }
+        assert!(!requests.concat().contains("reqwest"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn saved_settings_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temporary();
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        let path = dir.join("settings.json");
+        runtime
+            .update(serde_json::from_value(serde_json::json!({"showSpeed": false})).unwrap())
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Settings an older version left with wider permissions are tightened by the next save.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        runtime
+            .update(serde_json::from_value(serde_json::json!({"showSpeed": true})).unwrap())
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn sources_report_folder_state_and_reset_restores_the_default() {
@@ -1552,7 +1654,10 @@ mod tests {
             .find(|record| record.source_kind.as_deref() == Some("primary"))
             .unwrap();
         assert_eq!(turn.delegated_output_tokens, Some(120));
-        let shared = runtime.queue.batch(Utc::now());
+        // Queued just now, the samples leave at the next five-minute boundary plus a delay.
+        let shared = runtime
+            .queue
+            .batch(Utc::now() + chrono::Duration::minutes(7));
         let mut kinds: Vec<(&str, Option<i64>)> = shared
             .iter()
             .map(|sample| (sample.source_kind.as_str(), sample.delegated_output_tokens))

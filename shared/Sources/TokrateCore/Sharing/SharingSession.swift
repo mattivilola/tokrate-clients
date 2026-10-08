@@ -3,14 +3,17 @@ import Observation
 
 /// Owns the active sharing lifetime. Every await is followed by a generation check.
 ///
-/// A sample leaves only after its five-minute bucket (`SharedSample.observedAt`) has closed, plus a
-/// random delay that is drawn once per bucket, so the upload time says nothing more about when the
-/// turn finished than the bucket does. Samples wait in the memory queue until then.
+/// Uploads leave in slots: the 5-minute UTC boundaries (epoch seconds divisible by 300), each plus a
+/// random delay drawn once per slot. A sample is assigned the first slot at or after both the moment
+/// it was queued and the end of its own observation bucket (`SharedSample.observedAt`), and waits in
+/// the memory queue until that slot's time. So the upload time says nothing more about when a turn
+/// finished than its bucket does, also for a turn queued long after its bucket closed (a primary turn
+/// waits for its delegated total) and for samples of different buckets queued in the same period.
 @MainActor @Observable
 public final class SharingSession {
-    /// The length of an observation bucket (contract "Privacy").
+    /// The length of an observation bucket and of an upload slot (contract "Privacy").
     static let bucketSeconds: TimeInterval = 300
-    /// The longest random delay after a bucket closes.
+    /// The longest random delay after a slot's boundary.
     nonisolated static let maximumJitterSeconds: TimeInterval = 60
     /// The community board is fetched, and an upload attempted, at most this often.
     static let refreshInterval: TimeInterval = 30
@@ -33,8 +36,8 @@ public final class SharingSession {
     @ObservationIgnored private var lastBoardRefresh: Date?
     @ObservationIgnored private var lastUploadAttempt: Date?
     @ObservationIgnored private var isRefreshing = false
-    /// The random delay of each bucket, by the bucket's start; kept for as long as the queue keeps samples.
-    @ObservationIgnored private var bucketJitter: [Date: TimeInterval] = [:]
+    /// The random delay of each upload slot, by the slot's boundary; kept for a day with the queue's own limit.
+    @ObservationIgnored private var slotJitter: [Date: TimeInterval] = [:]
     @ObservationIgnored private let jitterSource: @Sendable () -> TimeInterval
     private struct Pending { let localID: String; let sample: SharedSample; let completedAt: Date; let uploadableAt: Date }
 
@@ -74,7 +77,7 @@ public final class SharingSession {
         loopTask?.cancel(); loopTask = nil
         queue.removeAll(); seen.removeAll(); pendingCount = 0
         board = nil; privateKey = nil; consentStartedAt = nil; lastBoardRefresh = nil; lastUploadAttempt = nil
-        bucketJitter.removeAll()
+        slotJitter.removeAll()
         isRefreshing = false
         status = "Local only"
     }
@@ -85,7 +88,7 @@ public final class SharingSession {
         for metric in metrics where metric.completedAt >= consentStartedAt && metric.completedAt <= now && !seen.contains(metric.id) {
             guard let sample = SharedSample(metric) else { continue }
             seen.insert(metric.id)
-            queue.append(Pending(localID: metric.id, sample: sample, completedAt: metric.completedAt, uploadableAt: uploadableAt(of: sample)))
+            queue.append(Pending(localID: metric.id, sample: sample, completedAt: metric.completedAt, uploadableAt: uploadableAt(of: sample, queuedAt: now)))
         }
         if queue.count > 1000 { queue = Array(queue.suffix(1000)) }
         // The monitor/history also deduplicates. Bound this session's defense against repeated records.
@@ -94,7 +97,7 @@ public final class SharingSession {
     }
 
     /// Fetches the community board (at most every `refreshInterval`) and uploads the samples whose
-    /// bucket has closed (one batch, at most every `refreshInterval`). The board does not depend on
+    /// slot time has come (one batch, at most every `refreshInterval`). The board does not depend on
     /// whether anything was uploaded.
     public func refresh(now: Date = .now) async {
         guard isEnabled, !isRefreshing, let privateKey else { return }
@@ -169,23 +172,27 @@ public final class SharingSession {
         return max(1, due.timeIntervalSince(now))
     }
 
-    /// The samples that may leave now: their bucket has closed and the bucket's delay has passed, and
-    /// no attempt was made within the last `refreshInterval`.
+    /// The samples that may leave now: their slot's time has come, and no attempt was made within the
+    /// last `refreshInterval` (a retry after a failed attempt reveals nothing the slot did not).
     private func uploadBatch(now: Date) -> [Pending] {
         if let lastUploadAttempt, now >= lastUploadAttempt, now.timeIntervalSince(lastUploadAttempt) < Self.refreshInterval { return [] }
         return Array(queue.lazy.filter { $0.uploadableAt <= now }.prefix(Self.maximumBatch))
     }
 
-    /// The end of the sample's bucket plus the bucket's random delay, drawn the first time the bucket is seen.
-    private func uploadableAt(of sample: SharedSample) -> Date {
+    /// When the sample may leave: its slot's boundary plus the slot's random delay. The slot is the first
+    /// 5-minute UTC boundary at or after both the moment of queueing and the end of the sample's bucket;
+    /// its delay is drawn the first time the slot is needed.
+    private func uploadableAt(of sample: SharedSample, queuedAt: Date) -> Date {
+        let earliest = max(queuedAt.timeIntervalSince1970, sample.observedAt.timeIntervalSince1970 + Self.bucketSeconds)
+        let slot = Date(timeIntervalSince1970: (earliest / Self.bucketSeconds).rounded(.up) * Self.bucketSeconds)
         let jitter: TimeInterval
-        if let known = bucketJitter[sample.observedAt] {
+        if let known = slotJitter[slot] {
             jitter = known
         } else {
             jitter = min(max(0, jitterSource()), Self.maximumJitterSeconds)
-            bucketJitter[sample.observedAt] = jitter
+            slotJitter[slot] = jitter
         }
-        return sample.observedAt.addingTimeInterval(Self.bucketSeconds + jitter)
+        return slot.addingTimeInterval(jitter)
     }
 
     private func stopForRequiredUpdate() {
@@ -195,14 +202,14 @@ public final class SharingSession {
         loopTask?.cancel(); loopTask = nil
         queue.removeAll(); seen.removeAll(); pendingCount = 0
         board = nil; privateKey = nil; consentStartedAt = nil; lastBoardRefresh = nil; lastUploadAttempt = nil
-        bucketJitter.removeAll()
+        slotJitter.removeAll()
         isRefreshing = false
         status = "This Tokrate version cannot share. Check for Updates."
     }
 
     private func prune(now: Date) {
         queue.removeAll { now.timeIntervalSince($0.sample.observedAt) > 86_400 }
-        bucketJitter = bucketJitter.filter { now.timeIntervalSince($0.key) <= 86_400 }
+        slotJitter = slotJitter.filter { now.timeIntervalSince($0.key) <= 86_400 }
         pendingCount = queue.count
     }
 }

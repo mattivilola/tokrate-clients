@@ -29,6 +29,10 @@ struct AntigravityInstant: Comparable, Hashable, Sendable {
     static func < (left: Self, right: Self) -> Bool { left.nanoseconds < right.nanoseconds }
 }
 
+/// Longest execution id, variant or model decoded from a blob, in UTF-8 bytes. A longer one makes the
+/// blob unreadable instead of being kept in memory.
+let maximumAntigravityDecodedStringBytes = 512
+
 /// One row of `steps`: what the step's metadata says about timing, execution and model usage.
 struct AntigravityStep: Sendable {
     /// Token counts above this are not real usage (the same bound the server applies to a turn).
@@ -74,8 +78,9 @@ struct AntigravityStep: Sendable {
         createdAt = instant(1)
         completedAt = instant(7)
 
+        if let text = message.string(12), text.utf8.count > maximumAntigravityDecodedStringBytes { return nil }
         if message.contains(12) {
-            let identifier = message.string(12).flatMap { $0.isEmpty || $0.utf8.count > 128 ? nil : $0 }
+            let identifier = message.string(12).flatMap { $0.isEmpty ? nil : $0 }
             if identifier == nil { unreadable = true }
             executionID = identifier
         } else {
@@ -130,10 +135,13 @@ struct AntigravityExecutor: Sendable {
     init?(row: AntigravityDatabase.BlobRow) {
         guard let message = ProtobufMessage(row.data),
               let state = message.proto3Varint(1),
-              let identifier = message.string(9), !identifier.isEmpty, identifier.utf8.count <= 128 else { return nil }
+              let identifier = message.string(9), !identifier.isEmpty,
+              identifier.utf8.count <= maximumAntigravityDecodedStringBytes else { return nil }
+        let variant = message.message(at: [10, 1])?.string(28)
+        if let variant, variant.utf8.count > maximumAntigravityDecodedStringBytes { return nil }
         executionID = identifier
         self.state = state
-        variantID = message.message(at: [10, 1])?.string(28).flatMap { AntigravityModelID.isSafe($0) ? $0 : nil }
+        variantID = variant.flatMap { AntigravityModelID.isSafe($0) ? $0 : nil }
     }
 }
 
@@ -149,7 +157,8 @@ struct AntigravityGeneration: Sendable, Equatable {
     /// `nil` when the blob is unreadable or names no model.
     init?(data: Data) {
         guard let message = ProtobufMessage(data)?.message(1),
-              let model = message.string(19), AntigravityModelID.isSafe(model) else { return nil }
+              let model = message.string(19), model.utf8.count <= maximumAntigravityDecodedStringBytes,
+              AntigravityModelID.isSafe(model) else { return nil }
         self.model = model
         var flag: Bool?
         for pair in message.repeatedMessages(20) ?? [] where pair.string(1) == Self.nonGeminiKey {

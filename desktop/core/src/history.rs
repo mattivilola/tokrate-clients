@@ -1,12 +1,12 @@
 use crate::model::TurnMetric;
+use crate::private_file::write_private_file;
 use crate::sources::SourceCheckpoints;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind};
 use std::path::Path;
-use tempfile::NamedTempFile;
 
 const SCHEMA_VERSION: u8 = 1;
 const RETENTION_DAYS: i64 = 7;
@@ -87,12 +87,6 @@ impl History {
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        let path = path.as_ref();
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
         let data = serde_json::to_vec(&PersistedHistory {
             schema_version: SCHEMA_VERSION,
             records: self.records.clone(),
@@ -105,11 +99,7 @@ impl History {
                 "local history exceeds the size limit",
             ));
         }
-        let mut temporary = NamedTempFile::new_in(parent)?;
-        temporary.write_all(&data)?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(path).map_err(|error| error.error)?;
-        Ok(())
+        write_private_file(path, &data)
     }
 
     pub fn records(&self) -> &[TurnMetric] {

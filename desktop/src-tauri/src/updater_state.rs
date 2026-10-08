@@ -179,7 +179,8 @@ impl UpdateState {
     fn save(&self, saved: &SavedPreferences) -> Result<(), String> {
         let bytes =
             serde_json::to_vec_pretty(saved).map_err(|_| "Update preferences are invalid")?;
-        fs::write(&self.path, bytes).map_err(|_| "Could not save update preferences".into())
+        tokrate_core::write_private_file(&self.path, &bytes)
+            .map_err(|_| "Could not save update preferences".into())
     }
 }
 
@@ -296,6 +297,28 @@ mod tests {
             let mut state = UpdateState::load_with_mode(dir.clone(), false, mode).unwrap();
             assert!(state.begin_check(false, 1_000_000).is_err());
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_preferences_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temporary();
+        let path = dir.join("update-preferences.json");
+        fs::write(
+            &path,
+            br#"{"automaticChecks":true,"lastCheckUnixSeconds":null}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut state =
+            UpdateState::load_with_mode(dir.clone(), false, UpdateMode::Native).unwrap();
+        state.set_automatic_checks(false).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

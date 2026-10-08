@@ -9,6 +9,9 @@ private final class StubNetwork: URLProtocol, @unchecked Sendable {
         var headers: [String: String] = [:]
         /// Delivered one by one; a chunk is not delivered once the client has stopped the load.
         var chunks: [Data] = []
+        /// After this many chunks the stub holds back the rest until the client stops the load (or
+        /// five seconds pass), so what the client does after crossing its limit cannot race the stub.
+        var holdBackAfter: Int?
         var redirectTo: URL?
     }
 
@@ -56,7 +59,11 @@ private final class StubNetwork: URLProtocol, @unchecked Sendable {
         let response = HTTPURLResponse(url: request.url!, statusCode: script.statusCode, httpVersion: nil, headerFields: script.headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         DispatchQueue.global().async { [self] in
-            for chunk in script.chunks {
+            for (index, chunk) in script.chunks.enumerated() {
+                if index == script.holdBackAfter {
+                    let deadline = Date.now.addingTimeInterval(5)
+                    while !state.withLock({ isStopped }), Date.now < deadline { Thread.sleep(forTimeInterval: 0.005) }
+                }
                 if state.withLock({ isStopped }) { return }
                 Self.lock.withLock { Self.delivered[name, default: 0] += 1 }
                 client?.urlProtocol(self, didLoad: chunk)
@@ -107,18 +114,22 @@ final class SharingTransportTests: XCTestCase {
     }
 
     func testAnOversizedBodyAbortsTheTransferWhileItStreams() async throws {
-        // 8 chunks of 256 KiB: the limit is crossed in the fifth.
+        // 8 chunks of 256 KiB: the limit is crossed in the fifth. The stub offers those five, then
+        // holds the other three back until the client cancels the transfer.
         let chunk = Data(repeating: 0x61, count: 262_144)
-        let url = StubNetwork.prepare(.init(chunks: Array(repeating: chunk, count: 8)), for: "oversized")
+        let url = StubNetwork.prepare(.init(chunks: Array(repeating: chunk, count: 8), holdBackAfter: 5), for: "oversized")
         do {
             _ = try await transport().send(URLRequest(url: url))
             XCTFail("an oversized response must be refused")
         } catch {
             XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum)
         }
-        try await Task.sleep(for: .milliseconds(200))
+        // The transport stopped reading at the limit and cancelled: the stub sees the cancellation
+        // well within its five seconds and never gets to offer the held-back chunks.
+        let deadline = Date.now.addingTimeInterval(4)
+        while !StubNetwork.wasStopped("oversized"), Date.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertTrue(StubNetwork.wasStopped("oversized"), "the transfer is cancelled, not drained")
-        XCTAssertLessThan(StubNetwork.deliveredChunks("oversized"), 8, "the remaining chunks are never downloaded")
+        XCTAssertEqual(StubNetwork.deliveredChunks("oversized"), 5, "the remaining chunks are never downloaded")
     }
 
     func testADeclaredOversizedBodyIsRefusedBeforeAnyByteIsRead() async throws {

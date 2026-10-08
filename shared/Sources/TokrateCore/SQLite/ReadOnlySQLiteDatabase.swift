@@ -33,6 +33,23 @@ struct SQLiteRow {
         )
     }
 
+    /// A real column; `nil` when it is another type.
+    func double(_ column: Int32) -> Double? {
+        sqlite3_column_type(statement, column) == SQLITE_FLOAT ? sqlite3_column_double(statement, column) : nil
+    }
+
+    /// The bytes the first `columns` columns of this row hold in memory, roughly: text and blob length,
+    /// 8 for a number, 0 for NULL. What a read budget counts.
+    func approximateBytes(columns: Int32) -> Int {
+        (0..<columns).reduce(0) { total, column in
+            switch sqlite3_column_type(statement, column) {
+            case SQLITE_TEXT, SQLITE_BLOB: total + Int(sqlite3_column_bytes(statement, column))
+            case SQLITE_INTEGER, SQLITE_FLOAT: total + 8
+            default: total
+            }
+        }
+    }
+
     /// A blob column; `nil` when it is another type or larger than the database allows.
     func blob(_ column: Int32) -> Data? {
         guard sqlite3_column_type(statement, column) == SQLITE_BLOB else { return nil }
@@ -54,6 +71,14 @@ final class ReadOnlySQLiteDatabase {
     enum DatabaseError: Error {
         case open(Int32)
         case statement(Int32)
+        /// The database, or its write-ahead log, exists but is not a regular file.
+        case notRegularFile
+    }
+
+    /// Whether a row-by-row read goes on.
+    enum RowFlow {
+        case next
+        case stop
     }
 
     /// A locked database is skipped for this poll, so waiting long would stall every other source.
@@ -64,6 +89,7 @@ final class ReadOnlySQLiteDatabase {
     private var handle: OpaquePointer?
 
     init(url: URL) throws {
+        try Self.requireRegularFiles(of: url)
         var handle: OpaquePointer?
         let status = sqlite3_open_v2(Self.readOnlyURI(for: url), &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
         guard status == SQLITE_OK, let handle else {
@@ -75,6 +101,17 @@ final class ReadOnlySQLiteDatabase {
     }
 
     deinit { close() }
+
+    /// SQLite opens the database and its `-wal` itself and blocking, so a FIFO, socket or device with
+    /// either name would stall the poll that opens it (and every source behind it). Both must be
+    /// regular files (a symbolic link is followed, like every other source file) or, for the log,
+    /// absent. `stat` never opens the file.
+    private static func requireRegularFiles(of url: URL) throws {
+        var database = stat()
+        guard stat(url.path, &database) == 0, database.st_mode & S_IFMT == S_IFREG else { throw DatabaseError.notRegularFile }
+        var log = stat()
+        if stat(url.path + "-wal", &log) == 0, log.st_mode & S_IFMT != S_IFREG { throw DatabaseError.notRegularFile }
+    }
 
     func close() {
         guard let handle else { return }
@@ -102,16 +139,26 @@ final class ReadOnlySQLiteDatabase {
     /// Runs one statement and maps each row; a row `map` rejects (returns `nil`) is skipped, as any
     /// other malformed record.
     func query<Row>(_ sql: String, bindings: [SQLiteValue] = [], map: (SQLiteRow) -> Row?) throws -> [Row] {
+        var result: [Row] = []
+        try forEachRow(sql, bindings: bindings) { row in
+            if let mapped = map(row) { result.append(mapped) }
+            return .next
+        }
+        return result
+    }
+
+    /// Runs one statement and hands each row to `body` until it returns `.stop`, so a read that has
+    /// reached its budget leaves the rest of the result unread.
+    func forEachRow(_ sql: String, bindings: [SQLiteValue] = [], _ body: (SQLiteRow) -> RowFlow) throws {
         var statement: OpaquePointer?
         try prepare(sql, &statement)
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
-        var result: [Row] = []
         while true {
             let status = sqlite3_step(statement)
-            if status == SQLITE_DONE { return result }
+            if status == SQLITE_DONE { return }
             guard status == SQLITE_ROW else { throw DatabaseError.statement(status) }
-            if let row = map(SQLiteRow(statement: statement)) { result.append(row) }
+            if body(SQLiteRow(statement: statement)) == .stop { return }
         }
     }
 

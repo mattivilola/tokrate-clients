@@ -14,6 +14,7 @@ mod opencode;
 mod opencode_db;
 mod opencode_turns;
 mod parser;
+mod private_file;
 mod protobuf;
 mod reader;
 mod selector;
@@ -44,6 +45,7 @@ pub use model::{
 };
 pub use monitor::{Monitor, SourceChange, SourceFileCheckpoint};
 pub use opencode::OpenCodeMonitor;
+pub use private_file::write_private_file;
 pub use selector::{
     fallback_model, tray_reading, AutoSelector, ModelKey, SelectionMode, TrayReading,
     TrayReadingKind, AUTO_LEAD_SECONDS, AUTO_WINDOW_MINUTES,

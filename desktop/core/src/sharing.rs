@@ -21,10 +21,11 @@ pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
 const QUEUE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
-/// Samples are timed to this period (`observedAt` is floored to it).
+/// Samples are timed to this period (`observedAt` is floored to it), and uploads leave at the
+/// boundaries between periods.
 const OBSERVED_PERIOD_SECONDS: i64 = 300;
-/// A period's samples leave this much longer after it ended, at most, so the moment a request is
-/// sent says no more than the period does.
+/// The samples of an upload slot leave this much longer after its boundary, at most, so the moment
+/// a request is sent says no more than the slot does.
 const MAX_UPLOAD_JITTER_MS: i64 = 60_000;
 const MAX_SEEN_LOCAL_IDS: usize = 50_000;
 /// The upper bound the service accepts for delegated subagent output of one turn.
@@ -312,18 +313,21 @@ pub fn example_request_json() -> String {
     serde_json::to_string_pretty(&envelope).expect("a JSON value prints")
 }
 
-/// Draws the delay after the end of a five-minute period at which that period's samples leave.
+/// Draws the delay after an upload slot's boundary at which that slot's samples leave.
 type JitterSource = Box<dyn FnMut() -> Duration + Send>;
 
 /// Memory-only queue for post-consent turns. No key material or account identity is stored here.
-/// A sample waits until its five-minute period (`observedAt`) has ended and a random delay of up
-/// to a minute, the same for every sample of the period, has passed: an upload then reveals the
-/// period and nothing finer.
+/// Uploads leave in slots: the five-minute UTC boundaries (seconds since the epoch divisible by
+/// 300), each with one random delay of up to a minute that all of its samples share. A sample is
+/// given the first boundary at or after both its queueing time and the end of its own
+/// five-minute period (`observedAt`) and leaves at that boundary plus the slot's delay. Even a
+/// turn queued long after it ended (one waiting for its subagent work to settle) so leaves at a
+/// time that says nothing about when it ended.
 pub struct SharingQueue {
     enabled_since: Option<DateTime<Utc>>,
     pending: VecDeque<PendingSample>,
     seen_local_ids: HashSet<String>,
-    /// The delay drawn for each period that has queued samples, by the period's start.
+    /// The delay drawn for each slot that has queued samples, by the slot's boundary.
     jitters: HashMap<i64, Duration>,
     jitter_source: JitterSource,
 }
@@ -337,8 +341,8 @@ impl Default for SharingQueue {
 struct PendingSample {
     local_id: String,
     sample: SharedSample,
-    /// Start of the sample's five-minute period, in seconds since the epoch.
-    period: i64,
+    /// The upload slot (boundary, in seconds since the epoch) the sample was given when queued.
+    slot: i64,
 }
 
 impl SharingQueue {
@@ -399,16 +403,16 @@ impl SharingQueue {
             let Some(sample) = SharedSample::from_metric(metric, Uuid::new_v4()) else {
                 continue;
             };
-            let Some(period) = observed_period(&sample) else {
+            let Some(slot) = upload_slot(&sample, now) else {
                 continue;
             };
             self.seen_local_ids.insert(metric.id.clone());
             let source = &mut self.jitter_source;
-            self.jitters.entry(period).or_insert_with(|| source());
+            self.jitters.entry(slot).or_insert_with(|| source());
             self.pending.push_back(PendingSample {
                 local_id: metric.id.clone(),
                 sample,
-                period,
+                slot,
             });
         }
         while self.pending.len() > MAX_PENDING_SAMPLES {
@@ -424,21 +428,20 @@ impl SharingQueue {
         }
     }
 
-    /// When a pending sample may leave: its period's end plus the delay drawn for the period.
+    /// When a pending sample may leave: its slot's boundary plus the delay drawn for the slot.
     fn eligible_at(&self, pending: &PendingSample) -> DateTime<Utc> {
         let jitter = self
             .jitters
-            .get(&pending.period)
+            .get(&pending.slot)
             .copied()
             .unwrap_or_else(Duration::zero);
-        DateTime::<Utc>::from_timestamp(pending.period + OBSERVED_PERIOD_SECONDS, 0)
-            .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        DateTime::<Utc>::from_timestamp(pending.slot, 0).unwrap_or(DateTime::<Utc>::MAX_UTC)
             + jitter
     }
 
-    /// Returns up to 50 pending samples whose period has ended and whose delay has passed, in
-    /// the order they were queued. The ones of one period become eligible together, so they
-    /// leave in one request (more than 50 take the next). Unacknowledged samples keep their UUID
+    /// Returns up to 50 pending samples whose slot has come and whose delay has passed, in the
+    /// order they were queued. The ones of one slot become eligible together, so they leave in
+    /// one request (more than 50 take the next). Unacknowledged samples keep their UUID
     /// for retries.
     pub fn batch(&mut self, now: DateTime<Utc>) -> Vec<SharedSample> {
         self.prune(now);
@@ -485,8 +488,8 @@ impl SharingQueue {
     }
 
     fn forget_unused_jitters(&mut self) {
-        let periods: HashSet<i64> = self.pending.iter().map(|pending| pending.period).collect();
-        self.jitters.retain(|period, _| periods.contains(period));
+        let slots: HashSet<i64> = self.pending.iter().map(|pending| pending.slot).collect();
+        self.jitters.retain(|slot, _| slots.contains(slot));
     }
 }
 
@@ -508,11 +511,22 @@ fn safe_identifier(value: &str, maximum: usize, plus_allowed: bool) -> bool {
         })
 }
 
-/// Start of the five-minute period a sample is timed to, in seconds since the epoch.
-fn observed_period(sample: &SharedSample) -> Option<i64> {
-    DateTime::parse_from_rfc3339(&sample.observed_at)
-        .ok()
-        .map(|observed_at| observed_at.timestamp())
+/// The upload slot of a sample queued at `queued_at`: the first five-minute UTC boundary at or
+/// after both `queued_at` and the end of the sample's own period (`observedAt`).
+fn upload_slot(sample: &SharedSample, queued_at: DateTime<Utc>) -> Option<i64> {
+    let period_start = DateTime::parse_from_rfc3339(&sample.observed_at)
+        .ok()?
+        .timestamp();
+    let queued = queued_at.timestamp() + i64::from(queued_at.timestamp_subsec_nanos() > 0);
+    let earliest = queued.max(period_start + OBSERVED_PERIOD_SECONDS);
+    Some(
+        earliest.div_euclid(OBSERVED_PERIOD_SECONDS) * OBSERVED_PERIOD_SECONDS
+            + if earliest.rem_euclid(OBSERVED_PERIOD_SECONDS) == 0 {
+                0
+            } else {
+                OBSERVED_PERIOD_SECONDS
+            },
+    )
 }
 
 fn format_date(date: DateTime<Utc>) -> String {

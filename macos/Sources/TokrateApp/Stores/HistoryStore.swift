@@ -120,6 +120,9 @@ final class HistoryStore {
     @ObservationIgnored private var antigravityMonitor: AntigravityConversationMonitor?
     @ObservationIgnored private var openCodeMonitor: OpenCodeMonitor?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
+    /// Keeps the seven-day retention while monitoring is paused, when no poll runs.
+    @ObservationIgnored private var retentionTask: Task<Void, Never>?
+    @ObservationIgnored private let pausedRetentionInterval: TimeInterval
     /// One watcher per existing source folder; a change wakes the polling task early.
     @ObservationIgnored private var watchers: [SourceFolderKind: SessionFolderWatcher] = [:]
     @ObservationIgnored private var waker: PollWaker?
@@ -168,9 +171,11 @@ final class HistoryStore {
         openCodeDataFolder: URL? = nil,
         sharingPreferences: SharingPreferences? = nil,
         defaults: UserDefaults = .standard,
-        initialRecords: [TurnMetric]? = nil
+        initialRecords: [TurnMetric]? = nil,
+        pausedRetentionInterval: TimeInterval = 3_600
     ) {
         self.defaults = defaults
+        self.pausedRetentionInterval = pausedRetentionInterval
         self.sharingPreferences = sharingPreferences
             ?? SharingPreferences(session: SharingSession(identity: KeychainIdentity()))
         dashboardSelection = DashboardSelection.restored(from: defaults.string(forKey: Self.selectionDefaultsKey))
@@ -252,6 +257,8 @@ final class HistoryStore {
 
     func startMonitoring() {
         guard !isMonitoring else { return }
+        retentionTask?.cancel()
+        retentionTask = nil
         errorMessage = nil
         // Only responses that complete from now on count as live; replayed history is not "now".
         let launchedAt = Date.now
@@ -427,7 +434,11 @@ final class HistoryStore {
     }
 
     func stopMonitoring() {
-        if isMonitoring { saveHistory() }
+        // Expired records leave the file now, not at the next start.
+        if isMonitoring {
+            history.prune()
+            saveHistory()
+        }
         pollingTask?.cancel()
         pollingTask = nil
         for watcher in watchers.values { watcher.stop() }
@@ -441,6 +452,25 @@ final class HistoryStore {
         isMonitoring = false
         refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
+        startPausedRetention()
+    }
+
+    /// While paused nothing polls, so records would outlive their seven days on disk: an idle timer
+    /// prunes and saves, reading no source.
+    private func startPausedRetention() {
+        retentionTask?.cancel()
+        let interval = pausedRetentionInterval
+        retentionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(interval)) } catch { return }
+                self?.pruneExpiredWhilePaused()
+            }
+        }
+    }
+
+    private func pruneExpiredWhilePaused(now: Date = .now) {
+        guard !isMonitoring, history.prune(now: now) > 0 else { return }
+        saveHistory(now: now)
     }
 
     /// Adds completed responses to the live buffer and re-evaluates the active model and readout.
@@ -490,7 +520,7 @@ final class HistoryStore {
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(envelope)
-            try data.write(to: persistenceURL, options: .atomic)
+            try PrivateFile.write(data, to: persistenceURL)
             savedCheckpointPaths = checkpoints.pathDigests
             saveThrottle.didSave(at: now, succeeded: true)
         } catch {
