@@ -8981,7 +8981,12 @@ fn app_files_are_read_whole_only_when_regular_and_within_the_cap() {
     let missing = crate::read_private_file(temp.path().join("none"), 10).unwrap_err();
     assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
     let folder = crate::read_private_file(temp.path(), 10).unwrap_err();
+    // Unix opens the folder and refuses it as not regular; Windows already refuses to open a
+    // folder as a file. Either way it is never read.
+    #[cfg(unix)]
     assert_eq!(folder.kind(), std::io::ErrorKind::InvalidInput);
+    #[cfg(windows)]
+    assert_eq!(folder.kind(), std::io::ErrorKind::PermissionDenied);
     assert_eq!(crate::MAX_SMALL_FILE_BYTES, 1_048_576);
 }
 
