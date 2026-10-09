@@ -146,12 +146,21 @@ final class HistoryExportTests: XCTestCase {
         XCTAssertEqual(plain.grokBuild.path, "/Users/example/.grok/sessions")
         XCTAssertEqual(plain.antigravity.path, "/Users/example/.gemini")
         XCTAssertEqual(plain.openCode.path, "/Users/example/.local/share/opencode")
+        XCTAssertEqual(plain.kimiCode.path, "/Users/example/.kimi-code")
+        XCTAssertEqual(
+            plain.kimiDesktop.path,
+            "/Users/example/Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home"
+        )
         let overridden = SourceFolders.defaults(home: home, environment: [
-            "CLAUDE_CONFIG_DIR": "/cfg/claude", "GROK_HOME": "/cfg/grok", "XDG_DATA_HOME": "/cfg/data"
+            "CLAUDE_CONFIG_DIR": "/cfg/claude", "GROK_HOME": "/cfg/grok", "XDG_DATA_HOME": "/cfg/data", "KIMI_CODE_HOME": "/cfg/kimi"
         ])
         XCTAssertEqual(overridden.claudeCode.path, "/cfg/claude/projects")
         XCTAssertEqual(overridden.grokBuild.path, "/cfg/grok/sessions")
         XCTAssertEqual(overridden.openCode.path, "/cfg/data/opencode")
+        XCTAssertEqual(overridden.kimiCode.path, "/cfg/kimi")
+        XCTAssertEqual(overridden.kimiDesktop, plain.kimiDesktop, "the desktop app's home does not follow KIMI_CODE_HOME")
+        let empty = SourceFolders.defaults(home: home, environment: ["KIMI_CODE_HOME": ""])
+        XCTAssertEqual(empty.kimiCode.path, "/Users/example/.kimi-code")
     }
 
     func testReplayReadsOldFilesBeyondTheLiveWindowInFull() async throws {
@@ -167,7 +176,7 @@ final class HistoryExportTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: finished.addingTimeInterval(3_600)], ofItemAtPath: file.path)
 
         let nowhere = root.appendingPathComponent("absent", isDirectory: true)
-        let folders = SourceFolders(codex: codexFolder, claudeCode: nowhere, grokBuild: nowhere, antigravity: nowhere, openCode: nowhere)
+        let folders = SourceFolders(codex: codexFolder, claudeCode: nowhere, grokBuild: nowhere, antigravity: nowhere, openCode: nowhere, kimiCode: nowhere, kimiDesktop: nowhere)
         let replay = await HistoryReplay.run(folders: folders, retention: 60 * 86_400)
         XCTAssertEqual(replay.incompleteSources, [])
         let turn = try XCTUnwrap(replay.metrics.first)

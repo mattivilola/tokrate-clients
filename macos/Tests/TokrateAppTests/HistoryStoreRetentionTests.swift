@@ -32,6 +32,8 @@ final class HistoryStoreRetentionTests: XCTestCase {
             grokSessionsFolder: root.appendingPathComponent("grok", isDirectory: true),
             antigravityDataFolder: root.appendingPathComponent("gemini", isDirectory: true),
             openCodeDataFolder: root.appendingPathComponent("opencode", isDirectory: true),
+            kimiCodeFolder: root.appendingPathComponent("kimi-code", isDirectory: true),
+            kimiDesktopFolder: root.appendingPathComponent("kimi-desktop", isDirectory: true),
             sharingPreferences: SharingPreferences(
                 session: SharingSession(identity: StubIdentity(), transport: StubTransport()),
                 store: StubPreferenceStore()

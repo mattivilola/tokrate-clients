@@ -152,15 +152,43 @@ describe("coding tool table", () => {
       "grok-build": "Grok Build",
       antigravity: "Antigravity",
       opencode: "OpenCode",
+      "kimi-code": "Kimi Code",
     });
     expect(Object.keys(CODING_TOOLS)).toEqual(Object.keys(SOURCE_TITLES));
-    expect(["codex", "claude-code", "grok-build", "antigravity", "opencode"].map(toolChip)).toEqual(["CX", "CC", "GB", "AG", "OC"]);
+    expect(["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code"].map(toolChip)).toEqual([
+      "CX",
+      "CC",
+      "GB",
+      "AG",
+      "OC",
+      "KC",
+    ]);
     expect(toolLabel("claude-code")).toBe("Claude Code");
     expect(toolLabel("other")).toBe("Coding tool");
   });
   it("falls back to the first two letters of an unknown tool", () => {
     expect(toolChip("gemini-cli")).toBe("GE");
     expect(toolChip("x")).toBe("X");
+  });
+});
+
+describe("Kimi Code in the picker", () => {
+  const kimi = (id: string, minutesAgo: number) =>
+    turn(id, minutesAgo, {
+      client: "kimi-code",
+      model: "k2d8-preview",
+      provider: "moonshot",
+      parserVersion: "kimi-wire-v1",
+      metricVersion: "kimi-observed-turn-v1",
+      sourceKind: "primary",
+      codexTTFTSeconds: null,
+    });
+  it("pins Auto to the tool and names it for screen readers", () => {
+    const d = dashboard([kimi("k", 5), turn("x", 3)], { selection: "auto:kimi-code" });
+    expect(pickerTool(d)).toBe("kimi-code");
+    expect(pickerLabel(d)).toBe("Auto · k2d8-preview");
+    expect(pickerAccessibleLabel(d)).toBe("Auto in Kimi Code · k2d8-preview");
+    expect(toolModelHint(d, "kimi-code")).toBe("k2d8-preview · high");
   });
 });
 

@@ -49,12 +49,13 @@ pub enum SelectionMode {
 }
 
 const COHORT_PARTS: usize = 9;
-const TOOLS: [&str; 5] = [
+const TOOLS: [&str; 6] = [
     "codex",
     "claude-code",
     "grok-build",
     "antigravity",
     "opencode",
+    "kimi-code",
 ];
 
 impl SelectionMode {

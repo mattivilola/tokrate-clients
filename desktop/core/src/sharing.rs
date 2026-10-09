@@ -3,7 +3,8 @@ use crate::model::{
     TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
     CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
     CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
+    GROK_PARSER_VERSION, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, OPENCODE_CLIENT,
+    OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -16,7 +17,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.20";
+pub const APP_VERSION: &str = "0.1.21";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
 const MAX_REQUEST_BYTES: usize = 65_536;
@@ -109,8 +110,20 @@ impl SharedSample {
                 OPENCODE_METRIC_VERSION,
                 false,
             ),
+            (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION) => {
+                (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION, false)
+            }
             _ => return None,
         };
+        // Kimi Code attributes Moonshot's own API or nothing, and reports no cache writes.
+        if client == KIMI_CLIENT
+            && (!matches!(
+                metric.provider.as_deref(),
+                None | Some("moonshot" | "unknown")
+            ) || metric.cache_write_input_tokens.is_some())
+        {
+            return None;
+        }
         // OpenCode keeps the raw provider id (a gateway, a vendor plan, a local server) locally;
         // only the providers of the public allowlist, or none, may leave the device.
         if client == OPENCODE_CLIENT
@@ -220,14 +233,15 @@ fn shared_response_fields(metric: &TurnMetric) -> (Option<i64>, Option<f64>, Opt
 }
 
 /// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for
-/// Claude Code and Google only for Antigravity and OpenCode; any other value or pairing is shared
-/// as `unknown`.
+/// Claude Code, Google only for Antigravity and OpenCode, and Moonshot only for Kimi Code; any
+/// other value or pairing is shared as `unknown`.
 fn shared_provider(client: &str, provider: Option<&str>) -> &'static str {
     match (client, provider) {
         (_, Some("openai")) => "openai",
         (_, Some("anthropic")) => "anthropic",
         (_, Some("xai")) => "xai",
         (ANTIGRAVITY_CLIENT | OPENCODE_CLIENT, Some("google")) => "google",
+        (KIMI_CLIENT, Some("moonshot")) => "moonshot",
         (CLAUDE_CLIENT, Some("amazon-bedrock")) => "amazon-bedrock",
         (CLAUDE_CLIENT, Some("google-vertex")) => "google-vertex",
         _ => "unknown",

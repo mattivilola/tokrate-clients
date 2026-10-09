@@ -1116,6 +1116,8 @@ fn claude_monitors_measure_subagents_separately_and_primary_selection_excludes_t
         grok,
         temp.path().join("gemini"),
         temp.path().join("opencode"),
+        temp.path().join("kimi"),
+        temp.path().join("kimi-desktop"),
     );
     let mut found = Vec::new();
     for _ in 0..4 {
@@ -1162,7 +1164,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.20");
+    assert_eq!(sample.app_version, "0.1.21");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1850,6 +1852,8 @@ fn source_monitor_combines_all_adapters_under_one_poll_budget() {
         grok,
         temp.path().join("gemini"),
         temp.path().join("opencode"),
+        temp.path().join("kimi"),
+        temp.path().join("kimi-desktop"),
     );
     let mut found = Vec::new();
     for _ in 0..8 {
@@ -1954,7 +1958,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::minutes(12));
     let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.20");
+    assert_eq!(first[0].app_version, "0.1.21");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2073,6 +2077,28 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     grok.delegated_output_tokens = Some(0);
     // Grok Build reports no cache write.
     grok.set_prompt_cache(Some(90_000), Some(70_000), None);
+    let mut kimi = TurnMetric::new_observed(
+        "local-kimi-digest".into(),
+        completed,
+        Some("k2d8-preview".into()),
+        416,
+        18.044,
+        None,
+        None,
+        Some("primary".into()),
+        Some("moonshot".into()),
+        Some("high".into()),
+        crate::KIMI_CLIENT,
+        crate::KIMI_PARSER_VERSION,
+        crate::KIMI_METRIC_VERSION,
+    );
+    kimi.response_output_tokens = Some(285);
+    kimi.response_duration_seconds = Some(10.282);
+    kimi.response_count = Some(1);
+    kimi.delegated_output_tokens = Some(0);
+    kimi.surface = Some(crate::ToolSurface::Desktop);
+    // Kimi Code reports no cache write.
+    kimi.set_prompt_cache(Some(36_590), Some(30_976), None);
     let samples = [
         crate::SharedSample::from_metric(
             &claude,
@@ -2094,6 +2120,11 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
             Uuid::parse_str("00000000-0000-4000-8000-000000000004").unwrap(),
         )
         .unwrap(),
+        crate::SharedSample::from_metric(
+            &kimi,
+            Uuid::parse_str("00000000-0000-4000-8000-000000000005").unwrap(),
+        )
+        .unwrap(),
     ];
     let now = time("2026-10-03T10:05:00Z");
     let key = [7_u8; 32];
@@ -2107,7 +2138,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.20-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.21-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2115,7 +2146,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.20-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.21-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2124,7 +2155,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     );
     assert_eq!(request.public_key, packet["publicKey"]);
     assert_eq!(request.signature, packet["signature"]);
-    assert_eq!(actual["samples"].as_array().unwrap().len(), 4);
+    assert_eq!(actual["samples"].as_array().unwrap().len(), 5);
     assert_eq!(actual["samples"][0]["client"], "claude-code");
     assert_eq!(actual["samples"][0]["provider"], "anthropic");
     assert_eq!(actual["samples"][0]["ttftMs"], Value::Null);
@@ -2137,7 +2168,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.20");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.21");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2182,6 +2213,22 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][3]["inputTokens"], 18_000);
     assert_eq!(actual["samples"][3]["cacheReadInputTokens"], 0);
     assert_eq!(actual["samples"][3]["cacheWriteInputTokens"], 12_000);
+    // Kimi Code: Moonshot's own API, the desktop surface and a cache read without a write.
+    assert_eq!(actual["samples"][4]["client"], "kimi-code");
+    assert_eq!(actual["samples"][4]["parserVersion"], "kimi-wire-v1");
+    assert_eq!(
+        actual["samples"][4]["metricVersion"],
+        "kimi-observed-turn-v1"
+    );
+    assert_eq!(actual["samples"][4]["provider"], "moonshot");
+    assert_eq!(actual["samples"][4]["model"], "k2d8-preview");
+    assert_eq!(actual["samples"][4]["surface"], "desktop");
+    assert_eq!(actual["samples"][4]["ttftMs"], Value::Null);
+    assert_eq!(actual["samples"][4]["delegatedOutputTokens"], 0);
+    assert_eq!(actual["samples"][4]["inputTokens"], 36_590);
+    assert_eq!(actual["samples"][4]["cacheReadInputTokens"], 30_976);
+    assert_eq!(actual["samples"][4]["cacheWriteInputTokens"], Value::Null);
+    assert_eq!(actual["samples"][4]["appVersion"], "0.1.21");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2651,7 +2698,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.20");
+    assert_eq!(crate::APP_VERSION, "0.1.21");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -5388,6 +5435,8 @@ impl ClaudeDelegation {
                 grok,
                 temp.path().join("gemini"),
                 temp.path().join("opencode"),
+                temp.path().join("kimi"),
+                temp.path().join("kimi-desktop"),
             ),
             project,
             latest: Default::default(),
@@ -7578,6 +7627,8 @@ fn checkpoints_keep_the_saved_set_while_a_primary_turn_waits_for_its_delegated_o
         grok.clone(),
         grok.with_file_name("gemini"),
         grok.with_file_name("opencode"),
+        grok.with_file_name("kimi"),
+        grok.with_file_name("kimi-desktop"),
     );
     let previous = crate::SourceCheckpoints {
         claude_primary: checkpoints.clone(),
@@ -7825,6 +7876,8 @@ fn source_monitor_routes_notes_and_deadlines_to_each_source() {
         grok.clone(),
         grok.with_file_name("gemini"),
         grok.with_file_name("opencode"),
+        grok.with_file_name("kimi"),
+        grok.with_file_name("kimi-desktop"),
     );
     let mut found = Vec::new();
     for _ in 0..10 {
@@ -8278,6 +8331,8 @@ fn a_replayed_claude_turn_keeps_the_delegated_total_settled_before_the_checkpoin
         grok.clone(),
         grok.with_file_name("gemini"),
         grok.with_file_name("opencode"),
+        grok.with_file_name("kimi"),
+        grok.with_file_name("kimi-desktop"),
     );
     run(&mut first, &mut history);
     assert_eq!(old_turn(&history), Some(300));
@@ -8302,6 +8357,8 @@ fn a_replayed_claude_turn_keeps_the_delegated_total_settled_before_the_checkpoin
         grok.clone(),
         grok.with_file_name("gemini"),
         grok.with_file_name("opencode"),
+        grok.with_file_name("kimi"),
+        grok.with_file_name("kimi-desktop"),
     );
     second.set_checkpoints(checkpoints);
     run(&mut second, &mut history);

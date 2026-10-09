@@ -33,7 +33,7 @@ struct SourceFolderResetButton: View {
     }
 }
 
-/// Detected-sources list: Codex, Claude Code, Grok Build, Antigravity and OpenCode, found or not.
+/// Detected-sources list: Codex, Claude Code, Grok Build, Antigravity, OpenCode, Kimi Code and the Kimi desktop app, found or not.
 struct SourceStatusList<Accessory: View>: View {
     let statuses: [SourceStatus]
     var showsPaths = true

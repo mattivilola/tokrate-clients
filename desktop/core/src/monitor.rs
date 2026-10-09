@@ -2,10 +2,11 @@ use crate::claude_parser::is_subagent_transcript_path;
 use crate::delegation::{
     extend_bounded, DelegationEvent, DelegationFileBacklog, DelegationTracker,
 };
+use crate::kimi::{can_hold_wire, is_wire_path};
 use crate::model::{
-    ResponseMetric, TurnMetric, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
+    ResponseMetric, ToolSurface, TurnMetric, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
     CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION,
-    RESPONSE_METRIC_VERSION,
+    KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, RESPONSE_METRIC_VERSION,
 };
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
 use chrono::{DateTime, Duration, Utc};
@@ -172,6 +173,8 @@ fn path_digest(path: &str) -> String {
 pub struct Monitor {
     root: PathBuf,
     format: JsonlFormat,
+    /// Where the coding tool ran, for the formats whose root says it (Kimi Code's two homes).
+    surface: Option<ToolSurface>,
     files: HashMap<String, WatchedFile>,
     last_discovery: Option<DateTime<Utc>>,
     /// A change a watcher reported needs a full enumeration (a new or vanished file, lost events).
@@ -197,6 +200,10 @@ enum JsonlFormat {
     Claude,
     /// Claude Code `subagents/agent-*.jsonl` transcripts only.
     ClaudeSubagent,
+    /// Kimi Code `agents/main/wire.jsonl` logs; title sessions are excluded.
+    Kimi,
+    /// Kimi Code `agents/<other>/wire.jsonl` logs only.
+    KimiSubagent,
 }
 
 impl JsonlFormat {
@@ -210,23 +217,35 @@ impl Monitor {
     pub const RECENT_TAIL_BYTES: u64 = RECENT_TAIL_BYTES;
 
     pub fn new(root: PathBuf) -> Self {
-        Self::with_format(root, JsonlFormat::Codex)
+        Self::with_format(root, JsonlFormat::Codex, None)
     }
 
     pub fn new_claude(root: PathBuf) -> Self {
-        Self::with_format(root, JsonlFormat::Claude)
+        Self::with_format(root, JsonlFormat::Claude, None)
     }
 
     /// Monitors only the Claude Code subagent transcripts under a projects root, with
     /// its own file cap and reader lanes so they cannot crowd out primary sessions.
     pub fn new_claude_subagents(root: PathBuf) -> Self {
-        Self::with_format(root, JsonlFormat::ClaudeSubagent)
+        Self::with_format(root, JsonlFormat::ClaudeSubagent, None)
     }
 
-    fn with_format(root: PathBuf, format: JsonlFormat) -> Self {
+    /// Monitors the main agents' logs under a Kimi Code home.
+    pub fn new_kimi(root: PathBuf, surface: ToolSurface) -> Self {
+        Self::with_format(root, JsonlFormat::Kimi, Some(surface))
+    }
+
+    /// Monitors only the subagents' logs under a Kimi Code home, with their own file cap and
+    /// reader lanes so they cannot crowd out the main agents.
+    pub fn new_kimi_subagents(root: PathBuf, surface: ToolSurface) -> Self {
+        Self::with_format(root, JsonlFormat::KimiSubagent, Some(surface))
+    }
+
+    fn with_format(root: PathBuf, format: JsonlFormat, surface: Option<ToolSurface>) -> Self {
         Self {
             root,
             format,
+            surface,
             files: HashMap::new(),
             last_discovery: None,
             needs_discovery: false,
@@ -537,7 +556,7 @@ impl Monitor {
             !relative
                 .components()
                 .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
-        }) && format_includes(self.format, path)
+        }) && format_includes(self.format, &self.root, path)
     }
 
     /// `now` while any reader has bytes left to read or discovery is waiting; else the earliest
@@ -641,6 +660,9 @@ impl Monitor {
             JsonlFormat::Codex => (CODEX_PARSER_VERSION, CODEX_METRIC_VERSION),
             JsonlFormat::Claude => (CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION),
             JsonlFormat::ClaudeSubagent => (CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION),
+            JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
+                (KIMI_PARSER_VERSION, KIMI_METRIC_VERSION)
+            }
         };
         format!("{parser}|{metric}|{RESPONSE_METRIC_VERSION}")
     }
@@ -657,6 +679,45 @@ impl Monitor {
             && checkpoint.version_key == self.version_key()
             && now - candidate.modified_at >= Duration::seconds(CHECKPOINT_MIN_QUIET_SECONDS))
         .then_some(checkpoint.size)
+    }
+
+    /// A replay reader of a file, with the parser of this monitor's format.
+    fn archive_reader(&self, path: PathBuf) -> IncrementalReader {
+        match self.format {
+            JsonlFormat::Codex => IncrementalReader::beginning(path),
+            JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => {
+                IncrementalReader::beginning_claude(path)
+            }
+            JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
+                IncrementalReader::beginning_kimi(path, self.surface)
+            }
+        }
+    }
+
+    /// A live reader of the recent tail of a file.
+    fn tail_reader(&self, path: PathBuf) -> IncrementalReader {
+        match self.format {
+            JsonlFormat::Codex => IncrementalReader::recent_tail(path),
+            JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => {
+                IncrementalReader::recent_tail_claude(path)
+            }
+            JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
+                IncrementalReader::recent_tail_kimi(path, self.surface)
+            }
+        }
+    }
+
+    /// A live reader of a file a previous run read up to `offset`.
+    fn resumed_reader(&self, path: PathBuf, offset: u64) -> IncrementalReader {
+        match self.format {
+            JsonlFormat::Codex => IncrementalReader::resumed(path, offset),
+            JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => {
+                IncrementalReader::resumed_claude(path, offset)
+            }
+            JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
+                IncrementalReader::resumed_kimi(path, offset, self.surface)
+            }
+        }
     }
 
     fn discover_files(&mut self, now: DateTime<Utc>) -> io::Result<()> {
@@ -698,11 +759,7 @@ impl Monitor {
                 self.files.insert(
                     key,
                     WatchedFile {
-                        live: if self.format.is_claude() {
-                            IncrementalReader::resumed_claude(candidate.path, offset)
-                        } else {
-                            IncrementalReader::resumed(candidate.path, offset)
-                        },
+                        live: self.resumed_reader(candidate.path, offset),
                         archive: None,
                         identity: candidate.identity,
                         last_discovered_size: candidate.size,
@@ -715,21 +772,12 @@ impl Monitor {
                     },
                 );
             } else {
-                let archive = (candidate.size > RECENT_TAIL_BYTES).then(|| {
-                    if self.format.is_claude() {
-                        IncrementalReader::beginning_claude(candidate.path.clone())
-                    } else {
-                        IncrementalReader::beginning(candidate.path.clone())
-                    }
-                });
+                let archive = (candidate.size > RECENT_TAIL_BYTES)
+                    .then(|| self.archive_reader(candidate.path.clone()));
                 self.files.insert(
                     key,
                     WatchedFile {
-                        live: if self.format.is_claude() {
-                            IncrementalReader::recent_tail_claude(candidate.path)
-                        } else {
-                            IncrementalReader::recent_tail(candidate.path)
-                        },
+                        live: self.tail_reader(candidate.path),
                         archive,
                         identity: candidate.identity,
                         last_discovered_size: candidate.size,
@@ -749,9 +797,9 @@ impl Monitor {
     }
 }
 
-/// Whether a session file of this format is a JSONL transcript the monitor reads: Claude's primary
-/// and subagent monitors split the same folder between them.
-fn format_includes(format: JsonlFormat, path: &Path) -> bool {
+/// Whether a session file of this format is a log the monitor reads: Claude's primary and subagent
+/// monitors split the same folder between them, and so do Kimi Code's.
+fn format_includes(format: JsonlFormat, root: &Path, path: &Path) -> bool {
     if !path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -759,6 +807,10 @@ fn format_includes(format: JsonlFormat, path: &Path) -> bool {
     {
         return false;
     }
+    let kimi = |subagent| {
+        path.strip_prefix(root)
+            .is_ok_and(|relative| is_wire_path(relative, subagent))
+    };
     match format {
         JsonlFormat::Codex => true,
         JsonlFormat::Claude => {
@@ -773,6 +825,18 @@ fn format_includes(format: JsonlFormat, path: &Path) -> bool {
                 .is_some_and(|name| name.to_ascii_lowercase().starts_with("agent-"))
         }
         JsonlFormat::ClaudeSubagent => is_subagent_transcript_path(path),
+        JsonlFormat::Kimi => kimi(false),
+        JsonlFormat::KimiSubagent => kimi(true),
+    }
+}
+
+/// Whether a folder can hold files of this format, so a walk skips the rest of a tool's home.
+fn format_descends(format: JsonlFormat, root: &Path, directory: &Path) -> bool {
+    match format {
+        JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
+            directory.strip_prefix(root).is_ok_and(can_hold_wire)
+        }
+        JsonlFormat::Codex | JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => true,
     }
 }
 
@@ -804,13 +868,15 @@ fn discover_candidates(
                 continue;
             };
             if file_type.is_dir() {
-                directories.push(entry.path());
+                if format_descends(format, root, &entry.path()) {
+                    directories.push(entry.path());
+                }
                 continue;
             }
             if !file_type.is_file() {
                 continue;
             }
-            if !format_includes(format, &entry.path()) {
+            if !format_includes(format, root, &entry.path()) {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {

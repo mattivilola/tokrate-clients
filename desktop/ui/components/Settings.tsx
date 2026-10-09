@@ -158,14 +158,14 @@ export function SettingsView() {
           <SwitchRow
             id="show-provider-badge"
             label="Show provider badge"
-            hint="A filled circle with the provider's letter (A Anthropic, O OpenAI, X xAI, G Google) next to the model: in the tray icon where the desktop allows icon updates, and in this window."
+            hint="A filled circle with the provider's letter (A Anthropic, O OpenAI, X xAI, G Google, M Moonshot AI) next to the model: in the tray icon where the desktop allows icon updates, and in this window."
             checked={settings.showProviderBadge}
             onChange={(showProviderBadge) => void store.patch({ showProviderBadge })}
           />
           <SwitchRow
             id="show-tool-chip"
             label="Show coding tool chip"
-            hint="Two letters for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode) before the speed in the tray text, where the desktop shows adjacent text. The tray tooltip always names the tool."
+            hint="Two letters for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode, KC Kimi Code) before the speed in the tray text, where the desktop shows adjacent text. The tray tooltip always names the tool."
             checked={settings.showToolChip}
             onChange={(showToolChip) => void store.patch({ showToolChip })}
           />

@@ -149,7 +149,7 @@ private struct MenuBarDashboardView: View {
             Toggle("Show provider badge", isOn: $showProviderBadge)
                 .help("Shows a letter badge for the model's maker before the speed in the menu bar.")
             Toggle("Show coding tool chip", isOn: $showToolChip)
-                .help("Shows a small chip for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode) before the speed in the menu bar.")
+                .help("Shows a small chip for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode, KC Kimi Code) before the speed in the menu bar.")
             Divider()
             Link("Privacy details", destination: URL(string: "https://tokrate.dev/privacy")!)
             Button("Quit Tokrate") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")

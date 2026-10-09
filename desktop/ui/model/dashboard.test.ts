@@ -94,6 +94,17 @@ describe("dashboard model", () => {
     expect(CLIENT_ORDER).toContain("antigravity");
     expect(CLIENT_ORDER).toContain("opencode");
     expect(SOURCE_TITLES.opencode).toBe("OpenCode");
+    expect(CLIENT_ORDER).toContain("kimi-code");
+    expect(SOURCE_TITLES["kimi-code"]).toBe("Kimi Code");
+  });
+  it("filters by the Kimi Code tool and the Moonshot AI provider", () => {
+    const kimi = turn("k", 5, 60, { client: "kimi-code", model: "k2d8-preview", provider: "moonshot", codexTTFTSeconds: null });
+    const records = [kimi, turn("o", 6, 30)];
+    const byTool = buildDashboard(input(records, { tool: "kimi-code" }));
+    expect(byTool.filtered.map((m) => m.id)).toEqual(["k"]);
+    expect(byTool.tools).toEqual(["codex", "kimi-code"]);
+    const byProvider = buildDashboard(input(records, { provider: "moonshot" }));
+    expect(byProvider.filtered.map((m) => m.id)).toEqual(["k"]);
   });
   it("offers every attributable provider in the filter", () => {
     expect(PROVIDER_TITLES).toEqual({
@@ -103,6 +114,7 @@ describe("dashboard model", () => {
       "google-vertex": "Google Vertex AI",
       xai: "xAI",
       google: "Google",
+      moonshot: "Moonshot AI",
       unknown: "Unknown route",
     });
   });

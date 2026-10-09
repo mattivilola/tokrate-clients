@@ -1,6 +1,6 @@
 import type { LiveResponse, Metric } from "../metrics";
 
-export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode";
+export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode" | "kimi-code";
 
 export interface Settings {
   sharing: boolean;
@@ -18,6 +18,8 @@ export interface Settings {
   grokRoot: string;
   antigravityRoot: string;
   opencodeRoot: string;
+  kimiRoot: string;
+  kimiDesktopRoot: string;
 }
 
 /** Detected state of one coding-tool log folder (the path stays on the device). */
@@ -149,6 +151,7 @@ export type ProviderFilter =
   | "google-vertex"
   | "xai"
   | "google"
+  | "moonshot"
   | "unknown";
 export type ChartMetric = "response" | "throughput" | "ttft" | "efficiency";
 /** Model lists rank by response speed, keep the per-measurement turn groups, or rank efficiency. */

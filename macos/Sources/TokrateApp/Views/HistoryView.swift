@@ -87,7 +87,7 @@ struct HistoryView: View {
                         Label(store.records.isEmpty ? "No turn history yet" : "No turns in this range", systemImage: "chart.xyaxis.line")
                             .foregroundStyle(DashboardStyle.ink)
                     } description: {
-                        Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed turns from Codex, Claude Code, Grok Build, Antigravity, and OpenCode. Large histories may take a moment." : "Choose Start monitoring to read local session files. Prompts and responses are never retained.") : "Choose 7 days or select another client, provider, or model cohort to view its local turns.")
+                        Text(store.records.isEmpty ? (store.isMonitoring ? "Reading completed turns from Codex, Claude Code, Grok Build, Antigravity, OpenCode, and Kimi Code. Large histories may take a moment." : "Choose Start monitoring to read local session files. Prompts and responses are never retained.") : "Choose 7 days or select another client, provider, or model cohort to view its local turns.")
                             .foregroundStyle(DashboardStyle.muted)
                     } actions: {
                         Button("Start monitoring") { store.startMonitoring() }

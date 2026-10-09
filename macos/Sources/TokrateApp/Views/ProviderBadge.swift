@@ -7,6 +7,7 @@ enum ProviderBadgePalette {
     static let anthropic: UInt32 = 0xD97757
     static let openAI: UInt32 = 0x10A37F
     static let google: UInt32 = 0x4285F4
+    static let moonshot: UInt32 = 0x6C47FF
     static let neutral: UInt32 = 0x8A9AA1
 
     static func fill(_ maker: ModelMaker, isDark: Bool) -> UInt32 {
@@ -15,6 +16,7 @@ enum ProviderBadgePalette {
         case .openAI: openAI
         case .xAI: isDark ? 0xFFFFFF : 0x000000
         case .google: google
+        case .moonshot: moonshot
         case .unknown: neutral
         }
     }

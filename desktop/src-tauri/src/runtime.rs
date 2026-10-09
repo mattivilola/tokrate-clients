@@ -34,21 +34,23 @@ const HISTORY_PRUNE_INTERVAL_SECONDS: i64 = 600;
 const HISTORY_RETENTION_DAYS: i64 = 7;
 /// The coding tools the app reads: recorded id, display title and the two-letter chip the tray text
 /// and the model picker use (the UI's `CODING_TOOLS`, the Mac app's `CodingTool.known`).
-const CODING_TOOLS: [(&str, &str, &str); 5] = [
+const CODING_TOOLS: [(&str, &str, &str); 6] = [
     ("codex", "Codex", "CX"),
     ("claude-code", "Claude Code", "CC"),
     ("grok-build", "Grok Build", "GB"),
     ("antigravity", "Antigravity", "AG"),
     ("opencode", "OpenCode", "OC"),
+    ("kimi-code", "Kimi Code", "KC"),
 ];
 /// The inference routes of the provider filter (the UI's `ProviderFilter`).
-const PROVIDER_FILTERS: [&str; 7] = [
+const PROVIDER_FILTERS: [&str; 8] = [
     "openai",
     "anthropic",
     "amazon-bedrock",
     "google-vertex",
     "xai",
     "google",
+    "moonshot",
     "unknown",
 ];
 
@@ -90,6 +92,10 @@ pub struct Settings {
     pub grok_root: String,
     pub antigravity_root: String,
     pub opencode_root: String,
+    /// Kimi Code's command-line home.
+    pub kimi_root: String,
+    /// The Kimi desktop app's embedded Kimi Code home. Not chosen in the Sources settings.
+    pub kimi_desktop_root: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -106,6 +112,15 @@ impl Default for Settings {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".grok"));
         let opencode_home = opencode_data_dir(std::env::var_os("XDG_DATA_HOME"), &home);
+        let kimi_home = std::env::var_os("KIMI_CODE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".kimi-code"));
+        let kimi_desktop_home = kimi_desktop_home(
+            std::env::var_os("APPDATA"),
+            std::env::var_os("XDG_CONFIG_HOME"),
+            &home,
+        );
         Self {
             sharing: false,
             sharing_consent: None,
@@ -121,6 +136,8 @@ impl Default for Settings {
             // Antigravity has no home override: its data folder is always `~/.gemini`.
             antigravity_root: home.join(".gemini").to_string_lossy().into(),
             opencode_root: opencode_home.to_string_lossy().into(),
+            kimi_root: kimi_home.to_string_lossy().into(),
+            kimi_desktop_root: kimi_desktop_home.to_string_lossy().into(),
         }
     }
 }
@@ -287,6 +304,8 @@ impl Runtime {
             PathBuf::from(&settings.grok_root),
             PathBuf::from(&settings.antigravity_root),
             PathBuf::from(&settings.opencode_root),
+            PathBuf::from(&settings.kimi_root),
+            PathBuf::from(&settings.kimi_desktop_root),
         );
         // Files already read to their end by the run that saved this history are not read again.
         monitor.set_checkpoints(history.checkpoints().clone());
@@ -327,12 +346,16 @@ impl Runtime {
         settings.grok_root = dir.join("grok-sessions").to_string_lossy().into();
         settings.antigravity_root = dir.join("gemini").to_string_lossy().into();
         settings.opencode_root = dir.join("opencode").to_string_lossy().into();
+        settings.kimi_root = dir.join("kimi").to_string_lossy().into();
+        settings.kimi_desktop_root = dir.join("kimi-desktop").to_string_lossy().into();
         for root in [
             &settings.root,
             &settings.claude_root,
             &settings.grok_root,
             &settings.antigravity_root,
             &settings.opencode_root,
+            &settings.kimi_root,
+            &settings.kimi_desktop_root,
         ] {
             std::fs::create_dir_all(root)?;
         }
@@ -409,13 +432,14 @@ impl Runtime {
                 &self.settings.opencode_root,
                 &defaults.opencode_root,
             ),
+            ("kimi-code", &self.settings.kimi_root, &defaults.kimi_root),
         ]
         .into_iter()
         .map(|(id, root, default)| SourceStatus {
             id,
             root: root.clone(),
             is_default: root == default,
-            found: source_found(id, root),
+            found: self.source_is_found(id, root),
         })
         .collect()
     }
@@ -586,6 +610,7 @@ impl Runtime {
             "grok-build" => defaults.grok_root,
             "antigravity" => defaults.antigravity_root,
             "opencode" => defaults.opencode_root,
+            "kimi-code" => defaults.kimi_root,
             _ => return Err("Choose a supported source".into()),
         };
         self.apply_source_root(source, PathBuf::from(root))
@@ -598,6 +623,7 @@ impl Runtime {
             "grok-build" => next.grok_root = root.to_string_lossy().into(),
             "antigravity" => next.antigravity_root = root.to_string_lossy().into(),
             "opencode" => next.opencode_root = root.to_string_lossy().into(),
+            "kimi-code" => next.kimi_root = root.to_string_lossy().into(),
             _ => return Err("Choose a supported source".into()),
         }
         self.save_settings(&next)?;
@@ -824,6 +850,13 @@ impl Runtime {
         )
     }
 
+    /// Whether a source's data is there. Kimi Code is also found by the Kimi desktop app's home,
+    /// which the Sources settings do not list on its own.
+    fn source_is_found(&self, id: &str, root: &str) -> bool {
+        source_found(id, root)
+            || id == "kimi-code" && std::path::Path::new(&self.settings.kimi_desktop_root).is_dir()
+    }
+
     fn source_status(&self) -> String {
         let mut sources = Vec::new();
         for (id, name, root) in [
@@ -836,8 +869,9 @@ impl Runtime {
                 &self.settings.antigravity_root,
             ),
             ("opencode", "OpenCode", &self.settings.opencode_root),
+            ("kimi-code", "Kimi Code", &self.settings.kimi_root),
         ] {
-            if source_found(id, root) {
+            if self.source_is_found(id, root) {
                 sources.push(name);
             }
         }
@@ -856,6 +890,34 @@ fn opencode_data_dir(xdg_data_home: Option<std::ffi::OsString>, home: &std::path
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local").join("share"))
         .join("opencode")
+}
+/// The Kimi desktop app's embedded Kimi Code home below its Electron user-data folder: `%APPDATA%`
+/// on Windows, `$XDG_CONFIG_HOME` else `~/.config` on Linux (`~/Library/Application Support` on
+/// macOS, where only the Mac app is released).
+fn kimi_desktop_home(
+    appdata: Option<std::ffi::OsString>,
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: &std::path::Path,
+) -> PathBuf {
+    let set = |value: Option<std::ffi::OsString>| value.filter(|value| !value.is_empty());
+    let user_data = if cfg!(windows) {
+        set(appdata)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Roaming"))
+    } else if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        set(xdg_config_home)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+    };
+    user_data
+        .join("kimi-desktop")
+        .join("daimon-share")
+        .join("daimon")
+        .join("runtime")
+        .join("kimi-code")
+        .join("home")
 }
 /// Whether a tool's data is there: its sessions/projects folder, Antigravity's conversation
 /// folders (a bare `~/.gemini` belongs to the Gemini CLI) or OpenCode's `opencode.db`.
@@ -1580,7 +1642,7 @@ mod tests {
         assert!(!codex.is_default);
         assert!(codex.found);
         assert_eq!(codex.root, custom.to_string_lossy());
-        assert_eq!(sources.len(), 5);
+        assert_eq!(sources.len(), 6);
         runtime.reset_source_root("codex").unwrap();
         let sources = runtime.snapshot(None).sources;
         let codex = sources.iter().find(|s| s.id == "codex").unwrap();
@@ -1804,6 +1866,73 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn kimi_code_homes_follow_their_environment_and_the_platform_user_data_folder() {
+        let home = std::path::Path::new("/home/user");
+        let below = |user_data: PathBuf| {
+            user_data
+                .join("kimi-desktop")
+                .join("daimon-share")
+                .join("daimon")
+                .join("runtime")
+                .join("kimi-code")
+                .join("home")
+        };
+        let default = kimi_desktop_home(None, None, home);
+        let empty = kimi_desktop_home(Some("".into()), Some("".into()), home);
+        assert_eq!(default, empty);
+        if cfg!(windows) {
+            assert_eq!(default, below(home.join("AppData").join("Roaming")));
+            assert_eq!(
+                kimi_desktop_home(Some("D:\\Roaming".into()), Some("/x".into()), home),
+                below(PathBuf::from("D:\\Roaming"))
+            );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                default,
+                below(home.join("Library").join("Application Support"))
+            );
+        } else {
+            assert_eq!(default, below(home.join(".config")));
+            assert_eq!(
+                kimi_desktop_home(Some("/appdata".into()), Some("/xdg".into()), home),
+                below(PathBuf::from("/xdg"))
+            );
+        }
+    }
+    #[test]
+    fn kimi_code_is_found_by_either_home_and_its_folder_is_chosen_for_the_command_line() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let found = |runtime: &Runtime| {
+            runtime
+                .snapshot(None)
+                .sources
+                .into_iter()
+                .find(|source| source.id == "kimi-code")
+                .unwrap()
+        };
+        let status = found(&runtime);
+        assert!(status.found && status.root == dir.join("kimi").to_string_lossy());
+        // Only the app's home exists: the tool is still found, the listed folder is the CLI's.
+        std::fs::remove_dir_all(dir.join("kimi")).unwrap();
+        assert!(found(&runtime).found);
+        assert!(runtime.source_status().contains("Kimi Code"));
+        std::fs::remove_dir_all(dir.join("kimi-desktop")).unwrap();
+        assert!(!found(&runtime).found);
+        assert!(!runtime.source_status().contains("Kimi Code"));
+        let custom = dir.join("custom-kimi");
+        std::fs::create_dir_all(&custom).unwrap();
+        runtime
+            .set_source_root("kimi-code", custom.clone())
+            .unwrap();
+        assert!(found(&runtime).found && !found(&runtime).is_default);
+        assert_eq!(runtime.monitor.root("kimi-code"), Some(&custom));
+        runtime.reset_source_root("kimi-code").unwrap();
+        assert!(found(&runtime).is_default);
+        assert!(runtime.settings.kimi_desktop_root.ends_with("kimi-desktop"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn smoke_mode_uses_only_temporary_source_roots_and_stays_local() {
         let dir = temporary();
         let runtime = Runtime::load_smoke(dir.clone()).unwrap();
@@ -1813,6 +1942,8 @@ mod tests {
             PathBuf::from(&runtime.settings.grok_root),
             PathBuf::from(&runtime.settings.antigravity_root),
             PathBuf::from(&runtime.settings.opencode_root),
+            PathBuf::from(&runtime.settings.kimi_root),
+            PathBuf::from(&runtime.settings.kimi_desktop_root),
         ];
         assert_eq!(
             roots,
@@ -1821,7 +1952,9 @@ mod tests {
                 dir.join("claude-projects"),
                 dir.join("grok-sessions"),
                 dir.join("gemini"),
-                dir.join("opencode")
+                dir.join("opencode"),
+                dir.join("kimi"),
+                dir.join("kimi-desktop")
             ]
         );
         assert!(roots
@@ -2867,15 +3000,23 @@ mod tests {
                 "antigravity",
                 "antigravity-ide",
                 "antigravity-cli",
-                "opencode"
+                "opencode",
+                "kimi-code",
+                "kimi-desktop"
             ]
         );
         // The smoke roots exist, but not Antigravity's conversation folders below its root.
         let exists: Vec<_> = targets.iter().map(|target| target.exists).collect();
-        assert_eq!(exists, [true, true, true, false, false, false, true]);
+        assert_eq!(
+            exists,
+            [true, true, true, false, false, false, true, true, true]
+        );
         // Antigravity's folders and OpenCode's data folder are watched shallowly.
         let recursive: Vec<_> = targets.iter().map(|target| target.recursive).collect();
-        assert_eq!(recursive, [true, true, true, false, false, false, false]);
+        assert_eq!(
+            recursive,
+            [true, true, true, false, false, false, false, true, true]
+        );
         assert_eq!(
             targets[3].root,
             PathBuf::from(&runtime.settings.antigravity_root).join("antigravity/conversations")
@@ -2883,6 +3024,12 @@ mod tests {
         assert_eq!(
             targets[6].root,
             PathBuf::from(&runtime.settings.opencode_root)
+        );
+        // Kimi Code's two homes are watched whole, each under its own name.
+        assert_eq!(targets[7].root, PathBuf::from(&runtime.settings.kimi_root));
+        assert_eq!(
+            targets[8].root,
+            PathBuf::from(&runtime.settings.kimi_desktop_root)
         );
         let custom = dir.join("custom-codex");
         std::fs::create_dir_all(&custom).unwrap();

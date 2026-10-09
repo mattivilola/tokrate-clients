@@ -54,6 +54,7 @@ export const CLIENT_ORDER = [
   "grok-build",
   "antigravity",
   "opencode",
+  "kimi-code",
 ] as const;
 
 /** Everything the home flyout and the history window render, derived purely from the records. */

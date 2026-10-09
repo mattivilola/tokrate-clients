@@ -44,7 +44,8 @@ public enum ExportDestination {
         let roots = [
             ("Codex sessions", sourceFolders.codex), ("Claude Code projects", sourceFolders.claudeCode),
             ("Grok Build sessions", sourceFolders.grokBuild), ("Antigravity data", sourceFolders.antigravity),
-            ("OpenCode data", sourceFolders.openCode)
+            ("OpenCode data", sourceFolders.openCode), ("Kimi Code data", sourceFolders.kimiCode),
+            ("Kimi desktop data", sourceFolders.kimiDesktop)
         ]
         for (name, root) in roots {
             let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path

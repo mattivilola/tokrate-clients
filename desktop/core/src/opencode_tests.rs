@@ -1784,6 +1784,8 @@ fn source_monitor_polls_opencode_under_its_own_root_with_a_bounded_budget() {
         empty("grok"),
         empty("gemini"),
         fixture.root(),
+        empty("kimi"),
+        empty("kimi-desktop"),
     );
     assert_eq!(monitor.root("opencode"), Some(&fixture.root()));
     let turns = monitor.poll(now()).unwrap();
@@ -1967,6 +1969,8 @@ fn source_monitor_wakes_on_the_opencode_database_only_and_watches_its_folder_sha
         empty("grok"),
         empty("gemini"),
         fixture.root(),
+        empty("kimi"),
+        empty("kimi-desktop"),
     );
     let at = now();
     assert_eq!(monitor.poll(at).unwrap().len(), 1);

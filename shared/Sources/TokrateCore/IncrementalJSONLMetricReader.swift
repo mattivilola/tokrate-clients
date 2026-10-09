@@ -63,11 +63,16 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
     private(set) var isCaughtUp = false
     var hasPendingWork: Bool { parser.hasPendingWork }
 
-    init(url: URL, startPosition: StartPosition = .beginning, isFinalRead: Bool = false) {
+    /// `makeParser` builds the parser from the file's standardized path; a source whose parser needs more
+    /// than the path (Kimi Code's surface and agent scope) supplies it.
+    init(
+        url: URL, startPosition: StartPosition = .beginning, isFinalRead: Bool = false,
+        makeParser: (String) -> Parser = { Parser(sourceIdentity: $0) }
+    ) {
         self.url = url
         self.startPosition = startPosition
         self.isFinalRead = isFinalRead
-        parser = Parser(sourceIdentity: url.standardizedFileURL.path)
+        parser = makeParser(url.standardizedFileURL.path)
         tailInitializationPending = if case .recentTail = startPosition { true } else { false }
         fileNumber = Self.currentFileNumber(url)
         if case .resume(let resumeOffset) = startPosition {
@@ -199,6 +204,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
     private let scope: MonitorScope
     private let liveSince: Date
     private let includesFile: @Sendable (URL) -> Bool
+    private let makeParser: @Sendable (String) -> Parser
     private let versionKey: String
     private let resumable: [String: SourceFileCheckpoint]
     private var files: [String: WatchedFile] = [:]
@@ -231,7 +237,8 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         versionKey: String,
         checkpoints: [SourceFileCheckpoint] = [],
         scope: MonitorScope = .live,
-        includesFile: @escaping @Sendable (URL) -> Bool = { $0.pathExtension.lowercased() == "jsonl" }
+        includesFile: @escaping @Sendable (URL) -> Bool = { $0.pathExtension.lowercased() == "jsonl" },
+        makeParser: @escaping @Sendable (String) -> Parser = { Parser(sourceIdentity: $0) }
     ) {
         self.root = root
         self.scope = scope
@@ -239,6 +246,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
         self.versionKey = versionKey
         resumable = Dictionary(checkpoints.map { ($0.pathDigest, $0) }, uniquingKeysWith: { _, last in last })
         self.includesFile = includesFile
+        self.makeParser = makeParser
     }
 
     func poll(now: Date = .now) throws -> MonitorUpdate {
@@ -409,7 +417,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             ) {
                 // Read to its end by an earlier run and unchanged since: caught up, nothing to replay.
                 files[key] = WatchedFile(
-                    live: IncrementalJSONLMetricReader(url: candidate.url, startPosition: .resume(atOffset: offset)),
+                    live: IncrementalJSONLMetricReader(url: candidate.url, startPosition: .resume(atOffset: offset), makeParser: makeParser),
                     archive: nil,
                     modifiedAt: candidate.modified,
                     liveServicedModification: candidate.modified,
@@ -420,14 +428,17 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 // sequence closes at the end like an archive read; a file still being written stays open.
                 let isQuiet = now.timeIntervalSince(candidate.modified) >= SourceFileCheckpoint.minimumQuietSeconds
                 files[key] = WatchedFile(
-                    live: IncrementalJSONLMetricReader(url: candidate.url, isFinalRead: isQuiet),
+                    live: IncrementalJSONLMetricReader(url: candidate.url, isFinalRead: isQuiet, makeParser: makeParser),
                     archive: nil,
                     modifiedAt: candidate.modified
                 )
             } else {
                 files[key] = WatchedFile(
-                    live: IncrementalJSONLMetricReader(url: candidate.url, startPosition: .recentTail(maximumBytes: Self.recentTailBytes)),
-                    archive: candidate.size > Self.recentTailBytes ? IncrementalJSONLMetricReader(url: candidate.url, isFinalRead: true) : nil,
+                    live: IncrementalJSONLMetricReader(
+                        url: candidate.url, startPosition: .recentTail(maximumBytes: Self.recentTailBytes), makeParser: makeParser
+                    ),
+                    archive: candidate.size > Self.recentTailBytes
+                        ? IncrementalJSONLMetricReader(url: candidate.url, isFinalRead: true, makeParser: makeParser) : nil,
                     modifiedAt: candidate.modified
                 )
             }

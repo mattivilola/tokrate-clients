@@ -17,6 +17,9 @@ pub const ANTIGRAVITY_METRIC_VERSION: &str = "antigravity-observed-execution-v1"
 pub const OPENCODE_CLIENT: &str = "opencode";
 pub const OPENCODE_PARSER_VERSION: &str = "opencode-db-v1";
 pub const OPENCODE_METRIC_VERSION: &str = "opencode-observed-turn-v1";
+pub const KIMI_CLIENT: &str = "kimi-code";
+pub const KIMI_PARSER_VERSION: &str = "kimi-wire-v1";
+pub const KIMI_METRIC_VERSION: &str = "kimi-observed-turn-v1";
 
 /// Contract version of the per-response measurement shared with the Mac client.
 pub const RESPONSE_METRIC_VERSION: &str = "response-v1";
@@ -425,6 +428,7 @@ pub enum ProviderBadge {
     OpenAi,
     Xai,
     Google,
+    Moonshot,
     Unknown,
 }
 
@@ -438,6 +442,7 @@ impl ProviderBadge {
             Some("openai") => return Self::OpenAi,
             Some("xai") => return Self::Xai,
             Some("google") => return Self::Google,
+            Some("moonshot") => return Self::Moonshot,
             Some("anthropic") => return Self::Anthropic,
             _ => {}
         }
@@ -452,6 +457,12 @@ impl ProviderBadge {
             Self::Xai
         } else if model.starts_with("gemini-") {
             Self::Google
+        } else if model.starts_with("kimi-")
+            || model
+                .strip_prefix('k')
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            Self::Moonshot
         } else {
             Self::Unknown
         }
@@ -463,6 +474,7 @@ impl ProviderBadge {
             Self::OpenAi => Some('O'),
             Self::Xai => Some('X'),
             Self::Google => Some('G'),
+            Self::Moonshot => Some('M'),
             Self::Unknown => None,
         }
     }
@@ -473,6 +485,7 @@ impl ProviderBadge {
             Self::OpenAi => "OpenAI",
             Self::Xai => "xAI",
             Self::Google => "Google",
+            Self::Moonshot => "Moonshot AI",
             Self::Unknown => "Unknown provider",
         }
     }

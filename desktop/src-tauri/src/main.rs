@@ -208,6 +208,7 @@ async fn choose_folder(app: tauri::AppHandle, source: String) -> Result<Snapshot
         "grok-build" => "Choose Grok Build sessions folder",
         "antigravity" => "Choose Antigravity data folder",
         "opencode" => "Choose OpenCode data folder",
+        "kimi-code" => "Choose Kimi Code folder",
         _ => return Err("Choose a supported source".into()),
     };
     // The native dialog takes focus from the flyout; that must not dismiss it.

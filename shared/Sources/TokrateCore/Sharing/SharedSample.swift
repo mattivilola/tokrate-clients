@@ -7,7 +7,7 @@ public struct SharedSample: Encodable, Sendable {
     public let client: String
     public let clientVersion: String
     /// The release this build reports, in every upload and in the `User-Agent` of every community request.
-    public static let appVersion = "0.1.20"
+    public static let appVersion = "0.1.21"
     public let appVersion = SharedSample.appVersion
     public let parserVersion: String
     public let metricVersion: String
@@ -50,6 +50,8 @@ public struct SharedSample: Encodable, Sendable {
         case legacyClaudeParser
         /// The provider is not shared for this client (for example an OpenCode gateway).
         case providerNotShared
+        /// A Kimi Code record that claims prompt-cache writes, which its logs never report.
+        case unreportedCacheWrite
         /// Grok Build records that carry a client version are not shared.
         case grokClientVersion
         /// A primary turn whose delegated output total is not final yet.
@@ -66,6 +68,7 @@ public struct SharedSample: Encodable, Sendable {
         if !metric.isSupportedSourceTuple { return .unsupportedSourceTuple }
         if ["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion) { return .legacyClaudeParser }
         if !isAllowedProvider(metric.provider, client: metric.client) { return .providerNotShared }
+        if metric.client == "kimi-code", metric.cacheWriteInputTokens != nil { return .unreportedCacheWrite }
         if metric.client == "grok-build", let version = metric.clientVersion, version != "unknown" { return .grokClientVersion }
         if !metric.isDelegationFinal { return .delegationNotFinal }
         if !duration.isFinite || !(1...86_400_000).contains(duration) { return .durationOutOfRange }
@@ -119,11 +122,15 @@ public struct SharedSample: Encodable, Sendable {
     /// Bedrock and Vertex are explicit-evidence providers only Claude Code reports; `google` is the
     /// routing Antigravity's Gemini models have by construction and OpenCode reports for Google's own API.
     /// OpenCode records with any other provider id (gateways, vendor plans, local servers) stay local.
+    /// `moonshot` is the routing of Kimi Code's own API, which is the only provider it shares besides
+    /// `unknown`.
     public static func isAllowedProvider(_ provider: String?, client: String) -> Bool {
         switch provider ?? "unknown" {
-        case "openai", "anthropic", "xai", "unknown": true
+        case "unknown": true
+        case "openai", "anthropic", "xai": client != "kimi-code"
         case "amazon-bedrock", "google-vertex": client == "claude-code"
         case "google": client == "antigravity" || client == "opencode"
+        case "moonshot": client == "kimi-code"
         default: false
         }
     }

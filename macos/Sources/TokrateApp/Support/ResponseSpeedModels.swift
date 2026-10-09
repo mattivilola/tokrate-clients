@@ -177,7 +177,7 @@ enum AutoSelection {
 
 /// Who made the model: shown as a letter badge. Letters only, never company logos.
 enum ModelMaker: Equatable, Sendable {
-    case anthropic, openAI, xAI, google, unknown
+    case anthropic, openAI, xAI, google, moonshot, unknown
 
     /// The model id decides first; the provider is used when the model id is not recognisable.
     init(model: String?, provider: String?) {
@@ -186,12 +186,14 @@ enum ModelMaker: Equatable, Sendable {
         else if id.hasPrefix("gpt-") || id.hasPrefix("codex") || id.range(of: "^o[0-9]", options: .regularExpression) != nil { self = .openAI }
         else if id.hasPrefix("grok-") { self = .xAI }
         else if id.hasPrefix("gemini-") { self = .google }
+        else if id.hasPrefix("kimi-") || id.range(of: "^k[0-9]", options: .regularExpression) != nil { self = .moonshot }
         else {
             switch provider {
             case "anthropic": self = .anthropic
             case "openai": self = .openAI
             case "xai": self = .xAI
             case "google": self = .google
+            case "moonshot": self = .moonshot
             default: self = .unknown
             }
         }
@@ -205,6 +207,7 @@ enum ModelMaker: Equatable, Sendable {
         case .openAI: "OpenAI"
         case .xAI: "xAI"
         case .google: "Google"
+        case .moonshot: "Moonshot AI"
         case .unknown: "Unknown provider"
         }
     }
@@ -215,6 +218,7 @@ enum ModelMaker: Equatable, Sendable {
         case .openAI: "O"
         case .xAI: "X"
         case .google: "G"
+        case .moonshot: "M"
         case .unknown: nil
         }
     }

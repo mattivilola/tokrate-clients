@@ -58,6 +58,8 @@ describe("eligibility", () => {
     expect(eligibleTotal(turn("a", 1, { client: "antigravity" }))).toBe(1000);
     expect(eligibleTotal(turn("a", 1, { client: "opencode" }))).toBe(1000);
     expect(eligibleTotal(turn("a", 1, { client: "opencode", delegatedOutputTokens: null }))).toBeNull();
+    expect(eligibleTotal(turn("a", 1, { client: "kimi-code" }))).toBe(1000);
+    expect(eligibleTotal(turn("a", 1, { client: "kimi-code", delegatedOutputTokens: null }))).toBeNull();
     expect(eligibleTotal(turn("a", 1, { client: "antigravity", delegatedOutputTokens: null }))).toBeNull();
     expect(eligibleTotal(turn("a", 1, { delegatedOutputTokens: null }))).toBeNull();
   });

@@ -17,7 +17,7 @@ struct SourceStatus: Identifiable, Equatable, Sendable {
     let path: String
 
     var id: String { client }
-    var title: String { ModelCohort.clientTitle(client) }
+    var title: String { SourceFolderKind(rawValue: client)?.title ?? ModelCohort.clientTitle(client) }
     var isFound: Bool { availability == .found }
 }
 
@@ -30,8 +30,16 @@ enum SourceFolderKind: String, CaseIterable, Sendable {
     case grokBuild = "grok-build"
     case antigravity
     case openCode = "opencode"
+    case kimiCode = "kimi-code"
+    /// The Kimi desktop app's embedded Kimi Code home: a second folder of the same client.
+    case kimiDesktop = "kimi-desktop"
 
-    var title: String { ModelCohort.clientTitle(rawValue) }
+    var title: String {
+        switch self {
+        case .kimiDesktop: "Kimi desktop"
+        default: ModelCohort.clientTitle(rawValue)
+        }
+    }
 
     /// What the chosen folder holds, as it appears in help text.
     var folderNoun: String {
@@ -40,6 +48,7 @@ enum SourceFolderKind: String, CaseIterable, Sendable {
         case .claudeCode: "projects folder"
         case .grokBuild: "sessions folder"
         case .antigravity, .openCode: "data folder"
+        case .kimiCode, .kimiDesktop: "home folder"
         }
     }
 
@@ -119,6 +128,8 @@ final class HistoryStore {
     @ObservationIgnored private var grokMonitor: GrokSessionMonitor?
     @ObservationIgnored private var antigravityMonitor: AntigravityConversationMonitor?
     @ObservationIgnored private var openCodeMonitor: OpenCodeMonitor?
+    @ObservationIgnored private var kimiCodeMonitor: KimiSessionMonitor?
+    @ObservationIgnored private var kimiDesktopMonitor: KimiSessionMonitor?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     /// Keeps the seven-day retention while monitoring is paused, when no poll runs.
     @ObservationIgnored private var retentionTask: Task<Void, Never>?
@@ -173,6 +184,8 @@ final class HistoryStore {
         grokSessionsFolder: URL? = nil,
         antigravityDataFolder: URL? = nil,
         openCodeDataFolder: URL? = nil,
+        kimiCodeFolder: URL? = nil,
+        kimiDesktopFolder: URL? = nil,
         sharingPreferences: SharingPreferences? = nil,
         defaults: UserDefaults = .standard,
         initialRecords: [TurnMetric]? = nil,
@@ -194,7 +207,9 @@ final class HistoryStore {
             .claudeCode: claudeProjectsFolder ?? sourceDefaults.claudeCode,
             .grokBuild: grokSessionsFolder ?? sourceDefaults.grokBuild,
             .antigravity: antigravityDataFolder ?? sourceDefaults.antigravity,
-            .openCode: openCodeDataFolder ?? sourceDefaults.openCode
+            .openCode: openCodeDataFolder ?? sourceDefaults.openCode,
+            .kimiCode: kimiCodeFolder ?? sourceDefaults.kimiCode,
+            .kimiDesktop: kimiDesktopFolder ?? sourceDefaults.kimiDesktop
         ]
 
         let decoder = JSONDecoder()
@@ -274,6 +289,14 @@ final class HistoryStore {
         grokMonitor = GrokSessionMonitor(root: folder(for: .grokBuild))
         antigravityMonitor = AntigravityConversationMonitor(root: folder(for: .antigravity), liveSince: launchedAt)
         openCodeMonitor = OpenCodeMonitor(root: folder(for: .openCode), liveSince: launchedAt)
+        kimiCodeMonitor = KimiSessionMonitor(
+            root: folder(for: .kimiCode), surface: .cli, liveSince: launchedAt,
+            mainCheckpoints: checkpoints.kimiCodeMain, subagentCheckpoints: checkpoints.kimiCodeSubagents
+        )
+        kimiDesktopMonitor = KimiSessionMonitor(
+            root: folder(for: .kimiDesktop), surface: .desktop, liveSince: launchedAt,
+            mainCheckpoints: checkpoints.kimiDesktopMain, subagentCheckpoints: checkpoints.kimiDesktopSubagents
+        )
         isMonitoring = true
         refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
@@ -281,7 +304,8 @@ final class HistoryStore {
         // That write only creates the file: the first records of the replay must not wait out its interval.
         saveThrottle.reset()
         let codexFolder = folder(for: .codex)
-        guard let monitor, let claudeMonitor, let grokMonitor, let antigravityMonitor, let openCodeMonitor else { return }
+        guard let monitor, let claudeMonitor, let grokMonitor, let antigravityMonitor, let openCodeMonitor,
+              let kimiCodeMonitor, let kimiDesktopMonitor else { return }
         let waker = PollWaker()
         self.waker = waker
         pollingTask = Task { [weak self] in
@@ -322,13 +346,32 @@ final class HistoryStore {
                 let openCodeUpdate = await openCodeMonitor.poll()
                 newRecords += openCodeUpdate.metrics
                 newResponses += openCodeUpdate.responses
+                do {
+                    let update = try await kimiCodeMonitor.poll()
+                    newRecords += update.metrics
+                    newResponses += update.responses
+                } catch {
+                    failures.append("Kimi Code sessions")
+                }
+                do {
+                    let update = try await kimiDesktopMonitor.poll()
+                    newRecords += update.metrics
+                    newResponses += update.responses
+                } catch {
+                    failures.append("Kimi desktop sessions")
+                }
                 guard let self else { return }
                 guard !Task.isCancelled, self.isMonitoring else { return }
                 let claudeStatus = await claudeMonitor.status()
                 let grokStatus = await grokMonitor.status()
                 let antigravityStatus = await antigravityMonitor.status()
                 let openCodeStatus = await openCodeMonitor.status()
-                self.updateSourceStatus(claude: claudeStatus, grok: grokStatus, antigravity: antigravityStatus, openCode: openCodeStatus)
+                let kimiCodeStatus = await kimiCodeMonitor.status()
+                let kimiDesktopStatus = await kimiDesktopMonitor.status()
+                self.updateSourceStatus(
+                    claude: claudeStatus, grok: grokStatus, antigravity: antigravityStatus, openCode: openCodeStatus,
+                    kimiCode: kimiCodeStatus, kimiDesktop: kimiDesktopStatus
+                )
                 self.errorMessage = failures.isEmpty ? nil : "Could not read \(failures.joined(separator: ", ")). Check folder access and try again."
                 // A record is shared at most once, when it is both new to history and final: a primary
                 // turn arrives first without its delegated total, and its settled re-emission shares it.
@@ -339,7 +382,7 @@ final class HistoryStore {
                 for record in newRecords { self.history.upsert(record) }
                 // After the records are in the history, so a checkpoint never claims a file whose
                 // records are not.
-                await self.refreshCheckpoints(codex: monitor, claude: claudeMonitor)
+                await self.refreshCheckpoints(codex: monitor, claude: claudeMonitor, kimiCode: kimiCodeMonitor, kimiDesktop: kimiDesktopMonitor)
                 self.recordLiveResponses(newResponses)
                 if newRecords.isEmpty, failures.isEmpty {
                     self.errorMessage = nil
@@ -351,6 +394,8 @@ final class HistoryStore {
                     await grokMonitor.nextPollDeadline(now: polledAt),
                     await antigravityMonitor.nextPollDeadline(now: polledAt),
                     await openCodeMonitor.nextPollDeadline(now: polledAt),
+                    await kimiCodeMonitor.nextPollDeadline(now: polledAt),
+                    await kimiDesktopMonitor.nextPollDeadline(now: polledAt),
                     // A failed poll is retried at the normal cadence.
                     failures.isEmpty ? nil : polledAt
                 ].compactMap { $0 }
@@ -392,7 +437,8 @@ final class HistoryStore {
     private func syncWatchers() {
         guard let waker else { return }
         for kind in SourceFolderKind.allCases {
-            guard FileManager.default.fileExists(atPath: folder(for: kind).path) else {
+            let watched = watchedFolder(for: kind)
+            guard FileManager.default.fileExists(atPath: watched.path) else {
                 watchers.removeValue(forKey: kind)?.stop()
                 continue
             }
@@ -414,11 +460,26 @@ final class HistoryStore {
             case .openCode:
                 guard let openCodeMonitor else { continue }
                 notify = { await openCodeMonitor.noteChanges($0) }
+            case .kimiCode:
+                guard let kimiCodeMonitor else { continue }
+                notify = { await kimiCodeMonitor.noteChanges($0) }
+            case .kimiDesktop:
+                guard let kimiDesktopMonitor else { continue }
+                notify = { await kimiDesktopMonitor.noteChanges($0) }
             }
             // Only a change a monitor cares about wakes the poll.
-            watchers[kind] = SessionFolderWatcher(root: folder(for: kind)) { change in
+            watchers[kind] = SessionFolderWatcher(root: watched) { change in
                 Task { if await notify(change) { await waker.signal() } }
             }
+        }
+    }
+
+    /// What a change watcher observes for a tool: its folder, except that a Kimi Code home is large and only
+    /// its `sessions` folder holds logs.
+    private func watchedFolder(for kind: SourceFolderKind) -> URL {
+        switch kind {
+        case .kimiCode, .kimiDesktop: KimiSessionMonitor.watchedFolder(home: folder(for: kind))
+        default: folder(for: kind)
         }
     }
 
@@ -428,12 +489,22 @@ final class HistoryStore {
         if isMonitoring { saveHistory() }
     }
 
-    private func refreshCheckpoints(codex: CodexSessionMonitor, claude: ClaudeSessionMonitor) async {
+    private func refreshCheckpoints(
+        codex: CodexSessionMonitor, claude: ClaudeSessionMonitor, kimiCode: KimiSessionMonitor, kimiDesktop: KimiSessionMonitor
+    ) async {
         // Nil means "unknown, keep the previous set" (see the monitors' `checkpoints()`).
         if let fresh = await codex.checkpoints() { checkpoints.codex = fresh }
         if let fresh = await claude.checkpoints() {
             checkpoints.claudePrimary = fresh.primary
             checkpoints.claudeSubagents = fresh.subagents
+        }
+        if let fresh = await kimiCode.checkpoints() {
+            checkpoints.kimiCodeMain = fresh.main
+            checkpoints.kimiCodeSubagents = fresh.subagents
+        }
+        if let fresh = await kimiDesktop.checkpoints() {
+            checkpoints.kimiDesktopMain = fresh.main
+            checkpoints.kimiDesktopSubagents = fresh.subagents
         }
     }
 
@@ -453,6 +524,8 @@ final class HistoryStore {
         grokMonitor = nil
         antigravityMonitor = nil
         openCodeMonitor = nil
+        kimiCodeMonitor = nil
+        kimiDesktopMonitor = nil
         isMonitoring = false
         refreshLiveReadout()
         updateSourceStatus(claude: nil, grok: nil)
@@ -560,13 +633,16 @@ final class HistoryStore {
         claude: (rootAvailable: Bool, files: Int)?,
         grok: (rootAvailable: Bool, sessions: Int)?,
         antigravity: (rootAvailable: Bool, conversations: Int)? = nil,
-        openCode: (rootAvailable: Bool, sessions: Int)? = nil
+        openCode: (rootAvailable: Bool, sessions: Int)? = nil,
+        kimiCode: (rootAvailable: Bool, files: Int)? = nil,
+        kimiDesktop: (rootAvailable: Bool, files: Int)? = nil
     ) {
         let codexFolder = folder(for: .codex), claudeFolder = folder(for: .claudeCode), grokFolder = folder(for: .grokBuild)
         let antigravityFolder = folder(for: .antigravity)
         let antigravityOnDisk = AntigravityConversationMonitor.hasConversationFolder(root: antigravityFolder)
         let openCodeFolder = folder(for: .openCode)
         let openCodeOnDisk = OpenCodeMonitor.hasDatabase(root: openCodeFolder)
+        let kimiCodeFolder = folder(for: .kimiCode), kimiDesktopFolder = folder(for: .kimiDesktop)
         let codexAvailable = FileManager.default.fileExists(atPath: codexFolder.path)
         let codex = hasCustomFolder(for: .codex) ? "Custom Codex folder" : "Codex sessions"
         let claudeText = claude.map { $0.rootAvailable ? "Claude Code \($0.files) files" : "Claude Code folder not found" }
@@ -577,12 +653,18 @@ final class HistoryStore {
             ?? (antigravityOnDisk ? "Antigravity available" : "Antigravity folder not found")
         let openCodeText = openCode.map { $0.rootAvailable ? "OpenCode \($0.sessions) sessions" : "OpenCode folder not found" }
             ?? (openCodeOnDisk ? "OpenCode available" : "OpenCode folder not found")
-        sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText) · \(antigravityText) · \(openCodeText)"
+        let kimiCodeText = kimiCode.map { $0.rootAvailable ? "Kimi Code \($0.files) files" : "Kimi Code folder not found" }
+            ?? (FileManager.default.fileExists(atPath: kimiCodeFolder.path) ? "Kimi Code available" : "Kimi Code folder not found")
+        let kimiDesktopText = kimiDesktop.map { $0.rootAvailable ? "Kimi desktop \($0.files) files" : "Kimi desktop folder not found" }
+            ?? (FileManager.default.fileExists(atPath: kimiDesktopFolder.path) ? "Kimi desktop available" : "Kimi desktop folder not found")
+        sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText) · \(antigravityText) · \(openCodeText) · \(kimiCodeText) · \(kimiDesktopText)"
 
         let claudeFound = claude?.rootAvailable ?? FileManager.default.fileExists(atPath: claudeFolder.path)
         let grokFound = grok?.rootAvailable ?? FileManager.default.fileExists(atPath: grokFolder.path)
         let antigravityFound = antigravity?.rootAvailable ?? antigravityOnDisk
         let openCodeFound = openCode?.rootAvailable ?? openCodeOnDisk
+        let kimiCodeFound = kimiCode?.rootAvailable ?? FileManager.default.fileExists(atPath: kimiCodeFolder.path)
+        let kimiDesktopFound = kimiDesktop?.rootAvailable ?? FileManager.default.fileExists(atPath: kimiDesktopFolder.path)
         sourceStatuses = [
             SourceStatus(
                 client: TurnMetric.codexClient,
@@ -613,6 +695,18 @@ final class HistoryStore {
                 availability: openCodeFound ? .found : .notFound,
                 detail: Self.detail(custom: hasCustomFolder(for: .openCode), openCode.flatMap { $0.rootAvailable ? "\($0.sessions) sessions" : nil }),
                 path: Self.displayPath(openCodeFolder)
+            ),
+            SourceStatus(
+                client: SourceFolderKind.kimiCode.rawValue,
+                availability: kimiCodeFound ? .found : .notFound,
+                detail: Self.detail(custom: hasCustomFolder(for: .kimiCode), kimiCode.flatMap { $0.rootAvailable ? "\($0.files) session files" : nil }),
+                path: Self.displayPath(kimiCodeFolder)
+            ),
+            SourceStatus(
+                client: SourceFolderKind.kimiDesktop.rawValue,
+                availability: kimiDesktopFound ? .found : .notFound,
+                detail: Self.detail(custom: hasCustomFolder(for: .kimiDesktop), kimiDesktop.flatMap { $0.rootAvailable ? "\($0.files) session files" : nil }),
+                path: Self.displayPath(kimiDesktopFolder)
             )
         ]
     }

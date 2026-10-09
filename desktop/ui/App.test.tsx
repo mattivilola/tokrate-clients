@@ -87,6 +87,36 @@ describe("a render error in data views", () => {
   });
 });
 
+describe("Kimi Code", () => {
+  it("is listed as a source in settings", async () => {
+    const store = new AppStore(createPreviewBridge({ scenario: "default", view: "home" }), {});
+    await show(store);
+    await act(async () => store.openSettings());
+    const names = [...host.querySelectorAll(".source-name")].map((n) => n.textContent ?? "");
+    expect(names.some((name) => name.startsWith("Kimi Code"))).toBe(true);
+    expect(host.querySelector('[aria-label="Choose Kimi Code folder"]')).not.toBeNull();
+    expect(host.textContent).toContain("M Moonshot AI");
+    expect(host.textContent).toContain("KC Kimi Code");
+  });
+
+  it("shows the Moonshot AI badge, the tool and the provider route in the picker", async () => {
+    const store = new AppStore(createPreviewBridge({ scenario: "default", view: "home" }), {});
+    await show(store);
+    await act(async () => store.selectCohort("auto:kimi-code"));
+    const trigger = host.querySelector<HTMLButtonElement>(".picker-trigger")!;
+    expect(trigger.getAttribute("aria-label")).toContain("Auto in Kimi Code · k2d8-preview");
+    const badge = trigger.querySelector(".provider-badge");
+    expect(badge?.classList.contains("badge-moonshot")).toBe(true);
+    expect(badge?.getAttribute("aria-label")).toBe("Moonshot AI");
+    expect(badge?.textContent).toContain("M");
+    await act(async () => trigger.click());
+    const options = [...host.querySelectorAll('[role="option"]')].map((o) => o.textContent ?? "");
+    expect(options.some((text) => text.includes("Kimi Code"))).toBe(true);
+    const routes = [...host.querySelectorAll<HTMLOptionElement>(".picker-provider option")];
+    expect(routes.find((o) => o.value === "moonshot")?.textContent).toBe("Moonshot AI");
+  });
+});
+
 describe("ErrorBoundary", () => {
   function Throws(): never {
     throw new Error("boom");

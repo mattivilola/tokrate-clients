@@ -294,7 +294,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.20")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.21")
         XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         // The only response (200 tokens in 10 s from the task prompt) qualifies.
@@ -773,7 +773,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             XCTAssertNil(sample(client: "grok-build", provider: provider))
         }
         XCTAssertNil(sample(client: "claude-code", provider: "azure"))
-        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.20")
+        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.21")
     }
 
     // MARK: Response speed (response-v1)

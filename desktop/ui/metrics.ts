@@ -100,6 +100,7 @@ export const CODING_TOOLS: Record<SourceId, { title: string; chip: string }> = {
   "grok-build": { title: "Grok Build", chip: "GB" },
   antigravity: { title: "Antigravity", chip: "AG" },
   opencode: { title: "OpenCode", chip: "OC" },
+  "kimi-code": { title: "Kimi Code", chip: "KC" },
 };
 const codingTool = (id: string): (typeof CODING_TOOLS)[SourceId] | undefined =>
   CODING_TOOLS[id as SourceId];
@@ -131,6 +132,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   "google-vertex": "Google Vertex AI",
   xai: "xAI",
   google: "Google",
+  moonshot: "Moonshot AI",
 };
 /**
  * A raw provider id as OpenCode records it (a gateway, a vendor plan or a local server such as
@@ -187,6 +189,7 @@ export const measurementLabel = measurementTitle;
 const TURN_EXPLANATIONS: Record<string, string> = {
   antigravity: "Prompt through final answer of one agent run, including tools & waiting.",
   opencode: "Prompt through final answer, including tools & waiting.",
+  "kimi-code": "Prompt through final answer, including tools & waiting.",
 };
 /** Precise definition for the ⓘ explanation and group header tooltips. */
 export const measurementExplanation = (m: Metric) =>

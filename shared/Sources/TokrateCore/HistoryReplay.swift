@@ -50,6 +50,12 @@ public enum HistoryReplay {
         record("OpenCode", await drain(
             poll: { await openCode.poll(now: $0).metrics }, deadline: { await openCode.nextPollDeadline(now: $0) }
         ))
+        for (name, root, surface) in [("Kimi Code", folders.kimiCode, ToolSurface.cli), ("Kimi desktop", folders.kimiDesktop, .desktop)] {
+            let kimi = KimiSessionMonitor(root: root, surface: surface, liveSince: neverLive, scope: scope)
+            record(name, await drain(
+                poll: { try await kimi.poll(now: $0).metrics }, deadline: { await kimi.nextPollDeadline(now: $0) }
+            ))
+        }
         return Result(metrics: HistoryExport.deduplicated(collected), incompleteSources: incomplete)
     }
 

@@ -203,6 +203,8 @@ final class PreviewRenderTests: XCTestCase {
             grokSessionsFolder: grok,
             antigravityDataFolder: grok.deletingLastPathComponent().appendingPathComponent("gemini", isDirectory: true),
             openCodeDataFolder: grok.deletingLastPathComponent().appendingPathComponent("opencode", isDirectory: true),
+            kimiCodeFolder: grok.deletingLastPathComponent().appendingPathComponent("kimi-code", isDirectory: true),
+            kimiDesktopFolder: grok.deletingLastPathComponent().appendingPathComponent("kimi-desktop", isDirectory: true),
             sharingPreferences: preferences,
             defaults: defaults,
             initialRecords: records

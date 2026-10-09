@@ -46,7 +46,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(json["client"] as? String, "claude-code")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-turn-v1")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.20")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.21")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         let serialized = try XCTUnwrap(String(data: bytes, encoding: .utf8))
         XCTAssertFalse(serialized.contains("PRIVATE_PROMPT"))
@@ -527,7 +527,7 @@ final class MultiSourceParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(sample.responseDurationMs), 179_900, accuracy: 1)
         XCTAssertEqual(sample.responseCount, 9)
         XCTAssertEqual(sample.parserVersion, "grok-session-v2")
-        XCTAssertEqual(sample.appVersion, "0.1.20")
+        XCTAssertEqual(sample.appVersion, "0.1.21")
 
         let shorter = try grokMetric(
             try grokTurn(calls: [GrokCall(generating: 33.0), GrokCall(generating: 33.0), GrokCall(generating: 33.2, toolRun: nil)]),

@@ -39,6 +39,8 @@ const EMPTY_SNAPSHOT: Snapshot = {
     grokRoot: "",
     antigravityRoot: "",
     opencodeRoot: "",
+    kimiRoot: "",
+    kimiDesktopRoot: "",
   },
   consentPromptRequired: false,
   records: [],

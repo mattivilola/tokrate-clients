@@ -1,6 +1,7 @@
 use crate::claude_parser::ClaudeTranscriptParser;
 use crate::delegation::{extend_bounded, DelegationEvent};
-use crate::model::{ResponseMetric, TurnMetric};
+use crate::kimi::KimiWireParser;
+use crate::model::{ResponseMetric, ToolSurface, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,18 @@ impl IncrementalReader {
         )
     }
 
+    /// A replay reader of a Kimi Code wire log under a home of the given surface.
+    pub fn beginning_kimi(path: PathBuf, surface: Option<ToolSurface>) -> Self {
+        let parser = KimiWireParser::for_path(&path, surface);
+        Self::new(
+            path,
+            Startup::Beginning,
+            None,
+            Box::new(parser),
+            TailHeader::AnyTypedEvent,
+        )
+    }
+
     pub fn recent_tail(path: PathBuf) -> Self {
         Self::new(
             path,
@@ -146,6 +159,17 @@ impl IncrementalReader {
         )
     }
 
+    pub fn recent_tail_kimi(path: PathBuf, surface: Option<ToolSurface>) -> Self {
+        let parser = KimiWireParser::for_path(&path, surface);
+        Self::new(
+            path,
+            Startup::Header,
+            Some(DEFAULT_TAIL_BYTES),
+            Box::new(parser),
+            TailHeader::AnyTypedEvent,
+        )
+    }
+
     /// A live reader for a file a previous run consumed up to `offset` (a line boundary): it reads
     /// nothing until the file grows, then recovers the header and context as a recent tail does and
     /// continues from `offset`. A file that shrank or was replaced is read as a fresh recent tail.
@@ -155,6 +179,10 @@ impl IncrementalReader {
 
     pub fn resumed_claude(path: PathBuf, offset: u64) -> Self {
         Self::resume(Self::recent_tail_claude(path), offset)
+    }
+
+    pub fn resumed_kimi(path: PathBuf, offset: u64, surface: Option<ToolSurface>) -> Self {
+        Self::resume(Self::recent_tail_kimi(path, surface), offset)
     }
 
     fn resume(mut reader: Self, offset: u64) -> Self {
@@ -289,8 +317,8 @@ impl IncrementalReader {
     fn prepare_recent_tail(&mut self, current_size: u64, max_bytes: usize) -> io::Result<()> {
         if self.tail_header == TailHeader::AnyTypedEvent {
             if let Some(resume_at) = self.resume_at.take() {
-                // Claude records carry their own context, and a parser that has seen nothing takes
-                // the next prompt as the start of a turn. A header read would only open a turn
+                // Claude and Kimi Code records carry their own context, and a parser that has seen
+                // nothing takes the next prompt as the start of a turn. A header read would only open a turn
                 // from the file's first prompt that the resumed records could wrongly continue.
                 self.offset = resume_at;
                 self.startup = Startup::Alignment;

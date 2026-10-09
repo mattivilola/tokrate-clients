@@ -9,7 +9,14 @@ export const EFFICIENCY_MIN_TURNS = 20;
 /** Eligible turns a chart bucket needs; fewer leave a gap. */
 export const EFFICIENCY_MIN_BUCKET_TURNS = 3;
 
-const SUPPORTED_CLIENTS = ["codex", "claude-code", "grok-build", "antigravity", "opencode"];
+const SUPPORTED_CLIENTS = [
+  "codex",
+  "claude-code",
+  "grok-build",
+  "antigravity",
+  "opencode",
+  "kimi-code",
+];
 const isCount = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v) && v >= 0;
 

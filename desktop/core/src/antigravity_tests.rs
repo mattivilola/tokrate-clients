@@ -1431,6 +1431,8 @@ fn source_monitor_polls_antigravity_under_its_own_root_and_charges_a_bounded_bud
         empty("grok"),
         fixture.root(),
         empty("opencode"),
+        empty("kimi"),
+        empty("kimi-desktop"),
     );
     assert_eq!(monitor.root("antigravity"), Some(&fixture.root()));
     let turns = monitor.poll(now()).unwrap();
@@ -1648,6 +1650,8 @@ fn source_monitor_routes_changes_by_root_wakes_on_them_and_watches_only_the_conv
         empty("grok"),
         fixture.root(),
         empty("opencode"),
+        empty("kimi"),
+        empty("kimi-desktop"),
     );
     let at = now();
     assert_eq!(monitor.poll(at).unwrap().len(), 1);

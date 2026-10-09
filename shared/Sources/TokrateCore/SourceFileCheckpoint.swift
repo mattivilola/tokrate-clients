@@ -64,12 +64,28 @@ public struct SourceCheckpoints: Codable, Equatable, Sendable {
     public var codex: [SourceFileCheckpoint] = []
     public var claudePrimary: [SourceFileCheckpoint] = []
     public var claudeSubagents: [SourceFileCheckpoint] = []
+    public var kimiCodeMain: [SourceFileCheckpoint] = []
+    public var kimiCodeSubagents: [SourceFileCheckpoint] = []
+    public var kimiDesktopMain: [SourceFileCheckpoint] = []
+    public var kimiDesktopSubagents: [SourceFileCheckpoint] = []
 
     public init() {}
 
+    /// A history saved by an earlier build lacks the sources added since: they read as having none.
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        codex = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .codex) ?? []
+        claudePrimary = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .claudePrimary) ?? []
+        claudeSubagents = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .claudeSubagents) ?? []
+        kimiCodeMain = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .kimiCodeMain) ?? []
+        kimiCodeSubagents = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .kimiCodeSubagents) ?? []
+        kimiDesktopMain = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .kimiDesktopMain) ?? []
+        kimiDesktopSubagents = try values.decodeIfPresent([SourceFileCheckpoint].self, forKey: .kimiDesktopSubagents) ?? []
+    }
+
     /// The files described, whichever source they belong to.
     public var pathDigests: Set<String> {
-        Set((codex + claudePrimary + claudeSubagents).map(\.pathDigest))
+        Set((codex + claudePrimary + claudeSubagents + kimiCodeMain + kimiCodeSubagents + kimiDesktopMain + kimiDesktopSubagents).map(\.pathDigest))
     }
 
     /// Without what the history no longer holds records for (older than the retention) and within the
@@ -85,6 +101,10 @@ public struct SourceCheckpoints: Codable, Equatable, Sendable {
         result.codex = keep(codex)
         result.claudePrimary = keep(claudePrimary)
         result.claudeSubagents = keep(claudeSubagents)
+        result.kimiCodeMain = keep(kimiCodeMain)
+        result.kimiCodeSubagents = keep(kimiCodeSubagents)
+        result.kimiDesktopMain = keep(kimiDesktopMain)
+        result.kimiDesktopSubagents = keep(kimiDesktopSubagents)
         return result
     }
 }

@@ -14,9 +14,11 @@ final class ExportDestinationTests: XCTestCase {
             claudeCode: home.appendingPathComponent(".claude/projects", isDirectory: true),
             grokBuild: home.appendingPathComponent(".grok/sessions", isDirectory: true),
             antigravity: home.appendingPathComponent(".gemini", isDirectory: true),
-            openCode: home.appendingPathComponent(".local/share/opencode", isDirectory: true)
+            openCode: home.appendingPathComponent(".local/share/opencode", isDirectory: true),
+            kimiCode: home.appendingPathComponent(".kimi-code", isDirectory: true),
+            kimiDesktop: home.appendingPathComponent("Library/Application Support/kimi-desktop/home", isDirectory: true)
         )
-        for folder in [folders.codex, folders.claudeCode, folders.grokBuild, folders.antigravity, folders.openCode] {
+        for folder in [folders.codex, folders.claudeCode, folders.grokBuild, folders.antigravity, folders.openCode, folders.kimiCode, folders.kimiDesktop] {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("elsewhere"), withIntermediateDirectories: true)
@@ -37,7 +39,7 @@ final class ExportDestinationTests: XCTestCase {
     func testADestinationInsideAnySourceFolderIsRefusedAndNothingIsWritten() throws {
         let session = folders.codex.appendingPathComponent("rollout.jsonl")
         try Data("session".utf8).write(to: session)
-        for folder in [folders.codex, folders.claudeCode, folders.grokBuild, folders.antigravity, folders.openCode] {
+        for folder in [folders.codex, folders.claudeCode, folders.grokBuild, folders.antigravity, folders.openCode, folders.kimiCode, folders.kimiDesktop] {
             assertInsideSourceFolder(folder.appendingPathComponent("export.jsonl"))
             assertInsideSourceFolder(folder.appendingPathComponent("deeper/../export.jsonl"))
             assertInsideSourceFolder(folder)
@@ -64,7 +66,7 @@ final class ExportDestinationTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: home, withDestinationURL: root.appendingPathComponent("home"))
         let viaLink = SourceFolders(
             codex: home.appendingPathComponent(".codex/sessions"), claudeCode: folders.claudeCode, grokBuild: folders.grokBuild,
-            antigravity: folders.antigravity, openCode: folders.openCode
+            antigravity: folders.antigravity, openCode: folders.openCode, kimiCode: folders.kimiCode, kimiDesktop: folders.kimiDesktop
         )
         XCTAssertThrowsError(try ExportDestination.validated(folders.codex.appendingPathComponent("x.jsonl"), sourceFolders: viaLink))
     }
@@ -117,7 +119,8 @@ final class ExportDestinationTests: XCTestCase {
         XCTAssertTrue(String(describing: ExportDestination.Rejection.notRegularFile).contains("regular file"))
         let expected: [(URL, String)] = [
             (folders.codex, "Codex sessions"), (folders.claudeCode, "Claude Code projects"), (folders.grokBuild, "Grok Build sessions"),
-            (folders.antigravity, "Antigravity data"), (folders.openCode, "OpenCode data")
+            (folders.antigravity, "Antigravity data"), (folders.openCode, "OpenCode data"),
+            (folders.kimiCode, "Kimi Code data"), (folders.kimiDesktop, "Kimi desktop data")
         ]
         let homeComponents = [root.lastPathComponent, NSHomeDirectory()]
         for (folder, name) in expected {

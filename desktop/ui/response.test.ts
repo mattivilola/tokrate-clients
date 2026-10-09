@@ -78,6 +78,8 @@ describe("response speed helpers", () => {
     expect(autoSelection("antigravity")).toBe("auto:antigravity");
     expect(parseSelection("auto:opencode")).toEqual({ kind: "auto", tool: "opencode" });
     expect(autoSelection("opencode")).toBe("auto:opencode");
+    expect(parseSelection("auto:kimi-code")).toEqual({ kind: "auto", tool: "kimi-code" });
+    expect(autoSelection("kimi-code")).toBe("auto:kimi-code");
   });
 
   it("classifies the provider badge like the native tray icon", () => {
@@ -96,6 +98,17 @@ describe("response speed helpers", () => {
     expect(badgeFamily("claude-opus-4-6-thinking", "unknown")).toBe("anthropic");
     expect(BADGE_LETTER.google).toBe("G");
     expect(BADGE_LABEL.google).toBe("Google");
+    expect(badgeFamily("anything", "moonshot")).toBe("moonshot");
+    expect(badgeFamily("gpt-5.5", "moonshot")).toBe("moonshot");
+    expect(badgeFamily("kimi-k2", "openai")).toBe("openai");
+    expect(badgeFamily("k2d8-preview", null)).toBe("moonshot");
+    expect(badgeFamily("kimi-k2", "unknown")).toBe("moonshot");
+    expect(badgeFamily("Kimi-K2", null)).toBe("moonshot");
+    expect(badgeFamily("k-something", null)).toBe("unknown");
+    expect(badgeFamily("kilo-x", null)).toBe("unknown");
+    expect(badgeFamily("kimi", null)).toBe("unknown");
+    expect(BADGE_LETTER.moonshot).toBe("M");
+    expect(BADGE_LABEL.moonshot).toBe("Moonshot AI");
     expect(badgeFamily("mystery", "amazon-bedrock")).toBe("unknown");
     expect(badgeFamily(null, null)).toBe("unknown");
   });

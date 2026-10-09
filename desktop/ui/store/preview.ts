@@ -68,6 +68,7 @@ interface Series {
   parser: string;
   metricVersion: string;
   sourceKind: string;
+  surface?: Metric["surface"];
   everyMinutes: number;
   base: number;
   spread: number;
@@ -185,6 +186,24 @@ const SERIES: Series[] = [
     tokenFactor: 0.8,
     delegates: 0.1,
   },
+  {
+    model: "k2d8-preview",
+    client: "kimi-code",
+    effort: "high",
+    provider: "moonshot",
+    parser: "kimi-wire-v1",
+    metricVersion: "kimi-observed-turn-v1",
+    sourceKind: "primary",
+    surface: "desktop",
+    everyMinutes: 83,
+    base: 44,
+    spread: 16,
+    ttft: false,
+    offset: 19,
+    responseFactor: 1.9,
+    tokenFactor: 0.9,
+    delegates: 0.1,
+  },
 ];
 
 export function previewRecords(now: number): Metric[] {
@@ -223,6 +242,7 @@ export function previewRecords(now: number): Metric[] {
         parserVersion: s.parser,
         metricVersion: s.metricVersion,
         sourceKind: s.sourceKind,
+        ...(s.surface && { surface: s.surface }),
         clientVersion: "example",
         reasoningEffort: s.effort,
         outputTokens,
@@ -274,6 +294,7 @@ export function previewLive(now: number): LiveResponse[] {
     claude("live-4", 3.3, 880, 109),
     claude("live-5", 1.6, 520, 121),
     claude("live-6", 0.4, 760, 133),
+    response("live-7", 2.4, "k2d8-preview", "kimi-code", "moonshot", "primary", 280, 47),
   ];
 }
 
@@ -300,6 +321,7 @@ const DEFAULT_ROOTS: Record<SourceId, string> = {
   "grok-build": "~/.grok/sessions",
   antigravity: "~/.gemini",
   opencode: "~/.local/share/opencode",
+  "kimi-code": "~/.kimi-code",
 };
 
 function previewBoard(records: Metric[]): Board {
@@ -345,6 +367,8 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     grokRoot: "",
     antigravityRoot: "",
     opencodeRoot: "",
+    kimiRoot: "",
+    kimiDesktopRoot: "",
   };
   const custom: Partial<Record<SourceId, string>> = {};
   const sources = (): SourceStatus[] =>

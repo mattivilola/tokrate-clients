@@ -12,6 +12,7 @@ type Segment = ((f32, f32), (f32, f32));
 const TERRACOTTA: Rgb = [0xD9, 0x77, 0x57];
 const GREEN: Rgb = [0x10, 0xA3, 0x7F];
 const GOOGLE_BLUE: Rgb = [0x42, 0x85, 0xF4];
+const VIOLET: Rgb = [0x6C, 0x47, 0xFF];
 const GREY: Rgb = [0x8A, 0x9B, 0xA3];
 const WHITE: Rgb = [0xFF, 0xFF, 0xFF];
 const BLACK: Rgb = [0x00, 0x00, 0x00];
@@ -40,6 +41,12 @@ const LETTER_G: [Segment; 15] = [
     ((44.9, 37.4), (46.0, 32.0)),
     ((46.0, 32.0), (33.0, 32.0)),
 ];
+const LETTER_M: [Segment; 4] = [
+    ((21.0, 47.0), (21.0, 17.0)),
+    ((21.0, 17.0), (32.0, 33.0)),
+    ((32.0, 33.0), (43.0, 17.0)),
+    ((43.0, 17.0), (43.0, 47.0)),
+];
 const LETTER_O_RADIUS: f32 = 14.0;
 
 /// The packaged tray icon, shown whenever no provider badge applies.
@@ -65,6 +72,7 @@ fn letter_distance(letter: Option<char>, point: (f32, f32)) -> Option<f32> {
         'A' => Some(nearest(&LETTER_A)),
         'X' => Some(nearest(&LETTER_X)),
         'G' => Some(nearest(&LETTER_G)),
+        'M' => Some(nearest(&LETTER_M)),
         'O' => Some(((point.0 - CENTER).hypot(point.1 - CENTER) - LETTER_O_RADIUS).abs()),
         _ => None,
     }
@@ -77,6 +85,7 @@ fn colors(badge: ProviderBadge, dark: bool) -> (Rgb, Rgb) {
         ProviderBadge::Xai if dark => (WHITE, BLACK),
         ProviderBadge::Xai => (BLACK, WHITE),
         ProviderBadge::Google => (GOOGLE_BLUE, WHITE),
+        ProviderBadge::Moonshot => (VIOLET, WHITE),
         ProviderBadge::Unknown => (GREY, WHITE),
     }
 }
@@ -121,11 +130,12 @@ pub fn render_badge(badge: ProviderBadge, dark: bool) -> (Vec<u8>, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const ALL: [ProviderBadge; 5] = [
+    const ALL: [ProviderBadge; 6] = [
         ProviderBadge::Anthropic,
         ProviderBadge::OpenAi,
         ProviderBadge::Xai,
         ProviderBadge::Google,
+        ProviderBadge::Moonshot,
         ProviderBadge::Unknown,
     ];
     fn pixel(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -155,6 +165,7 @@ mod tests {
         let (o, ..) = render_badge(ProviderBadge::OpenAi, false);
         let (x, ..) = render_badge(ProviderBadge::Xai, false);
         let (g, ..) = render_badge(ProviderBadge::Google, false);
+        let (m, ..) = render_badge(ProviderBadge::Moonshot, false);
         let (unknown, ..) = render_badge(ProviderBadge::Unknown, false);
         // The centre of "A" and "O" is background; the centre of "X" is where its strokes cross.
         assert_eq!(pixel(&a, 32, 32), opaque(TERRACOTTA));
@@ -169,6 +180,12 @@ mod tests {
         assert_eq!(pixel(&g, 32, 46), opaque(WHITE));
         assert_eq!(pixel(&g, 40, 32), opaque(WHITE));
         assert_eq!(pixel(&g, 47, 20), opaque(GOOGLE_BLUE));
+        // "M" is violet with a white letter: the left stem, and the valley between its peaks.
+        assert_eq!(pixel(&m, 32, 6), opaque(VIOLET));
+        assert_eq!(pixel(&m, 21, 32), opaque(WHITE));
+        assert_eq!(pixel(&m, 43, 32), opaque(WHITE));
+        assert_eq!(pixel(&m, 32, 33), opaque(WHITE));
+        assert_eq!(pixel(&m, 32, 44), opaque(VIOLET));
         // Letter strokes: left leg of "A", crossbar of "A", ring of "O", diagonal of "X".
         assert_eq!(pixel(&a, 26, 32), opaque(WHITE));
         assert_eq!(pixel(&a, 32, 39), opaque(WHITE));

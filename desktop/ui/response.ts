@@ -31,8 +31,15 @@ export const sameModel = (
 
 // --- selection ---------------------------------------------------------------------------------
 
-export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode";
-const TOOLS: ToolId[] = ["codex", "claude-code", "grok-build", "antigravity", "opencode"];
+export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode" | "kimi-code";
+const TOOLS: ToolId[] = [
+  "codex",
+  "claude-code",
+  "grok-build",
+  "antigravity",
+  "opencode",
+  "kimi-code",
+];
 
 /** The persisted `selection` setting; `latest` (before 0.1.14) means `auto`. */
 export type SelectionMode =
@@ -138,7 +145,7 @@ export function liveValue(
 
 // --- provider badge ----------------------------------------------------------------------------
 
-export type BadgeFamily = "anthropic" | "openai" | "xai" | "google" | "unknown";
+export type BadgeFamily = "anthropic" | "openai" | "xai" | "google" | "moonshot" | "unknown";
 
 /** Explicit provider evidence wins; otherwise the model family decides (letters only, no logos). */
 export function badgeFamily(
@@ -148,6 +155,7 @@ export function badgeFamily(
   if (provider === "openai") return "openai";
   if (provider === "xai") return "xai";
   if (provider === "google") return "google";
+  if (provider === "moonshot") return "moonshot";
   if (provider === "anthropic") return "anthropic";
   const name = (model ?? "").toLowerCase();
   if (name.startsWith("claude-")) return "anthropic";
@@ -155,6 +163,7 @@ export function badgeFamily(
     return "openai";
   if (name.startsWith("grok-")) return "xai";
   if (name.startsWith("gemini-")) return "google";
+  if (name.startsWith("kimi-") || /^k\d/.test(name)) return "moonshot";
   return "unknown";
 }
 
@@ -163,6 +172,7 @@ export const BADGE_LETTER: Record<BadgeFamily, string> = {
   openai: "O",
   xai: "X",
   google: "G",
+  moonshot: "M",
   unknown: "",
 };
 export const BADGE_LABEL: Record<BadgeFamily, string> = {
@@ -170,6 +180,7 @@ export const BADGE_LABEL: Record<BadgeFamily, string> = {
   openai: "OpenAI",
   xai: "xAI",
   google: "Google",
+  moonshot: "Moonshot AI",
   unknown: "Unknown provider",
 };
 
@@ -192,7 +203,7 @@ export interface ModelSpeedRow {
   untimed: number;
 }
 
-const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity", "opencode"];
+const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code"];
 
 /**
  * One row per model and provider across coding tools and subagent/primary work. Response speed

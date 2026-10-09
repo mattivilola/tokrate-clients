@@ -30,6 +30,8 @@ final class HistoryStoreFolderTests: XCTestCase {
             grokSessionsFolder: root.appendingPathComponent("default-grok", isDirectory: true),
             antigravityDataFolder: root.appendingPathComponent("default-gemini", isDirectory: true),
             openCodeDataFolder: root.appendingPathComponent("default-opencode", isDirectory: true),
+            kimiCodeFolder: root.appendingPathComponent("default-kimi-code", isDirectory: true),
+            kimiDesktopFolder: root.appendingPathComponent("default-kimi-desktop", isDirectory: true),
             sharingPreferences: SharingPreferences(
                 session: SharingSession(identity: StubIdentity(), transport: StubTransport()),
                 store: StubPreferenceStore()
@@ -197,11 +199,66 @@ final class HistoryStoreFolderTests: XCTestCase {
         XCTAssertEqual(store.folder(for: .grokBuild).lastPathComponent, "default-grok")
         XCTAssertEqual(store.folder(for: .antigravity).lastPathComponent, "default-gemini")
         XCTAssertEqual(store.folder(for: .openCode).lastPathComponent, "default-opencode")
-        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build", "antigravity", "opencode"])
-        XCTAssertEqual(store.sourceStatuses.last?.title, "OpenCode")
+        XCTAssertEqual(store.folder(for: .kimiCode).lastPathComponent, "default-kimi-code")
+        XCTAssertEqual(store.folder(for: .kimiDesktop).lastPathComponent, "default-kimi-desktop")
+        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code", "kimi-desktop"])
+        XCTAssertEqual(store.sourceStatuses.map(\.title), ["Codex", "Claude Code", "Grok Build", "Antigravity", "OpenCode", "Kimi Code", "Kimi desktop"])
+        XCTAssertEqual(Set(store.sourceStatuses.map(\.id)).count, store.sourceStatuses.count, "every row has its own identity")
         XCTAssertEqual(store.sourceStatuses.last?.isFound, false)
         XCTAssertEqual(SourceFolderKind.antigravity.folderNoun, "data folder")
         XCTAssertEqual(SourceFolderKind.openCode.folderNoun, "data folder")
+        XCTAssertEqual(SourceFolderKind.kimiCode.folderNoun, "home folder")
+        XCTAssertEqual(SourceFolderKind.kimiDesktop.folderNoun, "home folder")
+        XCTAssertEqual(SourceFolderKind.kimiCode.title, "Kimi Code")
+        XCTAssertEqual(SourceFolderKind.kimiDesktop.title, "Kimi desktop")
+    }
+
+    func testTheTwoKimiFoldersAreChosenFoundAndPersistedIndependently() throws {
+        let store = makeStore()
+        let chosen = try makeFolder("custom-kimi-desktop")
+        func status(_ client: String) -> SourceStatus? { store.sourceStatuses.first { $0.client == client } }
+        XCTAssertEqual(status("kimi-desktop")?.isFound, false)
+        store.selectFolder(chosen, for: .kimiDesktop)
+        XCTAssertEqual(status("kimi-desktop")?.isFound, true)
+        XCTAssertEqual(status("kimi-desktop")?.detail, "Custom folder")
+        XCTAssertEqual(status("kimi-code")?.isFound, false, "the CLI home is a separate folder")
+        XCTAssertFalse(store.hasCustomFolder(for: .kimiCode))
+        XCTAssertEqual(defaults.string(forKey: "sourceFolderPath.kimi-desktop"), chosen.path)
+
+        let relaunched = makeStore()
+        XCTAssertTrue(relaunched.hasCustomFolder(for: .kimiDesktop))
+        XCTAssertEqual(relaunched.folder(for: .kimiDesktop).resolvingSymlinksInPath().path, chosen.path)
+        XCTAssertEqual(relaunched.folder(for: .kimiCode).lastPathComponent, "default-kimi-code")
+        relaunched.resetFolder(for: .kimiDesktop)
+        XCTAssertNil(defaults.string(forKey: "sourceFolderPath.kimi-desktop"))
+        XCTAssertEqual(relaunched.folder(for: .kimiDesktop).lastPathComponent, "default-kimi-desktop")
+    }
+
+    func testKimiCodeNamesBadgeAndBoardIdentity() {
+        XCTAssertEqual(ModelCohort.clientTitle("kimi-code"), "Kimi Code")
+        XCTAssertEqual(CodingTool.named("kimi-code").chip, "KC")
+        XCTAssertEqual(ModelCohort.providerTitle("moonshot"), "Moonshot AI")
+        XCTAssertEqual(ModelMaker(model: "k2d8-preview", provider: "moonshot"), .moonshot)
+        XCTAssertEqual(ModelMaker(model: "kimi-for-coding", provider: "unknown"), .moonshot, "by model prefix")
+        XCTAssertEqual(ModelMaker(model: "k2d8-preview", provider: "unknown"), .moonshot, "by the k<digit> model pattern")
+        XCTAssertEqual(ModelMaker(model: nil, provider: "moonshot"), .moonshot, "by provider")
+        XCTAssertEqual(ModelMaker(model: "claude-sonnet-4-5", provider: "moonshot"), .anthropic, "the model id decides first")
+        XCTAssertEqual(ModelMaker(model: "kestrel", provider: "unknown"), .unknown)
+        XCTAssertEqual(ModelMaker.moonshot.title, "Moonshot AI")
+        XCTAssertEqual(ModelMaker.moonshot.letter, "M")
+        XCTAssertEqual(ProviderBadgePalette.fill(.moonshot, isDark: false), 0x6C47FF)
+        XCTAssertEqual(ProviderBadgePalette.fill(.moonshot, isDark: true), 0x6C47FF)
+        XCTAssertEqual(ProviderBadgePalette.letterColor(.moonshot, isDark: true), 0xFFFFFF)
+        func cohort(_ provider: String) -> ModelCohort {
+            ModelCohort(model: "k2d8-preview", provider: provider, clientVersion: nil, reasoningEffort: "high", client: "kimi-code",
+                        parserVersion: "kimi-wire-v1", metricVersion: "kimi-observed-turn-v1")
+        }
+        XCTAssertEqual(cohort("moonshot").communityBoardID, #"["k2d8-preview","moonshot","unknown","kimi-wire-v1","kimi-observed-turn-v1","high","kimi-code"]"#)
+        XCTAssertNotNil(cohort("unknown").communityBoardID)
+        XCTAssertNil(cohort("openai").communityBoardID, "Kimi Code shares only moonshot and unknown")
+        XCTAssertEqual(cohort("moonshot").measurement, .turn)
+        XCTAssertEqual(cohort("moonshot").throughputExplanation, "Prompt through final answer, including tools & waiting")
+        XCTAssertEqual(ModelCohort(id: cohort("moonshot").id), cohort("moonshot"))
     }
 
     func testChosenFoldersPersistAcrossLaunchesForEveryTool() throws {

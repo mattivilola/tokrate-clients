@@ -248,6 +248,40 @@ it("names Antigravity turns like any other tool and keeps their cohort separate"
   expect(metricDefinition(antigravity)).not.toBe(metricDefinition(m()));
   expect(cohort(antigravity)).not.toBe(cohort(m()));
 });
+it("names Kimi Code turns as a whole-turn measurement under the Moonshot AI provider", async () => {
+  const {
+    toolLabel,
+    toolChip,
+    clientLabel,
+    providerLabel,
+    providerRoute,
+    measurementKind,
+    measurementChip,
+    measurementTitle,
+  } = await import("./metrics");
+  const kimi = m({
+    client: "kimi-code",
+    parserVersion: "kimi-wire-v1",
+    metricVersion: "kimi-observed-turn-v1",
+    sourceKind: "primary",
+    provider: "moonshot",
+    model: "k2d8-preview",
+    reasoningEffort: "high",
+    codexTTFTSeconds: null,
+  });
+  expect(toolLabel("kimi-code")).toBe("Kimi Code");
+  expect(toolChip("kimi-code")).toBe("KC");
+  expect(clientLabel(kimi)).toBe("Kimi Code");
+  expect(providerLabel("moonshot")).toBe("Moonshot AI");
+  expect(providerRoute("moonshot")).toBe("Moonshot AI route");
+  expect(measurementKind(kimi)).toBe("turn");
+  expect(measurementChip(kimi)).toBeNull();
+  expect(measurementTitle(kimi)).toBe("Turn speed");
+  expect(measurementLabel(kimi)).toBe("Turn speed");
+  expect(measurementExplanation(kimi)).toBe("Prompt through final answer, including tools & waiting.");
+  expect(metricDefinition(kimi)).not.toBe(metricDefinition(m()));
+  expect(cohort(kimi)).not.toBe(cohort(m()));
+});
 it("compares the latest turn with the cohort's own median only with enough turns", async () => {
   const { deltaVsMedian } = await import("./metrics");
   expect(deltaVsMedian(60, stats([50, 50]))).toBeNull();
@@ -311,6 +345,7 @@ it("labels providers, including the Claude Code cloud routes", async () => {
   expect(providerLabel("xai")).toBe("xAI");
   expect(providerLabel("google")).toBe("Google");
   expect(providerRoute("google")).toBe("Google route");
+  expect(providerLabel("moonshot")).toBe("Moonshot AI");
   for (const unknown of ["unknown", null, undefined, "", "Has Spaces", "<b>x</b>", "a".repeat(41)]) {
     expect(providerLabel(unknown)).toBe("Unknown route");
     expect(providerRoute(unknown)).toBe("Unknown route");

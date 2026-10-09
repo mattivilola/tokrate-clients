@@ -64,7 +64,8 @@ struct CodingTool: Equatable, Sendable {
         CodingTool(id: "claude-code", title: "Claude Code", chip: "CC"),
         CodingTool(id: "grok-build", title: "Grok Build", chip: "GB"),
         CodingTool(id: "antigravity", title: "Antigravity", chip: "AG"),
-        CodingTool(id: "opencode", title: "OpenCode", chip: "OC")
+        CodingTool(id: "opencode", title: "OpenCode", chip: "OC"),
+        CodingTool(id: "kimi-code", title: "Kimi Code", chip: "KC")
     ]
 
     /// The tool for a recorded client id; an unknown id is shown as recorded, chipped by its first two letters.
@@ -147,6 +148,7 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
         case "anthropic": "Anthropic"
         case "xai": "xAI"
         case "google": "Google"
+        case "moonshot": "Moonshot AI"
         case "amazon-bedrock": "Amazon Bedrock"
         case "google-vertex": "Google Vertex AI"
         case let other?: other
@@ -162,7 +164,7 @@ struct ModelCohort: Hashable, Identifiable, Sendable {
     /// Matches the public board's stable seven-dimension JSON identity.
     var communityBoardID: String? {
         guard let model, isSafe(model, pattern: "^[a-zA-Z0-9._-]{1,80}$"),
-              ["codex", "claude-code", "grok-build", "antigravity", "opencode"].contains(client),
+              ["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code"].contains(client),
               SharedSample.isAllowedProvider(provider, client: client),
               isSupportedTuple else { return nil }
         let version = clientVersion.flatMap { isSafe($0, pattern: "^[a-zA-Z0-9.+_-]{1,40}$") ? $0 : nil } ?? "unknown"

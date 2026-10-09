@@ -56,8 +56,9 @@ export function Mark({ size = 28 }: { size?: number }) {
 }
 
 /**
- * Filled circle with a white letter for the model's provider: A Anthropic, O OpenAI, X xAI, G Google, a
- * plain grey dot when unknown. Letters only, no logos. Hidden when "Show provider badge" is off.
+ * Filled circle with a white letter for the model's provider: A Anthropic, O OpenAI, X xAI, G Google,
+ * M Moonshot AI, a plain grey dot when unknown. Letters only, no logos. Hidden when "Show provider
+ * badge" is off.
  */
 export function ProviderBadge({
   model,

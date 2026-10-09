@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppStore, SHARING_NOTICE_VERSION } from "./store";
+import { createPreviewBridge } from "./preview";
 import type { Bridge, Snapshot } from "./types";
 
 const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
@@ -16,6 +17,8 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
     grokRoot: "",
     antigravityRoot: "",
     opencodeRoot: "",
+    kimiRoot: "",
+    kimiDesktopRoot: "",
   },
   consentPromptRequired: true,
   records: [],
@@ -231,6 +234,16 @@ describe("AppStore", () => {
 
   it("uses the consent notice version 4", () => {
     expect(SHARING_NOTICE_VERSION).toBe("2026-10-06-v4");
+  });
+
+  it("lists Kimi Code as one source and filters by the Moonshot AI provider", async () => {
+    const store = new AppStore(createPreviewBridge({ scenario: "default", view: "home" }));
+    await store.refresh();
+    const kimi = store.getState().snapshot.sources?.find((s) => s.id === "kimi-code");
+    expect(kimi).toMatchObject({ root: "~/.kimi-code", isDefault: true, found: true });
+    store.setToolFilter("kimi-code");
+    store.setProviderFilter("moonshot");
+    expect(store.getState().ui).toMatchObject({ toolFilter: "kimi-code", providerFilter: "moonshot" });
   });
 
   it("opens settings at an anchor once", () => {
