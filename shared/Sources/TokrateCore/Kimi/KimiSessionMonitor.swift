@@ -61,7 +61,8 @@ public actor KimiSessionMonitor {
         let finals = attributor.finalize(now: now, backlog: backlog)
         return MonitorUpdate(
             metrics: DelegationAttributor.merging(mainUpdate.metrics, finals: finals),
-            responses: mainUpdate.responses
+            responses: mainUpdate.responses,
+            outcomes: mainUpdate.outcomes + subagentUpdate.outcomes
         )
     }
 

@@ -243,8 +243,8 @@ final class SharingPreferencesTests: XCTestCase {
         XCTAssertEqual(requests, 0)
     }
 
-    func testNoticeVersionFourPausesOlderContributionUntilTheUserChooses() async {
-        XCTAssertEqual(SharingPreferences.currentNoticeVersion, 4)
+    func testNoticeVersionFivePausesOlderContributionUntilTheUserChooses() async {
+        XCTAssertEqual(SharingPreferences.currentNoticeVersion, 5)
         let identity = PreferenceIdentity(), transport = PreferenceTransport()
         let versionOne = SharingConsentRecord(noticeVersion: 1, decidedAt: now.addingTimeInterval(-100), action: .contribute)
         let preference = MemorySharingPreference(true, consentRecord: versionOne)
@@ -264,14 +264,14 @@ final class SharingPreferencesTests: XCTestCase {
         model.consentToShare(now: now, startPolling: false)
         XCTAssertTrue(model.isSharingRequested)
         XCTAssertFalse(model.isConsentDisclosureVisible)
-        XCTAssertEqual(preference.consentRecord?.noticeVersion, 4)
+        XCTAssertEqual(preference.consentRecord?.noticeVersion, 5)
         XCTAssertEqual(preference.consentRecord?.action, .contribute)
 
         // Choosing local use also records the current notice and stays off.
         let other = MemorySharingPreference(true, consentRecord: versionOne)
         let localOnly = SharingPreferences(session: SharingSession(identity: PreferenceIdentity(), transport: PreferenceTransport()), store: other)
         localOnly.chooseLocalOnly(now: now)
-        XCTAssertEqual(other.consentRecord?.noticeVersion, 4)
+        XCTAssertEqual(other.consentRecord?.noticeVersion, 5)
         XCTAssertEqual(other.sharingEnabled, false)
         XCTAssertFalse(localOnly.isSharingRequested)
     }

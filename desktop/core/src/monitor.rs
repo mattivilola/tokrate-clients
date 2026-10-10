@@ -4,9 +4,9 @@ use crate::delegation::{
 };
 use crate::kimi::{can_hold_wire, is_wire_path};
 use crate::model::{
-    ResponseMetric, ToolSurface, TurnMetric, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
-    CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION,
-    KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, RESPONSE_METRIC_VERSION,
+    push_outcomes, RequestOutcome, ResponseMetric, ToolSurface, TurnMetric, CLAUDE_METRIC_VERSION,
+    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_METRIC_VERSION,
+    CODEX_PARSER_VERSION, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, RESPONSE_METRIC_VERSION,
 };
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
 use chrono::{DateTime, Duration, Utc};
@@ -186,6 +186,8 @@ pub struct Monitor {
     next_archive_index: usize,
     bytes_read_last_poll: usize,
     live_responses: Vec<ResponseMetric>,
+    /// Request outcomes the live readers found, until drained.
+    request_outcomes: Vec<RequestOutcome>,
     /// Primary-turn and delegated-work events from every reader, until drained.
     delegation_events: Vec<DelegationEvent>,
     /// Codex rollouts hold primary sessions and their spawned children together, so this
@@ -254,6 +256,7 @@ impl Monitor {
             next_archive_index: 0,
             bytes_read_last_poll: 0,
             live_responses: Vec::new(),
+            request_outcomes: Vec::new(),
             delegation_events: Vec::new(),
             delegation: (format == JsonlFormat::Codex).then(DelegationTracker::new),
         }
@@ -289,6 +292,13 @@ impl Monitor {
                 .then_with(|| left.id.cmp(&right.id))
         });
         responses
+    }
+
+    /// Request outcomes (succeeded requests and provider-side failures) the live (recent-tail)
+    /// readers found since the last call. Memory only: they never become turn records. Duplicates
+    /// across readers are possible; every outcome carries a key to ignore them by.
+    pub fn take_request_outcomes(&mut self) -> Vec<RequestOutcome> {
+        std::mem::take(&mut self.request_outcomes)
     }
 
     pub fn poll(&mut self, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
@@ -354,6 +364,7 @@ impl Monitor {
                 file.live_started_at = Some(now);
             }
             self.live_responses.extend(file.live.take_responses());
+            push_outcomes(&mut self.request_outcomes, file.live.take_outcomes());
             extend_bounded(
                 &mut self.delegation_events,
                 file.live.take_delegation_events(),

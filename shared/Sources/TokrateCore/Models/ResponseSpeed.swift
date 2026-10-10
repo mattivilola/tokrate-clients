@@ -82,12 +82,16 @@ public struct LiveResponse: Hashable, Sendable, Identifiable {
 public struct MonitorUpdate: Sendable {
     public var metrics: [TurnMetric]
     public var responses: [LiveResponse]
+    /// Request outcomes that finished after the monitor started (see `RequestOutcome`). They go to the
+    /// sharing session only: never into the history, the dashboard or any export.
+    public var outcomes: [RequestOutcome] = []
     /// Delegated-work lifecycle events a source monitor collected; consumed by the monitor that owns
     /// the attribution and never part of what it returns.
     var delegation: [DelegationEvent] = []
 
-    public init(metrics: [TurnMetric] = [], responses: [LiveResponse] = []) {
+    public init(metrics: [TurnMetric] = [], responses: [LiveResponse] = [], outcomes: [RequestOutcome] = []) {
         self.metrics = metrics
         self.responses = responses
+        self.outcomes = outcomes
     }
 }

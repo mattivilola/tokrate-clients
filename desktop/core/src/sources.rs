@@ -1,8 +1,8 @@
 use crate::delegation::DelegationTracker;
 use crate::monitor::{SourceChange, SourceFileCheckpoint, MAX_FILES};
 use crate::{
-    AntigravityMonitor, GrokMonitor, Monitor, OpenCodeMonitor, ResponseMetric, ToolSurface,
-    TurnMetric,
+    AntigravityMonitor, GrokMonitor, Monitor, OpenCodeMonitor, RequestOutcome, ResponseMetric,
+    ToolSurface, TurnMetric,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -178,6 +178,12 @@ impl DelegatedSource {
         let mut responses = self.primary.take_live_responses();
         responses.extend(self.subagents.take_live_responses());
         responses
+    }
+
+    fn take_request_outcomes(&mut self) -> Vec<RequestOutcome> {
+        let mut outcomes = self.primary.take_request_outcomes();
+        outcomes.extend(self.subagents.take_request_outcomes());
+        outcomes
     }
 
     /// Hands the change to both monitors; true when either now has something pending.
@@ -422,6 +428,18 @@ impl SourceMonitor {
                 .then_with(|| left.id.cmp(&right.id))
         });
         responses
+    }
+
+    /// Request outcomes found since the last call, from the sources whose logs record why a
+    /// request failed (Claude Code, Codex, OpenCode and Kimi Code; Grok Build and Antigravity
+    /// contribute none). Memory only, in no particular order.
+    pub fn take_request_outcomes(&mut self) -> Vec<RequestOutcome> {
+        let mut outcomes = self.codex.take_request_outcomes();
+        outcomes.extend(self.claude.take_request_outcomes());
+        outcomes.extend(self.kimi_cli.take_request_outcomes());
+        outcomes.extend(self.kimi_desktop.take_request_outcomes());
+        outcomes.extend(self.opencode.take_request_outcomes());
+        outcomes
     }
 
     /// Reports what a folder watcher saw, to the monitors whose root holds the changed paths. A

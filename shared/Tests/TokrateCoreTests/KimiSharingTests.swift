@@ -19,7 +19,7 @@ final class KimiSharingTests: XCTestCase {
     func testAKimiCodeTurnIsSharedWithMoonshotAsItsProvider() throws {
         let sample = try XCTUnwrap(SharedSample(kimi()))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.21")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.22")
         XCTAssertEqual(object["client"] as? String, "kimi-code")
         XCTAssertEqual(object["parserVersion"] as? String, "kimi-wire-v1")
         XCTAssertEqual(object["metricVersion"] as? String, "kimi-observed-turn-v1")

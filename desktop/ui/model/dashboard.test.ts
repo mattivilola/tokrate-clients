@@ -16,6 +16,7 @@ import {
   DELEGATED_NOTICE,
   FIELD_DESCRIPTION,
   PROMPT_CACHE_NOTICE,
+  REQUEST_COUNT_NOTICE,
   SENT_FIELDS,
   SURFACE_NOTICE,
 } from "../components/SharingChoice";
@@ -548,6 +549,27 @@ describe("sharing notice", () => {
     expect(Object.keys(sample)).toContain("providerRegion");
     expect(Object.keys(sample)).toContain("sourceKind");
     expect(Object.keys(sample)).toContain("parserVersion");
+  });
+  it("states the request counts in the notice and shows one in the example", () => {
+    expect(REQUEST_COUNT_NOTICE).toBe(
+      "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages.",
+    );
+    const example = JSON.parse(sentExample);
+    expect(example.schemaVersion).toBe(2);
+    expect(Object.keys(example.requestCounts[0])).toEqual([
+      "appVersion",
+      "client",
+      "clientVersion",
+      "countId",
+      "metricVersion",
+      "model",
+      "observedAt",
+      "overloaded",
+      "parserVersion",
+      "provider",
+      "serverError",
+      "succeeded",
+    ]);
   });
   it("states the surface category in the notice", () => {
     expect(SURFACE_NOTICE).toBe(

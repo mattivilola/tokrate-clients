@@ -61,9 +61,17 @@ private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
 }
 
 public enum SampleRequest {
-    public static func signed(samples: [SharedSample], privateKey: Data, sentAt: Date, baseURL: URL) throws -> URLRequest {
-        let body = try SampleEnvelope(sentAt: sentAt, samples: samples).encoded()
-        guard !samples.isEmpty, samples.count <= 50, body.count <= 65_536 else { throw URLError(.dataLengthExceedsMaximum) }
+    /// The most items of each kind in one upload.
+    public static let maximumItems = 50
+    /// The largest signed body the server accepts.
+    public static let maximumBodyBytes = 65_536
+
+    public static func signed(
+        samples: [SharedSample], requestCounts: [SharedRequestCount] = [], privateKey: Data, sentAt: Date, baseURL: URL
+    ) throws -> URLRequest {
+        let body = try SampleEnvelope(sentAt: sentAt, samples: samples, requestCounts: requestCounts).encoded()
+        guard !(samples.isEmpty && requestCounts.isEmpty), samples.count <= maximumItems, requestCounts.count <= maximumItems,
+              body.count <= maximumBodyBytes else { throw URLError(.dataLengthExceedsMaximum) }
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKey)
         var request = URLRequest(url: baseURL.appendingPathComponent("samples"))
         request.httpMethod = "POST"

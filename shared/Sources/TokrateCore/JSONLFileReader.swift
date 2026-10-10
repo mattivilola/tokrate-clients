@@ -225,6 +225,9 @@ public struct JSONLFileReader: Sendable {
     /// Qualifying responses completed since the last call.
     public mutating func drainResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
 
+    /// Request outcomes since the last call.
+    mutating func drainOutcomes() -> [RequestOutcome] { parser.drainRequestOutcomes() }
+
     /// Delegated-work events since the last call.
     mutating func drainDelegation() -> [DelegationEvent] { parser.drainDelegationEvents() }
 

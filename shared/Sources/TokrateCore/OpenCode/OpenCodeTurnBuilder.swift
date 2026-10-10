@@ -79,6 +79,46 @@ struct OpenCodeTurnBuilder: Sendable {
         }
     }
 
+    /// The request outcomes of assistant messages of any session at or above the version floor that finished at or after
+    /// `milliseconds` (contract "Request outcomes (0.1.22)"), except those `excluding` names: a
+    /// completed message without an error is one succeeded request, counted whether or not it
+    /// qualifies as a response, and an `APIError` with status 529 or 500-599 is one failed request.
+    /// Every other error (aborted, auth, context overflow, 429, 4xx, unknown, no status) and every
+    /// message that is still running is no outcome. The message's own model and provider are used;
+    /// gateways, local servers and odd ids are dropped by `RequestOutcome`.
+    func requestOutcomes(completedSince milliseconds: Int64, excluding isPublished: (String) -> Bool) -> [(messageID: String, outcome: RequestOutcome)] {
+        messages.compactMap { message -> (messageID: String, outcome: RequestOutcome)? in
+            // Sessions the samples skip (a version below the floor, or none known) produce no outcomes either.
+            guard message.role == .assistant, !message.isMalformed, !isPublished(message.id),
+                  let session = sessions[message.sessionID], OpenCodeVersion.meetsFloor(session.version) else { return nil }
+            let kind: RequestOutcome.Kind
+            let finishedMs: Int64
+            if !message.failed {
+                guard let completed = message.completedMs else { return nil }
+                kind = .succeeded
+                finishedMs = completed
+            } else {
+                guard let status = message.apiErrorStatus, let finished = message.completedMs ?? message.createdMs else { return nil }
+                if status == 529 {
+                    kind = .overloaded
+                } else if (500...599).contains(status) {
+                    kind = .serverError
+                } else {
+                    return nil
+                }
+                finishedMs = finished
+            }
+            guard finishedMs >= milliseconds else { return nil }
+            guard let outcome = RequestOutcome(
+                dedupeKey: RequestOutcome.key(Self.client, message.sessionID, message.id),
+                occurredAt: Date(timeIntervalSince1970: Double(finishedMs) / 1_000), client: Self.client,
+                clientVersion: session.version, parserVersion: Self.parserVersion,
+                model: message.model, provider: message.provider, kind: kind
+            ) else { return nil }
+            return (message.id, outcome)
+        }
+    }
+
     // MARK: Rules
 
     private func evaluate(user: OpenCodeMessage, now: Date) -> OpenCodeTurnEvaluation? {

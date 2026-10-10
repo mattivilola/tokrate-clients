@@ -61,6 +61,8 @@ struct KimiWireParser: JSONLMetricParser {
         var isMeasured: Bool
         let startedAt: Int64
         var openStep: OpenStep?
+        /// The request of the latest step that ended in failure, which `turn.ended` reports on.
+        var failedRequest: Request?
         var outputTokens = 0
         var inputTokens = 0
         var cacheReadTokens = 0
@@ -80,6 +82,8 @@ struct KimiWireParser: JSONLMetricParser {
     private var latestPrompt: Prompt?
     private var completedResponses: [LiveResponse] = []
     private var delegationEvents: [DelegationEvent] = []
+    /// Request outcomes since the last drain (see `RequestOutcome`).
+    private var requestOutcomes: [RequestOutcome] = []
 
     init(sourceIdentity: String) { self.init(sourceIdentity: sourceIdentity, scope: .main, surface: .cli) }
 
@@ -94,6 +98,7 @@ struct KimiWireParser: JSONLMetricParser {
         dropTurn()
         latestPrompt = nil
         completedResponses.removeAll(keepingCapacity: true)
+        requestOutcomes.removeAll(keepingCapacity: true)
     }
 
     /// A tail can start inside a turn. Its first step is then not step 1, so that turn stays unmeasured
@@ -113,6 +118,11 @@ struct KimiWireParser: JSONLMetricParser {
         return delegationEvents
     }
 
+    mutating func drainRequestOutcomes() -> [RequestOutcome] {
+        defer { requestOutcomes.removeAll(keepingCapacity: true) }
+        return requestOutcomes
+    }
+
     mutating func consume(line: Data) -> TurnMetric? {
         guard line.count <= JSONLFileReader.maximumLineBytes,
               let root = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
@@ -130,6 +140,7 @@ struct KimiWireParser: JSONLMetricParser {
         case "turn.step.interrupted":
             discardTurn(withID: Self.turnIdentifier(root["turnId"]))
         case "turn.ended":
+            recordRequestFailure(root, at: time)
             if let reason = root["reason"] as? String, Self.failedTurnReasons.contains(reason) {
                 discardTurn(withID: Self.turnIdentifier(root["turnId"]))
             }
@@ -193,6 +204,50 @@ struct KimiWireParser: JSONLMetricParser {
         }
     }
 
+    // MARK: Request outcomes
+
+    /// A successful step with usage is one succeeded request, counted before the response-speed filter
+    /// and whether or not its turn is measured. Subagent steps are requests too.
+    private mutating func recordSuccess(turnID: String, step: Int, request: Request, at time: Int64) {
+        append(RequestOutcome(
+            dedupeKey: RequestOutcome.key(Self.client, sessionName, agentName, turnID, String(step), String(request.time)),
+            occurredAt: Self.date(time), client: Self.client, clientVersion: nil, parserVersion: Self.parserVersion,
+            model: request.model, provider: request.provider, kind: .succeeded
+        ))
+    }
+
+    /// `turn.ended` with an error is one failed request: its `error.code`, and for `provider.api_error`
+    /// the status in `error.details`, are the only fields read. `turn.step.interrupted`,
+    /// `agent.turn.ended` and `prompt.completed` describe the same failure and are never counted, nor
+    /// is a retry (`turn.step.retrying`). The model is the failed step's request; a turn that failed
+    /// before any request has none, and the failure is dropped.
+    private mutating func recordRequestFailure(_ root: [String: Any], at time: Int64) {
+        guard let error = root["error"] as? [String: Any], let code = error["code"] as? String,
+              let turnID = Self.turnIdentifier(root["turnId"]), let state = turn, state.id == turnID,
+              let request = state.openStep?.request ?? state.failedRequest else { return }
+        let kind: RequestOutcome.Kind
+        switch code {
+        case "provider.overloaded":
+            kind = .overloaded
+        case "provider.api_error":
+            guard let status = Self.integer((error["details"] as? [String: Any])?["statusCode"]),
+                  (500...599).contains(status) else { return }
+            // HTTP 529 is overloaded in every tool, whichever code the tool filed it under.
+            kind = status == 529 ? .overloaded : .serverError
+        default:
+            return
+        }
+        append(RequestOutcome(
+            dedupeKey: RequestOutcome.key(Self.client, sessionName, agentName, turnID, "failure", String(time)),
+            occurredAt: Self.date(time), client: Self.client, clientVersion: nil, parserVersion: Self.parserVersion,
+            model: request.model, provider: request.provider, kind: kind
+        ))
+    }
+
+    private mutating func append(_ outcome: RequestOutcome?) {
+        if let outcome { requestOutcomes.append(outcome) }
+    }
+
     // MARK: Steps and turns
 
     /// A step of another turn ends the one before it: a turn that has not completed is dropped (the
@@ -203,6 +258,7 @@ struct KimiWireParser: JSONLMetricParser {
             // An open step of this turn never ended.
             if turn?.openStep != nil { discardTurn() }
             turn?.openStep = OpenStep(number: step)
+            turn?.failedRequest = nil
         } else {
             startTurn(turnID: turnID, step: step)
         }
@@ -228,10 +284,13 @@ struct KimiWireParser: JSONLMetricParser {
         guard finishReason == "tool_use" || finishReason == "end_turn", let usage = Self.usage(event["usage"]),
               let request = open.request
         else {
-            // A failed step, or one without the request that answered it, cannot be measured.
+            // A failed step, or one without the request that answered it, cannot be measured. Its request
+            // stays, because `turn.ended` names the failure but not the model.
+            turn?.failedRequest = open.request
             discardTurn()
             return nil
         }
+        recordSuccess(turnID: turnID, step: step, request: request, at: time)
         let duration = Double(time - request.time) / 1_000
         let isResponse = ResponseSpeed.qualifies(outputTokens: usage.output, durationSeconds: duration)
         if isResponse, scope == .main {

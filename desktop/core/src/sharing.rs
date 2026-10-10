@@ -1,10 +1,11 @@
 use crate::model::{
-    bedrock_region_or_unknown, consistent_prompt_cache, ReportedReasoningEffort, ToolSurface,
-    TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
-    CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
-    CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
-    GROK_PARSER_VERSION, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, OPENCODE_CLIENT,
-    OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
+    bedrock_region_or_unknown, consistent_prompt_cache, ReportedReasoningEffort, RequestOutcome,
+    RequestOutcomeKind, ToolSurface, TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION,
+    ANTIGRAVITY_PARSER_VERSION, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION,
+    CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION,
+    GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION, KIMI_CLIENT, KIMI_METRIC_VERSION,
+    KIMI_PARSER_VERSION, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
+    REQUEST_OUTCOME_METRIC_VERSION,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -17,9 +18,18 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.21";
+pub const APP_VERSION: &str = "0.1.22";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
+/// The request-count entries wait in a queue of their own with the same cap.
+pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
 const MAX_BATCH_SAMPLES: usize = 50;
+const MAX_BATCH_REQUEST_COUNTS: usize = 50;
+/// A request-count entry carries at most this many of each count; a larger total is split.
+const MAX_COUNT_PER_ENTRY: u64 = 10_000;
+/// The envelope version of an upload (contract "Request outcomes (0.1.22)").
+const ENVELOPE_SCHEMA_VERSION: u8 = 2;
+/// Outcomes already counted are remembered up to this many, oldest first out.
+const MAX_SEEN_OUTCOMES: usize = 50_000;
 const MAX_REQUEST_BYTES: usize = 65_536;
 const QUEUE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 /// Samples are timed to this period (`observedAt` is floored to it), and uploads leave at the
@@ -256,18 +266,24 @@ pub struct SignedRequest {
     pub signature: String,
 }
 
-/// Builds the exact JSON bytes that the host sends and signs them with the installation key.
+/// Builds the exact JSON bytes that the host sends and signs them with the installation key. Both
+/// lists are always in the body (an empty array when there is nothing); at least one item is
+/// needed in all.
 pub fn signed_request(
     samples: &[SharedSample],
+    request_counts: &[SharedRequestCount],
     private_key: &[u8; 32],
     now: DateTime<Utc>,
 ) -> Result<SignedRequest, CoreError> {
-    if samples.is_empty() || samples.len() > MAX_BATCH_SAMPLES {
+    if samples.len() > MAX_BATCH_SAMPLES
+        || request_counts.len() > MAX_BATCH_REQUEST_COUNTS
+        || samples.is_empty() && request_counts.is_empty()
+    {
         return Err(CoreError::InvalidRequest(
-            "a request must contain between 1 and 50 samples",
+            "a request must contain up to 50 samples and up to 50 request counts, and at least one item",
         ));
     }
-    let body = serde_json::to_vec(&envelope_value(samples, now)?)?;
+    let body = serde_json::to_vec(&envelope_value(samples, request_counts, now)?)?;
     if body.len() > MAX_REQUEST_BYTES {
         return Err(CoreError::InvalidRequest(
             "the signed request exceeds 65,536 bytes",
@@ -284,11 +300,16 @@ pub fn signed_request(
 
 /// The envelope as the JSON value that is sent: the one place it is built, so the body of a
 /// request and the consent example cannot differ.
-fn envelope_value(samples: &[SharedSample], now: DateTime<Utc>) -> Result<Value, CoreError> {
+fn envelope_value(
+    samples: &[SharedSample],
+    request_counts: &[SharedRequestCount],
+    now: DateTime<Utc>,
+) -> Result<Value, CoreError> {
     Ok(serde_json::to_value(SharedSampleEnvelope {
-        schema_version: 1,
+        schema_version: ENVELOPE_SCHEMA_VERSION,
         sent_at: format_date(now),
         samples: samples.to_vec(),
+        request_counts: request_counts.to_vec(),
     })?)
 }
 
@@ -322,8 +343,32 @@ pub fn example_request_json() -> String {
         Uuid::parse_str("00000000-0000-4000-8000-000000000000").expect("a valid example id"),
     )
     .expect("the example metric is shareable");
+    // One request-count entry, built by the same validation and splitting as a real one.
+    let outcome = RequestOutcome::new(
+        "example-local-key-never-uploaded".to_owned(),
+        DateTime::<Utc>::from_timestamp(1_767_268_980, 0).expect("a valid example time"),
+        CODEX_CLIENT,
+        Some("1.2.3".to_owned()),
+        CODEX_PARSER_VERSION,
+        Some("example-model"),
+        Some("openai"),
+        RequestOutcomeKind::Succeeded,
+    )
+    .expect("the example outcome is known");
+    let counts = OpenCount {
+        succeeded: 41,
+        overloaded: 3,
+        server_error: 0,
+        ..OpenCount::default()
+    };
+    let request_counts = CountKey::of(&outcome)
+        .expect("the example outcome is shareable")
+        .entries(&counts, || {
+            Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("a valid example id")
+        });
     let sent_at = DateTime::<Utc>::from_timestamp(1_767_269_100, 0).expect("a valid example time");
-    let envelope = envelope_value(&[sample], sent_at).expect("the example envelope encodes");
+    let envelope =
+        envelope_value(&[sample], &request_counts, sent_at).expect("the example envelope encodes");
     serde_json::to_string_pretty(&envelope).expect("a JSON value prints")
 }
 
@@ -338,11 +383,19 @@ type JitterSource = Box<dyn FnMut() -> Duration + Send>;
 /// delay. So every normally settled turn of a period leaves in the same slot, whenever inside
 /// the period it finished, and a turn queued long after it ended (one waiting for its subagent
 /// work to settle) leaves at a time that says nothing about when it ended.
+///
+/// Request outcomes are counted per five-minute bucket and enter their own queue of request-count
+/// entries when the bucket is one full period over; see [`SharingQueue::enqueue_outcomes`].
 pub struct SharingQueue {
     enabled_since: Option<DateTime<Utc>>,
     pending: VecDeque<PendingSample>,
     seen_local_ids: HashSet<String>,
-    /// The delay drawn for each slot that has queued samples, by the slot's boundary.
+    /// Outcome counts by bucket and model that have not been queued yet.
+    open_counts: HashMap<CountKey, OpenCount>,
+    pending_counts: VecDeque<PendingCount>,
+    seen_outcomes: HashSet<String>,
+    seen_outcome_order: VecDeque<String>,
+    /// The delay drawn for each slot that has queued samples or entries, by the slot's boundary.
     jitters: HashMap<i64, Duration>,
     jitter_source: JitterSource,
     /// The most samples the queue ever held at once.
@@ -377,6 +430,10 @@ impl SharingQueue {
             enabled_since: None,
             pending: VecDeque::new(),
             seen_local_ids: HashSet::new(),
+            open_counts: HashMap::new(),
+            pending_counts: VecDeque::new(),
+            seen_outcomes: HashSet::new(),
+            seen_outcome_order: VecDeque::new(),
             jitters: HashMap::new(),
             #[cfg(test)]
             peak_len: 0,
@@ -395,11 +452,15 @@ impl SharingQueue {
         }
     }
 
-    /// Disabling clears pending and deduplication state immediately.
+    /// Disabling clears pending and deduplication state immediately, request counts included.
     pub fn disable(&mut self) {
         self.enabled_since = None;
         self.pending.clear();
         self.seen_local_ids.clear();
+        self.open_counts.clear();
+        self.pending_counts.clear();
+        self.seen_outcomes.clear();
+        self.seen_outcome_order.clear();
         self.jitters.clear();
     }
 
@@ -453,15 +514,19 @@ impl SharingQueue {
         }
     }
 
-    /// When a pending sample may leave: its slot's boundary plus the delay drawn for the slot.
-    fn eligible_at(&self, pending: &PendingSample) -> DateTime<Utc> {
+    /// When something queued for `slot` may leave: the slot's boundary plus the delay drawn for it.
+    fn slot_eligible_at(&self, slot: i64) -> DateTime<Utc> {
         let jitter = self
             .jitters
-            .get(&pending.slot)
+            .get(&slot)
             .copied()
             .unwrap_or_else(Duration::zero);
-        DateTime::<Utc>::from_timestamp(pending.slot, 0).unwrap_or(DateTime::<Utc>::MAX_UTC)
-            + jitter
+        DateTime::<Utc>::from_timestamp(slot, 0).unwrap_or(DateTime::<Utc>::MAX_UTC) + jitter
+    }
+
+    /// When a pending sample may leave.
+    fn eligible_at(&self, pending: &PendingSample) -> DateTime<Utc> {
+        self.slot_eligible_at(pending.slot)
     }
 
     /// Returns up to 50 pending samples whose slot has come and whose delay has passed, in the
@@ -484,14 +549,154 @@ impl SharingQueue {
             .retain(|pending| !acknowledged.contains(&pending.sample.sample_id));
     }
 
-    /// The earliest moment after `now` at which a waiting sample becomes eligible; `None` when
-    /// none is waiting. Samples that are eligible already are not counted: a batch takes them.
-    pub fn next_eligible_after(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        self.pending
+    /// What one upload carries at `now`: the eligible samples (up to 50) and the eligible
+    /// request-count entries (up to 50), together, in the order they were queued, and no more than
+    /// fit in 65,536 bytes (entries make room for samples first). Counts of buckets that came
+    /// due are queued first. Nothing leaves before its slot's delay is over; unacknowledged items
+    /// keep their UUIDs for retries.
+    pub fn upload_batch(&mut self, now: DateTime<Utc>) -> UploadBatch {
+        self.settle(now);
+        let mut batch = UploadBatch {
+            samples: self.batch(now),
+            request_counts: self
+                .pending_counts
+                .iter()
+                .filter(|pending| self.slot_eligible_at(pending.slot) <= now)
+                .take(MAX_BATCH_REQUEST_COUNTS)
+                .map(|pending| pending.entry.clone())
+                .collect(),
+        };
+        batch.fit_request_size(now);
+        batch
+    }
+
+    /// Removes what the server accepted or refused for good.
+    pub fn ack_batch(&mut self, batch: &UploadBatch) {
+        let sample_ids: Vec<Uuid> = batch
+            .samples
             .iter()
-            .map(|pending| self.eligible_at(pending))
+            .map(|sample| sample.sample_id)
+            .collect();
+        self.ack(&sample_ids);
+        let acknowledged: HashSet<Uuid> = batch
+            .request_counts
+            .iter()
+            .map(|entry| entry.count_id)
+            .collect();
+        self.pending_counts
+            .retain(|pending| !acknowledged.contains(&pending.entry.count_id));
+    }
+
+    /// The earliest moment after `now` at which something waiting becomes eligible, or a bucket of
+    /// request outcomes comes due; `None` when nothing waits. Items eligible already are not
+    /// counted: a batch takes them.
+    pub fn next_eligible_after(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let samples = self.pending.iter().map(|pending| self.eligible_at(pending));
+        let entries = self
+            .pending_counts
+            .iter()
+            .map(|pending| self.slot_eligible_at(pending.slot));
+        let buckets = self
+            .open_counts
+            .values()
+            .filter_map(|open| DateTime::<Utc>::from_timestamp(open.flush_at, 0));
+        samples
+            .chain(entries)
+            .chain(buckets)
             .filter(|at| *at > now)
             .min()
+    }
+
+    /// Counts request outcomes. An outcome is taken only while sharing is on, when it happened at
+    /// or after the start of the current consent, not in the future and not over 24 hours ago,
+    /// and when its model, version and provider are shareable for its client; the same outcome
+    /// (by its key) is counted once however often it is read. Outcomes are summed per
+    /// (five-minute bucket of their time, client, client version, parser version, model,
+    /// provider). A bucket's sums become one queued entry one full period after the bucket
+    /// started; an outcome for a bucket that already did starts a new entry, queued at the next
+    /// period boundary.
+    pub fn enqueue_outcomes(&mut self, outcomes: &[RequestOutcome], now: DateTime<Utc>) {
+        let Some(enabled_since) = self.enabled_since else {
+            return;
+        };
+        self.settle(now);
+        let now_seconds = now.timestamp() + i64::from(now.timestamp_subsec_nanos() > 0);
+        for outcome in outcomes {
+            if outcome.occurred_at < enabled_since
+                || outcome.occurred_at > now
+                || now.timestamp() - outcome.occurred_at.timestamp() > QUEUE_RETENTION_SECONDS
+                || self.seen_outcomes.contains(&outcome.dedupe_key)
+            {
+                continue;
+            }
+            let Some(key) = CountKey::of(outcome) else {
+                continue;
+            };
+            self.remember_outcome(outcome.dedupe_key.clone());
+            // A bucket is queued one full period after it ended (its start plus two periods), or at
+            // the next period boundary when that has passed already.
+            let due = key.bucket + 2 * OBSERVED_PERIOD_SECONDS;
+            let open = self.open_counts.entry(key).or_insert_with(|| OpenCount {
+                flush_at: due.max(next_boundary(now_seconds)),
+                ..OpenCount::default()
+            });
+            match outcome.kind {
+                RequestOutcomeKind::Succeeded => open.succeeded += 1,
+                RequestOutcomeKind::Overloaded => open.overloaded += 1,
+                RequestOutcomeKind::ServerError => open.server_error += 1,
+            }
+        }
+    }
+
+    fn remember_outcome(&mut self, key: String) {
+        if self.seen_outcomes.insert(key.clone()) {
+            self.seen_outcome_order.push_back(key);
+            while self.seen_outcome_order.len() > MAX_SEEN_OUTCOMES {
+                if let Some(oldest) = self.seen_outcome_order.pop_front() {
+                    self.seen_outcomes.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// Queues the entries of every bucket that came due by `now`.
+    fn settle(&mut self, now: DateTime<Utc>) {
+        if self.open_counts.is_empty() {
+            return;
+        }
+        let mut due: Vec<CountKey> = self
+            .open_counts
+            .iter()
+            .filter(|(_, open)| open.flush_at <= now.timestamp())
+            .map(|(key, _)| key.clone())
+            .collect();
+        due.sort();
+        for key in due {
+            let Some(open) = self.open_counts.remove(&key) else {
+                continue;
+            };
+            if now.timestamp() - key.bucket > QUEUE_RETENTION_SECONDS {
+                continue;
+            }
+            // The slot comes from the due time, not from when the host happened to look: the
+            // group shares the slot, and so the delay, of the samples of its bucket.
+            let slot = open.flush_at;
+            let source = &mut self.jitter_source;
+            self.jitters.entry(slot).or_insert_with(|| source());
+            for entry in key.entries(&open, Uuid::new_v4) {
+                // The oldest go as the newest arrive, like the samples.
+                if self.pending_counts.len() >= MAX_PENDING_REQUEST_COUNTS {
+                    self.pending_counts.pop_front();
+                }
+                self.pending_counts.push_back(PendingCount { entry, slot });
+            }
+        }
+        self.forget_unused_jitters();
+    }
+
+    /// Request-count entries waiting to be uploaded.
+    pub fn request_count_len(&self) -> usize {
+        self.pending_counts.len()
     }
 
     pub fn len(&self) -> usize {
@@ -509,18 +714,188 @@ impl SharingQueue {
     }
 
     fn prune(&mut self, now: DateTime<Utc>) {
-        self.pending.retain(|pending| {
-            let Ok(observed_at) = DateTime::parse_from_rfc3339(&pending.sample.observed_at) else {
-                return false;
-            };
-            now.timestamp() - observed_at.timestamp() <= QUEUE_RETENTION_SECONDS
-        });
+        let fresh = |observed_at: &str| {
+            DateTime::parse_from_rfc3339(observed_at).is_ok_and(|observed_at| {
+                now.timestamp() - observed_at.timestamp() <= QUEUE_RETENTION_SECONDS
+            })
+        };
+        self.pending
+            .retain(|pending| fresh(&pending.sample.observed_at));
+        self.pending_counts
+            .retain(|pending| fresh(&pending.entry.observed_at));
         self.forget_unused_jitters();
     }
 
     fn forget_unused_jitters(&mut self) {
-        let slots: HashSet<i64> = self.pending.iter().map(|pending| pending.slot).collect();
+        let slots: HashSet<i64> = self
+            .pending
+            .iter()
+            .map(|pending| pending.slot)
+            .chain(self.pending_counts.iter().map(|pending| pending.slot))
+            .collect();
         self.jitters.retain(|slot, _| slots.contains(slot));
+    }
+}
+
+/// One request-count entry waiting for its upload slot.
+struct PendingCount {
+    entry: SharedRequestCount,
+    slot: i64,
+}
+
+/// What the entries of one (bucket, client, version, model, provider) have counted so far, and
+/// when they are queued.
+#[derive(Default)]
+struct OpenCount {
+    /// Seconds since the epoch at which the entry is queued.
+    flush_at: i64,
+    succeeded: u64,
+    overloaded: u64,
+    server_error: u64,
+}
+
+/// What request counts are summed by. Everything in it is already validated and shareable.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct CountKey {
+    /// Start of the five-minute bucket, in seconds since the epoch.
+    bucket: i64,
+    client: &'static str,
+    client_version: String,
+    parser_version: &'static str,
+    model: String,
+    provider: &'static str,
+}
+
+impl CountKey {
+    /// The key of an outcome, or `None` when it may not be shared: an unknown client or parser
+    /// version, a model that does not match the public pattern (an `unknown` model is never
+    /// sent), or a provider the client's allowlist lacks.
+    fn of(outcome: &RequestOutcome) -> Option<Self> {
+        let (client, parser_version) = match (outcome.client, outcome.parser_version) {
+            (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION) => (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION),
+            (CODEX_CLIENT, CODEX_PARSER_VERSION) => (CODEX_CLIENT, CODEX_PARSER_VERSION),
+            (OPENCODE_CLIENT, OPENCODE_PARSER_VERSION) => {
+                (OPENCODE_CLIENT, OPENCODE_PARSER_VERSION)
+            }
+            (KIMI_CLIENT, KIMI_PARSER_VERSION) => (KIMI_CLIENT, KIMI_PARSER_VERSION),
+            _ => return None,
+        };
+        let model = Some(outcome.model.as_str())
+            .filter(|model| *model != "unknown" && safe_identifier(model, 80, false))?;
+        Some(Self {
+            bucket: outcome
+                .occurred_at
+                .timestamp()
+                .div_euclid(OBSERVED_PERIOD_SECONDS)
+                * OBSERVED_PERIOD_SECONDS,
+            client,
+            client_version: outcome
+                .client_version
+                .as_deref()
+                .filter(|value| safe_identifier(value, 40, true))
+                .unwrap_or("unknown")
+                .to_owned(),
+            parser_version,
+            model: model.to_owned(),
+            provider: request_count_provider(client, &outcome.provider)?,
+        })
+    }
+
+    /// The entries these counts make: one, or more when a count passes 10,000, each with a fresh
+    /// id from `new_id` and a sum of at least one. Nothing for counts that are all zero.
+    fn entries(
+        &self,
+        counts: &OpenCount,
+        mut new_id: impl FnMut() -> Uuid,
+    ) -> Vec<SharedRequestCount> {
+        let observed_at = DateTime::<Utc>::from_timestamp(self.bucket, 0)
+            .map(format_date)
+            .unwrap_or_default();
+        let mut remaining = [counts.succeeded, counts.overloaded, counts.server_error];
+        let mut entries = Vec::new();
+        while remaining.iter().any(|count| *count > 0) {
+            let take = remaining.map(|count| count.min(MAX_COUNT_PER_ENTRY));
+            for (left, taken) in remaining.iter_mut().zip(take) {
+                *left -= taken;
+            }
+            entries.push(SharedRequestCount {
+                count_id: new_id(),
+                observed_at: observed_at.clone(),
+                client: self.client.to_owned(),
+                client_version: self.client_version.clone(),
+                app_version: APP_VERSION,
+                parser_version: self.parser_version.to_owned(),
+                metric_version: REQUEST_OUTCOME_METRIC_VERSION.to_owned(),
+                model: self.model.clone(),
+                provider: self.provider.to_owned(),
+                succeeded: take[0] as u32,
+                overloaded: take[1] as u32,
+                server_error: take[2] as u32,
+            });
+        }
+        entries
+    }
+}
+
+/// The providers a client's request counts may name (contract "Request outcomes (0.1.22)"). Not
+/// `unknown`, and nothing the tool merely passes through (an OpenCode gateway or local server).
+fn request_count_provider(client: &str, provider: &str) -> Option<&'static str> {
+    let allowed: &[&'static str] = match client {
+        CLAUDE_CLIENT => &["anthropic", "amazon-bedrock", "google-vertex"],
+        CODEX_CLIENT => &["openai"],
+        OPENCODE_CLIENT => &["anthropic", "openai", "google", "xai"],
+        KIMI_CLIENT => &["moonshot"],
+        _ => &[],
+    };
+    allowed.iter().copied().find(|allowed| *allowed == provider)
+}
+
+/// How many requests of one model succeeded and failed on the provider's side during one
+/// five-minute period (contract "Request outcomes (0.1.22)"). A strictly allowlisted row like a
+/// sample, with no error text and nothing that identifies a turn.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedRequestCount {
+    pub count_id: Uuid,
+    pub observed_at: String,
+    pub client: String,
+    pub client_version: String,
+    pub app_version: &'static str,
+    pub parser_version: String,
+    pub metric_version: String,
+    pub model: String,
+    pub provider: String,
+    pub succeeded: u32,
+    pub overloaded: u32,
+    pub server_error: u32,
+}
+
+/// The samples and request-count entries one upload carries.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UploadBatch {
+    pub samples: Vec<SharedSample>,
+    pub request_counts: Vec<SharedRequestCount>,
+}
+
+impl UploadBatch {
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty() && self.request_counts.is_empty()
+    }
+
+    /// Takes the last items off until the signed body fits: entries first, then samples (one
+    /// always stays), so a request never exceeds the limit and never stalls the queue.
+    fn fit_request_size(&mut self, now: DateTime<Utc>) {
+        let too_big = |batch: &Self| {
+            envelope_value(&batch.samples, &batch.request_counts, now)
+                .and_then(|value| Ok(serde_json::to_vec(&value)?))
+                .map_or(true, |body| body.len() > MAX_REQUEST_BYTES)
+        };
+        while too_big(self) && !self.request_counts.is_empty() {
+            self.request_counts.pop();
+        }
+        while too_big(self) && self.samples.len() > 1 {
+            self.samples.pop();
+        }
     }
 }
 
@@ -530,6 +905,7 @@ pub struct SharedSampleEnvelope {
     pub schema_version: u8,
     pub sent_at: String,
     pub samples: Vec<SharedSample>,
+    pub request_counts: Vec<SharedRequestCount>,
 }
 
 fn safe_identifier(value: &str, maximum: usize, plus_allowed: bool) -> bool {
@@ -550,16 +926,24 @@ fn upload_slot(sample: &SharedSample, queued_at: DateTime<Utc>) -> Option<i64> {
     let period_start = DateTime::parse_from_rfc3339(&sample.observed_at)
         .ok()?
         .timestamp();
+    Some(slot_after(period_start, queued_at))
+}
+
+/// The slot of something queued at `queued_at` that belongs to the period starting at
+/// `period_start`: the first boundary at or after both `queued_at` and the end of the next period.
+fn slot_after(period_start: i64, queued_at: DateTime<Utc>) -> i64 {
     let queued = queued_at.timestamp() + i64::from(queued_at.timestamp_subsec_nanos() > 0);
-    let earliest = queued.max(period_start + 2 * OBSERVED_PERIOD_SECONDS);
-    Some(
-        earliest.div_euclid(OBSERVED_PERIOD_SECONDS) * OBSERVED_PERIOD_SECONDS
-            + if earliest.rem_euclid(OBSERVED_PERIOD_SECONDS) == 0 {
-                0
-            } else {
-                OBSERVED_PERIOD_SECONDS
-            },
-    )
+    next_boundary(queued.max(period_start + 2 * OBSERVED_PERIOD_SECONDS))
+}
+
+/// The first five-minute boundary at or after `seconds`.
+fn next_boundary(seconds: i64) -> i64 {
+    seconds.div_euclid(OBSERVED_PERIOD_SECONDS) * OBSERVED_PERIOD_SECONDS
+        + if seconds.rem_euclid(OBSERVED_PERIOD_SECONDS) == 0 {
+            0
+        } else {
+            OBSERVED_PERIOD_SECONDS
+        }
 }
 
 fn format_date(date: DateTime<Utc>) -> String {

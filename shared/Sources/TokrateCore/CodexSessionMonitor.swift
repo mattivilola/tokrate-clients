@@ -55,9 +55,14 @@ public actor CodexSessionMonitor {
     public func poll(now: Date = .now) throws -> MonitorUpdate {
         bytesReadLastPoll = 0
         var responses: [String: LiveResponse] = [:]
+        var outcomes: [String: RequestOutcome] = [:]
         var delegation: [DelegationEvent] = []
         func collect(_ completed: [LiveResponse]) {
             for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
+        }
+        /// Like the live responses, only outcomes after launch matter (see `JSONLSourceSessionMonitor`).
+        func collectOutcomes(_ finished: [RequestOutcome]) {
+            for outcome in finished where outcome.occurredAt >= liveSince { outcomes[outcome.dedupeKey] = outcome }
         }
         if needsDiscovery || now.timeIntervalSince(lastDiscovery) >= Self.discoveryInterval || files.isEmpty {
             // Cleared first so a failing enumeration is retried by the safety net, not on every poll.
@@ -82,6 +87,7 @@ public actor CodexSessionMonitor {
                 let recent = try file.live.poll(maxBytes: min(scope.readerBatchBytes, liveBudget))
                 if file.liveStartedAt == nil { file.liveStartedAt = now }
                 collect(file.live.drainResponses())
+                collectOutcomes(file.live.drainOutcomes())
                 delegation += file.live.drainDelegation()
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
                 let consumed = file.live.bytesReadLastPoll
@@ -112,6 +118,7 @@ public actor CodexSessionMonitor {
                 do {
                     let historical = try archive.poll(maxBytes: min(scope.readerBatchBytes, byteBudget))
                     collect(archive.drainResponses())
+                    collectOutcomes(archive.drainOutcomes())
                     delegation += archive.drainDelegation()
                     result += historical
                     if !file.live.isCaughtUp {
@@ -140,7 +147,8 @@ public actor CodexSessionMonitor {
         let finals = attributor.finalize(now: now, backlog: delegationBacklog)
         return MonitorUpdate(
             metrics: DelegationAttributor.merging(metrics, finals: finals),
-            responses: responses.values.sorted { $0.completedAt > $1.completedAt }
+            responses: responses.values.sorted { $0.completedAt > $1.completedAt },
+            outcomes: outcomes.values.sorted { ($0.occurredAt, $0.dedupeKey) < ($1.occurredAt, $1.dedupeKey) }
         )
     }
 

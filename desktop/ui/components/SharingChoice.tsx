@@ -18,6 +18,13 @@ export const SURFACE_NOTICE =
 export const PROMPT_CACHE_NOTICE =
   "From 0.1.18 each turn also includes its input token count and how many of those tokens were read from or written to the provider's prompt cache.";
 
+/**
+ * From notice version 5: sharing also counts, per model and five-minute period, the requests that
+ * succeeded and those that failed on the provider's side.
+ */
+export const REQUEST_COUNT_NOTICE =
+  "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages.";
+
 /** What every shared turn contains, in the wording of the Mac notice. */
 export const SENT_FIELDS = [
   "Coding tool, and app, parser and metric versions",
@@ -104,6 +111,7 @@ export function SharingChoice({
       <p className="detail-fine region-notice">{DELEGATED_NOTICE}</p>
       <p className="detail-fine region-notice">{SURFACE_NOTICE}</p>
       <p className="detail-fine region-notice">{PROMPT_CACHE_NOTICE}</p>
+      <p className="detail-fine region-notice">{REQUEST_COUNT_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

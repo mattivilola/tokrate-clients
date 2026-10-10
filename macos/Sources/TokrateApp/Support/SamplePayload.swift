@@ -30,10 +30,21 @@ enum SamplePayload {
         )
     }
 
+    /// Fixed fake request counts for the same five-minute period: nothing here comes from the user's logs.
+    static func exampleRequestCount() -> SharedRequestCount? {
+        SharedRequestCount(
+            countId: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            observedAt: Date(timeIntervalSince1970: 1_767_268_800), client: "claude-code", clientVersion: "1.2.3",
+            parserVersion: "claude-transcript-v4", model: "example-model", provider: "anthropic",
+            succeeded: 41, overloaded: 3, serverError: 0
+        )
+    }
+
     /// Pretty-printed JSON of one example upload, with sorted keys.
     static func exampleJSON() -> String {
         guard let sample = SharedSample(exampleMetric(), sampleId: UUID(uuidString: "00000000-0000-4000-8000-000000000000")!),
-              let data = try? SampleEnvelope(sentAt: Date(timeIntervalSince1970: 1_767_269_100), samples: [sample]).encoded(),
+              let count = exampleRequestCount(),
+              let data = try? SampleEnvelope(sentAt: Date(timeIntervalSince1970: 1_767_269_100), samples: [sample], requestCounts: [count]).encoded(),
               let object = try? JSONSerialization.jsonObject(with: data),
               let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
               let text = String(data: pretty, encoding: .utf8) else {

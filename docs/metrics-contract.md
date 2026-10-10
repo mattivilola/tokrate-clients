@@ -587,3 +587,76 @@ No metric, parser or upload field changes.
 - **Live response ids.** The identifiers of Claude Code live response entries are SHA-256 digests held in memory, not the raw session, agent or message ids (both clients).
 - **Community responses.** A response of the community board larger than 1 MiB is refused: the Mac app stops the transfer while it streams, the desktop client stops reading and discards the response once the limit is crossed. Neither buffers a larger body.
 - **History retention.** The Mac app also saves its history when records expire, so the file keeps no turn more than about an hour past its seven days, even while no new record arrives or monitoring is paused (hourly while paused on the Mac; the desktop client prunes expired turns at most every ten minutes on its poll). Nothing is pruned while Tokrate is not running. If the desktop client cannot read its history file (corrupt, from a newer version, not a regular file or too large), it keeps that file untouched for the user to repair or delete and does not prune it; it starts with an empty history and says so.
+
+## Request outcomes (0.1.22)
+
+From 0.1.22 sharing also counts, per model and five-minute period, how many API requests succeeded and how many failed on the provider's side. The counts are collected to validate a future community error signal; nothing is shown locally or publicly yet. Evidence for every mapping below is in the step 0 inventory of 2026-10-09 (local transcripts, tool source code and shipped binaries).
+
+### Definitions
+
+- **Request outcome.** One event per model request the coding tool finished: `succeeded`, `overloaded` or `serverError`. Every other failure is dropped and never counted or uploaded: the user's own plan, quota or rate limits (every 429 except the explicit Claude Code "not your usage limit" case), sign-in and key problems, invalid or too-long requests, policy refusals, requests the user cancels, local network failures, timeouts and stream drops whose cause cannot be told apart from the user's connection.
+- **succeeded**: every completed model response, counted **before** the response-speed filter (short responses, tool-call-only responses and responses over 600 s count). Synthetic, incomplete or unusable records are not responses.
+- **overloaded**: the provider is at capacity or throttling everyone: HTTP 529, an explicit overloaded/at-capacity/high-load error, or a provider-wide throttle that the tool labels as not the user's limit.
+- **serverError**: any other HTTP 5xx failure (500–599 except 529) on the provider's side, including a 5xx that ends a response mid-stream.
+- A failed request is counted **once**, from the tool's final record after its own retries. Intermediate retry records (Claude Code `system`/`api_error`, Kimi Code `turn.step.retrying`) are never counted.
+- Only tools whose logs record the failure cause take part: Claude Code, Codex, OpenCode and Kimi Code. **Grok Build and Antigravity send no request outcomes at all** (neither successes nor failures), because a success-only count would read as a 0% error rate.
+- An outcome needs a known model and a known hosted provider; with model or provider `unknown` it is dropped (custom gateways, local servers and unknown routes are the user's own infrastructure).
+
+### Per-tool mapping
+
+| Tool | succeeded | overloaded | serverError | model / provider of a failure |
+|---|---|---|---|---|
+| Claude Code (transcripts, primary and subagent files) | each distinct real response (`msg_…` message id, non-`<synthetic>` model) when it closes, before `response_qualifies` | synthetic record (`isApiErrorMessage: true`) with `apiErrorStatus` 529, or text starting `API Error: Repeated 529`, or text containing `is experiencing high load`, or text containing `not your usage limit` | synthetic record with `apiErrorStatus` 500–599 except 529, or text starting `API Error: Server error mid-response` | model and provider of the most recent real response in the same file; none yet → dropped |
+| Codex (rollouts with `session_meta` `cli_version` ≥ 0.145.0) | each distinct `token_usage_record` `response_id`, before `response_qualifies` | `task_complete.error.codex_error_info` = `server_overloaded` | `internal_server_error`; `response_too_many_failed_attempts`, `http_connection_failed` or `response_stream_connection_failed` with `http_status_code` 500–599 | model of the turn (ambiguous → dropped); provider `openai` only |
+| OpenCode | each completed assistant message without `error` | assistant message `error.name` `APIError` with `error.data.statusCode` 529 | `APIError` with `statusCode` 500–599 except 529 | the message's own `modelID` / `providerID`, mapped as for samples; `unknown` → dropped |
+| Kimi Code | each successful `step.end` (`tool_use` / `end_turn`) with usage | the failed step's `turn.ended.error.code` `provider.overloaded`, or `provider.api_error` with `error.details.statusCode` 529 | `provider.api_error` with `error.details.statusCode` 500–599 except 529 | model of the step's `llm.request`; provider `moonshot` only |
+
+Requests of every session the parser reads count, including Claude Code subagent files, Kimi Code subagent steps and Codex spawned child sessions; sessions a parser skips for samples (for example Codex approval-review sessions, or OpenCode sessions below its 1.14 version floor) produce no outcomes. A model that fails the sample model pattern becomes `unknown` and is dropped. Codex compares `cli_version` as strict semantic versions, so a 0.145.0 pre-release does not qualify.
+
+Codex records at most one terminal error per turn (its retries are not persisted), so its failures are a lower bound. Codex rollouts older than 0.145.0 never record the cause and contribute no outcomes. A Claude Code first request that fails has no earlier model and is dropped.
+
+Only the `apiErrorStatus`, error enum, error code and status fields and the fixed prefixes above are read. Error message text is never stored, persisted, shown or uploaded; matching a fixed prefix happens in memory and is discarded.
+
+### Collection
+
+- Outcomes live in memory only. They are never written to the local history file and never shown in the UI.
+- Each outcome carries a local dedupe key (a SHA-256 digest of its source identifiers, for example session and record uuid, or session and turn id); an outcome already seen in this run is ignored, so re-reading a file never double counts.
+- Future-only, like samples: an outcome is eligible only when its timestamp is at or after the start of the current sharing consent and not in the future, and only while sharing is on. Switching sharing off clears every pending count.
+- Outcomes are summed per (five-minute UTC bucket of the outcome's timestamp, client, client version, parser version, model, provider). A bucket's totals are enqueued as one entry when the bucket closes plus one full period (bucket start + 600 s), the same moment its samples become eligible; an outcome for a bucket that was already enqueued starts a new entry for that bucket, enqueued at the next period boundary. Entries whose counts are all zero are never sent. Entries older than 24 hours are dropped.
+- The queue holds at most 1,000 request-count entries, oldest dropped first, separately from the sample queue.
+
+### Upload format
+
+- From 0.1.22 every upload uses envelope `schemaVersion` 2: `{ "schemaVersion": 2, "sentAt": …, "samples": [ … ], "requestCounts": [ … ] }` with 0 to 50 samples and 0 to 50 request-count entries, at least one item in total, at most 65,536 bytes, signed exactly like version 1. Both keys are always present (an empty array when there is nothing).
+- A request-count entry (`requestCounts[]`), keys sorted like samples:
+
+```json
+{
+  "countId": "<random UUID, kept across retries>",
+  "observedAt": "2026-10-09T12:05:00Z",
+  "client": "claude-code",
+  "clientVersion": "2.1.295",
+  "appVersion": "0.1.22",
+  "parserVersion": "claude-transcript-v4",
+  "metricVersion": "request-outcome-v1",
+  "model": "claude-opus-5-5",
+  "provider": "anthropic",
+  "succeeded": 41,
+  "overloaded": 3,
+  "serverError": 0
+}
+```
+
+- `client` is `claude-code`, `codex`, `opencode` or `kimi-code`; `parserVersion` is that client's current sample parser (`claude-transcript-v4`, `codex-rollout-v2`, `opencode-db-v1`, `kimi-wire-v1`); `metricVersion` is always `request-outcome-v1`. `model` and `clientVersion` follow the sample rules (`^[a-zA-Z0-9._-]{1,80}$` / `^[a-zA-Z0-9.+_-]{1,40}$`, else `unknown`; an `unknown` model is never sent). `provider` is one the sample rules allow for that client, never `unknown` (Claude Code: `anthropic`, `amazon-bedrock`, `google-vertex`; Codex: `openai`; OpenCode: `anthropic`, `openai`, `google`, `xai`; Kimi Code: `moonshot`). Each count is an integer from 0 to 10,000, and their sum is at least 1.
+- Samples keep their 0.1.21 shape with `appVersion` `0.1.22`. Upload slots, jitter, the 30-second attempt limit and retry handling are shared: a batch takes the eligible samples and the eligible request-count entries together, and a 2xx removes both, a 400/413/422 drops both, a 426 stops sharing.
+
+### Server rules
+
+- Envelope version 1 is unchanged for 0.1.11–0.1.21. Version 2 is accepted only when every sample and every entry reports an app version that introduced it (0.1.22 and later); a 0.1.22 sample in a version 1 envelope is rejected.
+- Request-count entries are validated like samples (UUID, five-minute bucket, the same 24-hour observation window, the client/parser/provider allowlists above, the count bounds), deduplicated per contributor by `countId`, stored with the contributor continent like samples and expire after 30 days. They count as a report in the reporting-installation registry.
+- Request counts are not part of the public board or any public API. Administrators see them in the admin dashboard to validate the signal before anything is published.
+
+### Sharing and consent notice 5
+
+- **Consent notice version 5.** `SharingPreferences.currentNoticeVersion` is 5 (desktop: `SHARING_NOTICE_VERSION = "2026-10-09-v5"`). Re-consent behaves as for versions 2 to 4: a saved OFF stays OFF. The notice adds: "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages." The consent example payload includes one request-count entry.
+- `appVersion` is `0.1.22` (both clients).

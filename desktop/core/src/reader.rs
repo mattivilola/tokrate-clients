@@ -1,7 +1,7 @@
 use crate::claude_parser::ClaudeTranscriptParser;
 use crate::delegation::{extend_bounded, DelegationEvent};
 use crate::kimi::KimiWireParser;
-use crate::model::{ResponseMetric, ToolSurface, TurnMetric};
+use crate::model::{push_outcomes, RequestOutcome, ResponseMetric, ToolSurface, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,9 @@ pub(crate) struct IncrementalReader {
     /// Recent-tail readers keep the responses they complete; replay readers discard them.
     collect_responses: bool,
     responses: Vec<ResponseMetric>,
+    /// Like the responses, request outcomes are kept by recent-tail readers only: a replay of old
+    /// history can hold nothing newer than the tail a live reader is already reading.
+    outcomes: Vec<RequestOutcome>,
     /// Every reader (tail and replay) reports delegation events; the monitor deduplicates.
     delegation_events: Vec<DelegationEvent>,
 }
@@ -218,6 +221,7 @@ impl IncrementalReader {
             resume_at: None,
             collect_responses: tail_bytes.is_some(),
             responses: Vec::new(),
+            outcomes: Vec::new(),
             delegation_events: Vec::new(),
         }
     }
@@ -231,6 +235,12 @@ impl IncrementalReader {
     /// reader returns any, so history replay never reaches the live stream.
     pub fn take_responses(&mut self) -> Vec<ResponseMetric> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// Request outcomes this reader found since the last call; only the recent-tail (live) reader
+    /// returns any.
+    pub fn take_outcomes(&mut self) -> Vec<RequestOutcome> {
+        std::mem::take(&mut self.outcomes)
     }
 
     /// Reads up to `max_bytes`. Once the file is read to its end, work that only waited for more
@@ -418,6 +428,11 @@ impl IncrementalReader {
             // Bounded in case the host stops draining.
             let excess = self.responses.len().saturating_sub(1_024);
             self.responses.drain(..excess);
+        }
+        let outcomes = self.parser.take_outcomes();
+        if self.collect_responses {
+            // Bounded in case the host stops draining.
+            push_outcomes(&mut self.outcomes, outcomes);
         }
     }
 

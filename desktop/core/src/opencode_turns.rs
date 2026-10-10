@@ -2,8 +2,9 @@
 //! from it (metrics contract "OpenCode").
 
 use crate::model::{
-    response_qualifies, speed_is_plausible, ReportedReasoningEffort, ResponseMetric,
-    ResponseTotals, TurnMetric, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
+    request_outcome_key, response_qualifies, speed_is_plausible, ReportedReasoningEffort,
+    RequestOutcome, RequestOutcomeKind, ResponseMetric, ResponseTotals, TurnMetric,
+    OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
 };
 use crate::opencode_db::{Assistant, MessageKind, Read, SessionRow};
 use chrono::{DateTime, Utc};
@@ -185,6 +186,23 @@ impl Index {
         }
         match &session.messages.get(message_id)?.kind {
             MessageKind::Assistant(assistant) => Some(&**assistant),
+            MessageKind::User { .. } => None,
+        }
+    }
+
+    /// The assistant message and its session's OpenCode version, when it belongs to a measured
+    /// session, primary or subagent: every model call is a request, whoever made it.
+    pub fn measured_assistant(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Option<(&str, &Assistant)> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .filter(|session| session.measured)?;
+        match &session.messages.get(message_id)?.kind {
+            MessageKind::Assistant(assistant) => Some((session.version.as_str(), &**assistant)),
             MessageKind::User { .. } => None,
         }
     }
@@ -522,4 +540,41 @@ pub(crate) fn live_response(
         output_tokens: assistant.output_tokens,
         duration_seconds: span,
     })
+}
+
+/// The request outcome of one assistant message (one model call) that finished after `since`: a
+/// completed message without an error succeeded; an `APIError` with a 5xx status is a failure
+/// (529 an overload); every other error (aborted, auth, context, 4xx, no status) is not counted.
+/// Only the error's name and status were read from the database, never its message. A message
+/// without a model, or on a provider that maps to `unknown`, takes no part.
+pub(crate) fn request_outcome(
+    message_id: &str,
+    session_version: &str,
+    assistant: &Assistant,
+    since: DateTime<Utc>,
+) -> Option<RequestOutcome> {
+    if assistant.malformed {
+        return None;
+    }
+    let (kind, at_ms) = if assistant.failed {
+        if !assistant.api_error {
+            return None;
+        }
+        let kind = RequestOutcomeKind::from_http_status(assistant.error_status?)?;
+        (kind, assistant.completed_ms.unwrap_or(assistant.created_ms))
+    } else {
+        (RequestOutcomeKind::Succeeded, assistant.completed_ms?)
+    };
+    let occurred_at = time(at_ms).filter(|at| *at > since)?;
+    let provider = map_provider(assistant.provider.as_deref());
+    RequestOutcome::new(
+        request_outcome_key(&[OPENCODE_CLIENT, "message", message_id]),
+        occurred_at,
+        OPENCODE_CLIENT,
+        (!session_version.is_empty()).then(|| session_version.to_owned()),
+        OPENCODE_PARSER_VERSION,
+        assistant.model.as_deref(),
+        Some(&provider),
+        kind,
+    )
 }

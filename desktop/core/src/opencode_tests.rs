@@ -80,6 +80,7 @@ struct Call {
     variant: Option<String>,
     finish: Option<String>,
     error: Option<String>,
+    error_status: Option<i64>,
 }
 
 impl Call {
@@ -101,6 +102,7 @@ impl Call {
             variant: None,
             finish: None,
             error: None,
+            error_status: None,
         }
     }
 
@@ -153,6 +155,13 @@ impl Call {
         self
     }
 
+    /// An `APIError` with an HTTP status (none when `status` is `None`).
+    fn api_error(mut self, status: Option<i64>) -> Self {
+        self.error = Some("APIError".to_owned());
+        self.error_status = status;
+        self
+    }
+
     fn data(&self) -> String {
         let mut cache = serde_json::Map::new();
         let mut tokens = serde_json::Map::new();
@@ -198,10 +207,11 @@ impl Call {
             }
         }
         if let Some(name) = &self.error {
-            data.insert(
-                "error".into(),
-                json!({"name": name, "data": {"message": "secret error text"}}),
-            );
+            let mut details = json!({"message": "secret error text", "isRetryable": false});
+            if let Some(status) = self.error_status {
+                details["statusCode"] = json!(status);
+            }
+            data.insert("error".into(), json!({"name": name, "data": details}));
         }
         Value::Object(data).to_string()
     }
@@ -1174,6 +1184,170 @@ fn messages_older_than_the_retention_are_not_read() {
     assert_eq!(monitor.bytes_read_last_poll(), 0);
 }
 
+// ---- request outcomes ------------------------------------------------------------------------
+
+fn outcome_shapes(
+    outcomes: &[crate::RequestOutcome],
+) -> Vec<(crate::RequestOutcomeKind, String, String)> {
+    let mut shapes: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| {
+            (
+                outcome.kind,
+                outcome.model.clone(),
+                outcome.provider.clone(),
+            )
+        })
+        .collect();
+    shapes.sort_by_key(|(kind, model, provider)| {
+        (format!("{kind:?}"), model.clone(), provider.clone())
+    });
+    shapes
+}
+
+#[test]
+fn request_outcomes_count_completed_calls_and_provider_side_api_errors_only() {
+    use crate::RequestOutcomeKind::{Overloaded, ServerError, Succeeded};
+    let fixture = Fixture::new();
+    let db = fixture.database();
+    let started = now();
+    let s = started.timestamp_millis();
+    db.session(SESSION, None, VERSION);
+    db.session(CHILD, Some(SESSION), VERSION);
+    db.session("ses_old", None, "1.2.27");
+    db.user(USER, SESSION, s - 120_000);
+    // Finished before the monitor started: never an outcome.
+    db.call(
+        &Call::new("msg_before", USER)
+            .span(s - 100_000, s - 90_000)
+            .tokens(500, 0)
+            .finish("tool-calls"),
+    );
+    let mut monitor = fixture.monitor();
+    poll(&mut monitor, started);
+    assert!(monitor.take_request_outcomes().is_empty());
+
+    // A running call is no outcome yet.
+    db.call(&Call::new("msg_running", USER).running(s + 500));
+    poll(&mut monitor, started + Duration::seconds(1));
+    assert!(monitor.take_request_outcomes().is_empty());
+
+    // Successes count whatever their length, in subagent sessions too, and on the provider the
+    // message names.
+    db.call(
+        &Call::new("msg_ok", USER)
+            .model("claude-opus-4-6", "anthropic")
+            .span(s + 1_000, s + 2_000)
+            .tokens(3, 0)
+            .finish("tool-calls"),
+    );
+    db.call(
+        &Call::new("msg_child", "msg_cu")
+            .session(CHILD)
+            .model("gpt-5", "openai")
+            .span(s + 1_000, s + 30_000)
+            .tokens(900, 0)
+            .finish("stop"),
+    );
+    // Only an APIError with a 5xx status is a failure.
+    for call in [
+        Call::new("msg_e529", USER).api_error(Some(529)),
+        Call::new("msg_e500", USER).api_error(Some(500)),
+        Call::new("msg_e503", USER).api_error(Some(503)),
+        Call::new("msg_e429", USER).api_error(Some(429)),
+        Call::new("msg_e403", USER).api_error(Some(403)),
+        Call::new("msg_e400", USER).api_error(Some(400)),
+        Call::new("msg_enone", USER).api_error(None),
+        Call::new("msg_abort", USER).error("MessageAbortedError"),
+        Call::new("msg_auth", USER).error("ProviderAuthError"),
+        Call::new("msg_unk", USER).error("UnknownError"),
+    ] {
+        db.call(&call.model("gpt-5", "openai").span(s + 3_000, s + 4_000));
+    }
+    // Calls in sessions below the version floor, and calls of an unknown provider (kept as the
+    // raw id locally; sharing refuses it) take part only as far as they are measured.
+    db.call(
+        &Call::new("msg_old", USER)
+            .session("ses_old")
+            .span(s + 3_000, s + 4_000)
+            .finish("stop"),
+    );
+    db.call(
+        &Call::new("msg_local", USER)
+            .model("qwen3", "omlx")
+            .span(s + 3_000, s + 4_000)
+            .finish("stop"),
+    );
+    let mut nomodel = Call::new("msg_nomodel", USER)
+        .api_error(Some(500))
+        .span(s + 3_000, s + 4_000);
+    nomodel.model = None;
+    db.call(&nomodel);
+    poll(&mut monitor, started + Duration::seconds(30));
+    let outcomes = monitor.take_request_outcomes();
+    let expect = |kind, model: &str, provider: &str| (kind, model.to_owned(), provider.to_owned());
+    let mut expected = vec![
+        expect(Succeeded, "claude-opus-4-6", "anthropic"),
+        expect(Succeeded, "gpt-5", "openai"),
+        expect(Overloaded, "gpt-5", "openai"),
+        expect(ServerError, "gpt-5", "openai"),
+        expect(ServerError, "gpt-5", "openai"),
+        // The local server's own id is kept; sharing is what refuses it.
+        expect(Succeeded, "qwen3", "omlx"),
+    ];
+    expected.sort_by_key(|(kind, model, provider)| {
+        (format!("{kind:?}"), model.clone(), provider.clone())
+    });
+    assert_eq!(outcome_shapes(&outcomes), expected);
+    assert!(outcomes
+        .iter()
+        .all(|outcome| outcome.client == OPENCODE_CLIENT
+            && outcome.parser_version == OPENCODE_PARSER_VERSION
+            && outcome.client_version.as_deref() == Some(VERSION)));
+    let overload = outcomes.iter().find(|o| o.kind == Overloaded).unwrap();
+    assert_eq!(overload.occurred_at.timestamp_millis(), s + 4_000);
+
+    // Read again (touched rows, a full re-read), nothing is reported twice.
+    db.call(
+        &Call::new("msg_ok", USER)
+            .model("claude-opus-4-6", "anthropic")
+            .span(s + 1_000, s + 2_000)
+            .tokens(3, 0)
+            .finish("tool-calls"),
+    );
+    poll(&mut monitor, started + Duration::seconds(40));
+    poll(&mut monitor, started + Duration::minutes(7));
+    assert!(monitor.take_request_outcomes().is_empty());
+
+    // Through the sharing queue only the allowlisted providers become request counts.
+    let mut queue = crate::SharingQueue::with_jitter_source(Duration::zero);
+    queue.enable(started - Duration::minutes(1));
+    queue.enqueue_outcomes(&outcomes, started + Duration::seconds(30));
+    let due =
+        DateTime::<Utc>::from_timestamp((started.timestamp() + 30).div_euclid(300) * 300 + 900, 0)
+            .unwrap();
+    queue.upload_batch(due - Duration::minutes(5));
+    queue.upload_batch(due);
+    let entries = queue
+        .upload_batch(due + Duration::seconds(1))
+        .request_counts;
+    assert!(entries.iter().all(|entry| entry.provider != "omlx"));
+    let total = |provider: &str| {
+        entries
+            .iter()
+            .filter(|entry| entry.provider == provider)
+            .fold((0, 0, 0), |sum, entry| {
+                (
+                    sum.0 + entry.succeeded,
+                    sum.1 + entry.overloaded,
+                    sum.2 + entry.server_error,
+                )
+            })
+    };
+    assert_eq!(total("anthropic"), (1, 0, 0));
+    assert_eq!(total("openai"), (1, 1, 2));
+}
+
 // ---- live responses ---------------------------------------------------------------------------
 
 #[test]
@@ -1398,6 +1572,7 @@ fn the_queries_select_only_listed_json_paths_and_never_the_part_table() {
         "$.variant",
         "$.finish",
         "$.error.name",
+        "$.error.data.statusCode",
         "$.time.created",
         "$.time.completed",
         "$.tokens.output",
@@ -1409,7 +1584,7 @@ fn the_queries_select_only_listed_json_paths_and_never_the_part_table() {
         assert!(source.contains(&format!("'{path}'")), "{path}");
     }
     // Nothing else is extracted.
-    assert_eq!(source.matches("json_extract(m.data").count(), 14);
+    assert_eq!(source.matches("json_extract(m.data").count(), 15);
 }
 
 // ---- bounded reads ---------------------------------------------------------------------------

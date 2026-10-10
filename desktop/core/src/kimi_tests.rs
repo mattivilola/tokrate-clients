@@ -1411,7 +1411,7 @@ fn a_kimi_sample_is_shared_only_for_moonshot_or_unknown_without_a_cache_write() 
         assert_eq!(sample.client, "kimi-code");
         assert_eq!(sample.parser_version, "kimi-wire-v1");
         assert_eq!(sample.metric_version, "kimi-observed-turn-v1");
-        assert_eq!(sample.app_version, "0.1.21");
+        assert_eq!(sample.app_version, "0.1.22");
         assert_eq!(sample.model, "k2d8-preview");
         assert_eq!(sample.input_tokens, Some(1_000));
         assert_eq!(sample.cache_read_input_tokens, Some(800));
@@ -1485,4 +1485,164 @@ fn the_moonshot_badge_follows_the_provider_or_the_model_family() {
 #[test]
 fn the_kimi_code_tool_can_be_selected() {
     assert!(crate::SelectionMode::parse("auto:kimi-code").is_some());
+}
+
+// --- request outcomes (contract "Request outcomes (0.1.22)") -------------------------------------
+
+/// The records of a failed turn as Kimi Code writes them: the failed step, the interruption, the
+/// turn's error and the two summaries that describe the same failure again.
+fn failed_turn(at: i64, turn: &str, provider: &str, code: &str, status: Option<i64>) -> Vec<Value> {
+    let details = status.map_or(
+        json!({"requestId": null}),
+        |status| json!({"statusCode": status, "requestId": null}),
+    );
+    vec![
+        prompt(at, None),
+        begin(at + 1, turn, 1),
+        request(at + 2, turn, 1, "kimi-for-coding", provider, "high"),
+        end_with(at + 1_000, turn, 1, Some("error"), None),
+        json!({"type": "turn.step.interrupted", "time": at + 1_001, "turnId": turn, "step": 1,
+            "reason": "error", "message": "SECRET [provider] text"}),
+        json!({"type": "turn.ended", "time": at + 1_002, "turnId": turn, "reason": "failed",
+            "durationMs": 1_000, "error": {"code": code, "name": "APIStatusError",
+            "message": "SECRET error text", "details": details, "retryable": false}}),
+        json!({"type": "agent.turn.ended", "time": at + 1_003, "turnId": turn,
+            "outcome": "failed", "errorMessage": "SECRET error text"}),
+        json!({"type": "prompt.completed", "time": at + 1_004, "reason": "failed"}),
+    ]
+}
+
+fn outcomes_of(parser: &mut KimiWireParser, records: &[Value]) -> Vec<crate::RequestOutcome> {
+    feed(parser, records);
+    parser.take_outcomes()
+}
+
+#[test]
+fn kimi_failures_are_the_turn_errors_of_the_providers_side_counted_once() {
+    use crate::RequestOutcomeKind::{Overloaded, ServerError};
+    let failure = |code: &str, status: Option<i64>| {
+        outcomes_of(
+            &mut main_parser(),
+            &failed_turn(T0, "0", "kimi", code, status),
+        )
+    };
+    let overloaded = failure("provider.overloaded", Some(529));
+    // Four records describe the failed turn; it is one request.
+    assert_eq!(overloaded.len(), 1);
+    assert_eq!(overloaded[0].kind, Overloaded);
+    assert_eq!(overloaded[0].model, "kimi-for-coding");
+    assert_eq!(overloaded[0].provider, "moonshot");
+    assert_eq!(overloaded[0].client, KIMI_CLIENT);
+    assert_eq!(overloaded[0].parser_version, KIMI_PARSER_VERSION);
+    assert_eq!(overloaded[0].occurred_at, at_ms(T0 + 1_002));
+    assert!(!format!("{overloaded:?}").contains("SECRET"));
+    let server = failure("provider.api_error", Some(502));
+    assert_eq!(server.len(), 1);
+    assert_eq!(server[0].kind, ServerError);
+    assert_eq!(
+        failure("provider.api_error", Some(500))[0].kind,
+        ServerError
+    );
+    // Read again, it has the same key; another turn's failure has another.
+    assert_eq!(
+        failure("provider.api_error", Some(502))[0].dedupe_key,
+        server[0].dedupe_key
+    );
+    let other = outcomes_of(
+        &mut main_parser(),
+        &failed_turn(T0 + 60_000, "1", "kimi", "provider.api_error", Some(502)),
+    );
+    assert_ne!(other[0].dedupe_key, server[0].dedupe_key);
+    // The user's side, ambiguous or not a failure of the request.
+    for (code, status) in [
+        ("provider.rate_limit", Some(429)),
+        ("provider.connection_error", None),
+        ("provider.auth_error", Some(403)),
+        ("provider.api_error", Some(400)),
+        ("provider.api_error", Some(404)),
+        ("provider.api_error", Some(429)),
+        ("provider.api_error", None),
+        ("provider.filtered", None),
+        ("context.overflow", None),
+        ("internal", None),
+        ("auth.login_required", None),
+    ] {
+        assert!(failure(code, status).is_empty(), "{code} {status:?}");
+    }
+}
+
+#[test]
+fn a_kimi_failure_needs_the_request_of_its_own_step_on_moonshot() {
+    // A third-party provider type, and a turn that failed before any request.
+    assert!(outcomes_of(
+        &mut main_parser(),
+        &failed_turn(T0, "0", "openai", "provider.overloaded", Some(529))
+    )
+    .is_empty());
+    let mut no_request = failed_turn(T0, "0", "kimi", "provider.overloaded", Some(529));
+    no_request.remove(2);
+    assert!(outcomes_of(&mut main_parser(), &no_request).is_empty());
+    // A second step that fails before its request is not attributed to the first step's.
+    let mut parser = main_parser();
+    let mut records = answer(T0, "0", 50, 2);
+    records[2] = begin(T0 + 3_000, "0", 2);
+    records.truncate(3);
+    records.push(
+        json!({"type": "turn.ended", "time": T0 + 4_000, "turnId": "0",
+        "reason": "failed", "error": {"code": "provider.overloaded",
+        "details": {"statusCode": 529}}}),
+    );
+    let outcomes = outcomes_of(&mut parser, &records);
+    assert!(outcomes.is_empty());
+    // A log read from the middle has no turn to attribute it to.
+    let mut mid_file = main_parser();
+    mid_file.begin_mid_file();
+    let tail = &failed_turn(T0, "0", "kimi", "provider.overloaded", Some(529))[5..];
+    assert!(outcomes_of(&mut mid_file, tail).is_empty());
+}
+
+#[test]
+fn kimi_successful_steps_count_before_the_response_filter_and_retries_not_at_all() {
+    use crate::RequestOutcomeKind::Succeeded;
+    // A short tool-call step and a final answer, in the main log and in a subagent's.
+    let mut records = vec![prompt(T0, None)];
+    records.extend(step(T0, "0", 1, "tool_use", 5, 1));
+    records.extend(step(T0 + 10_000, "0", 2, "end_turn", 300, 5));
+    // A retry before a step that then succeeds is only the success.
+    records.push(begin(T0 + 20_000, "0", 3));
+    records.push(
+        json!({"type": "turn.step.retrying", "time": T0 + 20_001, "turnId": "0",
+        "step": 3, "failedAttempt": 1, "nextAttempt": 2, "maxAttempts": 3, "delayMs": 500,
+        "errorName": "APIProviderOverloadedError", "errorMessage": "SECRET", "statusCode": 529}),
+    );
+    records.push(request(T0 + 20_500, "0", 3, "k2d8-preview", "kimi", "high"));
+    records.push(end(T0 + 22_000, "0", 3, "end_turn", 40));
+    let outcomes = outcomes_of(&mut main_parser(), &records);
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes.iter().all(|outcome| outcome.kind == Succeeded
+        && outcome.model == "k2d8-preview"
+        && outcome.provider == "moonshot"));
+    assert_eq!(outcomes[0].occurred_at, at_ms(T0 + 1_002));
+    let keys: std::collections::HashSet<_> = outcomes
+        .iter()
+        .map(|outcome| outcome.dedupe_key.clone())
+        .collect();
+    assert_eq!(keys.len(), 3);
+    // The same log read again by another parser names the same requests.
+    let again = outcomes_of(&mut main_parser(), &records);
+    assert_eq!(again[0].dedupe_key, outcomes[0].dedupe_key);
+    // Subagent logs are requests too.
+    assert_eq!(
+        outcomes_of(&mut subagent_parser(), &answer(T0, "0", 50, 2)).len(),
+        1
+    );
+    // A step without usage, a failed finish or a third-party provider is no success.
+    let mut failed = vec![prompt(T0, None), begin(T0 + 1, "0", 1)];
+    failed.push(request(T0 + 2, "0", 1, "k2d8-preview", "kimi", "high"));
+    failed.push(end_with(T0 + 3_000, "0", 1, Some("end_turn"), None));
+    assert!(outcomes_of(&mut main_parser(), &failed).is_empty());
+    let mut third_party = vec![prompt(T0, None), begin(T0 + 1, "0", 1)];
+    third_party.push(request(T0 + 2, "0", 1, "gpt-5", "openai", "high"));
+    third_party.push(end(T0 + 3_000, "0", 1, "end_turn", 50));
+    assert!(outcomes_of(&mut main_parser(), &third_party).is_empty());
 }

@@ -21,6 +21,8 @@ protocol JSONLMetricParser: Sendable {
     mutating func drainCompletedResponses() -> [LiveResponse]
     /// Delegated-work lifecycle events since the last call (see `DelegationEvent`).
     mutating func drainDelegationEvents() -> [DelegationEvent]
+    /// Request outcomes recognised since the last call (see `RequestOutcome`).
+    mutating func drainRequestOutcomes() -> [RequestOutcome]
 }
 
 extension JSONLMetricParser {
@@ -32,6 +34,7 @@ extension JSONLMetricParser {
     mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { nil }
     mutating func drainCompletedResponses() -> [LiveResponse] { [] }
     mutating func drainDelegationEvents() -> [DelegationEvent] { [] }
+    mutating func drainRequestOutcomes() -> [RequestOutcome] { [] }
 }
 
 /// Incremental, bounded JSONL input for the additional local transcript formats.
@@ -159,6 +162,8 @@ struct IncrementalJSONLMetricReader<Parser: JSONLMetricParser>: Sendable {
 
     mutating func drainDelegation() -> [DelegationEvent] { parser.drainDelegationEvents() }
 
+    mutating func drainOutcomes() -> [RequestOutcome] { parser.drainRequestOutcomes() }
+
     private mutating func resetForReplacement(size: UInt64) {
         offset = 0
         pending.removeAll(keepingCapacity: true)
@@ -260,9 +265,15 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
 
         var result: [TurnMetric] = []
         var responses: [String: LiveResponse] = [:]
+        var outcomes: [String: RequestOutcome] = [:]
         var delegation: [DelegationEvent] = []
         func collect(_ completed: [LiveResponse]) {
             for response in completed where response.completedAt >= liveSince { responses[response.id] = response }
+        }
+        /// Like the live responses, only outcomes after launch matter: sharing starts no earlier, and the
+        /// replay of history would otherwise fill the aggregator's memory for nothing.
+        func collectOutcomes(_ finished: [RequestOutcome]) {
+            for outcome in finished where outcome.occurredAt >= liveSince { outcomes[outcome.dedupeKey] = outcome }
         }
         var byteBudget = scope.maximumPollBytes
         var liveBudget = byteBudget * 3 / 4
@@ -279,6 +290,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 let recent = try file.live.poll(maxBytes: min(scope.readerBatchBytes, liveBudget), now: now)
                 if file.liveStartedAt == nil { file.liveStartedAt = now }
                 collect(file.live.drainResponses())
+                collectOutcomes(file.live.drainOutcomes())
                 delegation += file.live.drainDelegation()
                 result += recent.filter { !file.archiveIDsWhileLiveCatchesUp.contains($0.id) }
                 let consumed = file.live.bytesReadLastPoll
@@ -306,6 +318,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
                 do {
                     let historical = try archive.poll(maxBytes: min(scope.readerBatchBytes, byteBudget), now: now)
                     collect(archive.drainResponses())
+                    collectOutcomes(archive.drainOutcomes())
                     delegation += archive.drainDelegation()
                     result += historical
                     if !file.live.isCaughtUp {
@@ -329,6 +342,7 @@ actor JSONLSourceSessionMonitor<Parser: JSONLMetricParser> {
             responses: responses.values.sorted { $0.completedAt > $1.completedAt }
         )
         update.delegation = delegation
+        update.outcomes = outcomes.values.sorted { ($0.occurredAt, $0.dedupeKey) < ($1.occurredAt, $1.dedupeKey) }
         return update
     }
 

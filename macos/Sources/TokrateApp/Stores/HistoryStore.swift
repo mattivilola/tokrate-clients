@@ -315,12 +315,15 @@ final class HistoryStore {
                 self?.syncWatchers()
                 var newRecords: [TurnMetric] = []
                 var newResponses: [LiveResponse] = []
+                // Request outcomes go to the sharing session only: never into the history or the UI.
+                var newOutcomes: [RequestOutcome] = []
                 var failures: [String] = []
                 if FileManager.default.fileExists(atPath: codexFolder.path) {
                     do {
                         let update = try await monitor.poll()
                         newRecords += update.metrics
                         newResponses += update.responses
+                        newOutcomes += update.outcomes
                     } catch {
                         failures.append("Codex sessions")
                     }
@@ -329,6 +332,7 @@ final class HistoryStore {
                     let update = try await claudeMonitor.poll()
                     newRecords += update.metrics
                     newResponses += update.responses
+                    newOutcomes += update.outcomes
                 } catch {
                     failures.append("Claude Code sessions")
                 }
@@ -346,10 +350,12 @@ final class HistoryStore {
                 let openCodeUpdate = await openCodeMonitor.poll()
                 newRecords += openCodeUpdate.metrics
                 newResponses += openCodeUpdate.responses
+                newOutcomes += openCodeUpdate.outcomes
                 do {
                     let update = try await kimiCodeMonitor.poll()
                     newRecords += update.metrics
                     newResponses += update.responses
+                    newOutcomes += update.outcomes
                 } catch {
                     failures.append("Kimi Code sessions")
                 }
@@ -357,6 +363,7 @@ final class HistoryStore {
                     let update = try await kimiDesktopMonitor.poll()
                     newRecords += update.metrics
                     newResponses += update.responses
+                    newOutcomes += update.outcomes
                 } catch {
                     failures.append("Kimi desktop sessions")
                 }
@@ -377,6 +384,7 @@ final class HistoryStore {
                 // turn arrives first without its delegated total, and its settled re-emission shares it.
                 let known = Dictionary(self.history.records.map { ($0.id, $0.isDelegationFinal) }, uniquingKeysWith: { first, _ in first })
                 self.sharing.enqueue(newRecords.filter { $0.isDelegationFinal && known[$0.id] != true })
+                self.sharing.enqueueOutcomes(newOutcomes)
                 // Expired records leave the file within the seven days promised, also while no record arrives.
                 let expiredRecords = self.history.prune()
                 for record in newRecords { self.history.upsert(record) }

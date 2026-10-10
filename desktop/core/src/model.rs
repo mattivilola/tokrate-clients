@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const CODEX_CLIENT: &str = "codex";
 pub const CODEX_PARSER_VERSION: &str = "codex-rollout-v2";
@@ -20,6 +21,9 @@ pub const OPENCODE_METRIC_VERSION: &str = "opencode-observed-turn-v1";
 pub const KIMI_CLIENT: &str = "kimi-code";
 pub const KIMI_PARSER_VERSION: &str = "kimi-wire-v1";
 pub const KIMI_METRIC_VERSION: &str = "kimi-observed-turn-v1";
+
+/// Contract version of the request-outcome counts (contract "Request outcomes (0.1.22)").
+pub const REQUEST_OUTCOME_METRIC_VERSION: &str = "request-outcome-v1";
 
 /// Contract version of the per-response measurement shared with the Mac client.
 pub const RESPONSE_METRIC_VERSION: &str = "response-v1";
@@ -395,6 +399,96 @@ impl TurnMetric {
             cache_write_input_tokens: None,
         }
     }
+}
+
+/// How one model request ended, as far as the provider is concerned (contract "Request outcomes
+/// (0.1.22)"). Every other failure is dropped by the parsers and has no kind.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RequestOutcomeKind {
+    Succeeded,
+    /// The provider is at capacity or throttling everyone (HTTP 529 or an explicit overload).
+    Overloaded,
+    /// Any other HTTP 5xx failure on the provider's side.
+    ServerError,
+}
+
+impl RequestOutcomeKind {
+    /// The kind of a failed request from its HTTP status: 529 is an overload, any other 5xx a
+    /// server error, everything else (4xx, 2xx, nonsense) is not a provider-side failure.
+    pub fn from_http_status(status: i64) -> Option<Self> {
+        match status {
+            529 => Some(Self::Overloaded),
+            500..=599 => Some(Self::ServerError),
+            _ => None,
+        }
+    }
+}
+
+/// One finished model request of a coding tool, as the parsers report it. Memory only: it is never
+/// persisted, shown, exported or part of any snapshot, and it carries no error text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestOutcome {
+    /// SHA-256 hex digest of the source identifiers, so reading a file again cannot count a
+    /// request twice. Build it with [`request_outcome_key`].
+    pub dedupe_key: String,
+    pub occurred_at: DateTime<Utc>,
+    pub client: &'static str,
+    pub client_version: Option<String>,
+    pub parser_version: &'static str,
+    pub model: String,
+    pub provider: String,
+    pub kind: RequestOutcomeKind,
+}
+
+impl RequestOutcome {
+    /// `None` without a known model and provider: custom gateways, local servers and unknown
+    /// routes are the user's own infrastructure and never take part.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        dedupe_key: String,
+        occurred_at: DateTime<Utc>,
+        client: &'static str,
+        client_version: Option<String>,
+        parser_version: &'static str,
+        model: Option<&str>,
+        provider: Option<&str>,
+        kind: RequestOutcomeKind,
+    ) -> Option<Self> {
+        fn known(value: Option<&str>) -> Option<&str> {
+            value.filter(|value| !value.is_empty() && *value != "unknown")
+        }
+        Some(Self {
+            dedupe_key,
+            occurred_at,
+            client,
+            client_version,
+            parser_version,
+            model: known(model)?.to_owned(),
+            provider: known(provider)?.to_owned(),
+            kind,
+        })
+    }
+}
+
+/// The dedupe key of a request outcome: the SHA-256 hex digest of its source identifiers.
+pub fn request_outcome_key(parts: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in std::iter::once(&"request-outcome").chain(parts) {
+        digest.update(part.as_bytes());
+        digest.update(b"|");
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Request outcomes wait in a parser, a reader or a monitor until the host drains them after each
+/// poll; the oldest go first if it stops draining.
+pub(crate) const MAX_PENDING_OUTCOMES: usize = 8_192;
+
+/// Appends `found` to `pending`, keeping at most [`MAX_PENDING_OUTCOMES`] (the newest).
+pub(crate) fn push_outcomes(pending: &mut Vec<RequestOutcome>, found: Vec<RequestOutcome>) {
+    pending.extend(found);
+    let excess = pending.len().saturating_sub(MAX_PENDING_OUTCOMES);
+    pending.drain(..excess);
 }
 
 /// Bedrock inference-profile prefixes that identify where a request is routed.

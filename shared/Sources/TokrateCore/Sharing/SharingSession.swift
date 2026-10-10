@@ -12,6 +12,10 @@ import Observation
 /// delegated total) leaves in the same slot whenever inside the bucket it finished, a turn queued
 /// much later leaves in the first slot after it was queued, and samples of different buckets queued
 /// in the same period share a slot.
+///
+/// Request counts (contract "Request outcomes (0.1.22)") ride the same slots: a bucket's totals are
+/// queued one full period after the bucket closes, the moment its samples are uploadable, and leave in
+/// the same batches. Both queues are memory only and cleared when sharing stops.
 @MainActor @Observable
 public final class SharingSession {
     /// The length of an observation bucket and of an upload slot (contract "Privacy").
@@ -21,7 +25,7 @@ public final class SharingSession {
     /// The community board is fetched, and an upload attempted, at most this often.
     static let refreshInterval: TimeInterval = 30
     private static let maximumBatch = 50
-    /// Samples waiting in memory; the oldest are dropped first.
+    /// Samples waiting in memory, and separately request-count entries; the oldest are dropped first.
     static let maximumQueued = 1_000
 
     public private(set) var isEnabled = false
@@ -37,16 +41,27 @@ public final class SharingSession {
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var loopTask: Task<Void, Never>?
     @ObservationIgnored private var queue: [Pending] = []
+    @ObservationIgnored private var countQueue: [PendingCount] = []
+    @ObservationIgnored private var outcomes = RequestOutcomeAggregator()
     @ObservationIgnored private var seen: Set<String> = []
     @ObservationIgnored private var lastBoardRefresh: Date?
     @ObservationIgnored private var lastUploadAttempt: Date?
     @ObservationIgnored private var isRefreshing = false
     /// The most entries the queue has held at once, to show in tests that the cap is never exceeded.
     @ObservationIgnored private(set) var largestQueue = 0
+    @ObservationIgnored private(set) var largestCountQueue = 0
+    /// Request-count entries waiting to upload (not shown anywhere: the signal is not displayed yet).
+    var pendingRequestCountEntries: Int { countQueue.count }
     /// The random delay of each upload slot, by the slot's boundary; kept for a day with the queue's own limit.
     @ObservationIgnored private var slotJitter: [Date: TimeInterval] = [:]
     @ObservationIgnored private let jitterSource: @Sendable () -> TimeInterval
     private struct Pending { let localID: String; let sample: SharedSample; let completedAt: Date; let uploadableAt: Date }
+    private struct PendingCount { let entry: SharedRequestCount; let uploadableAt: Date }
+    private struct Batch {
+        var samples: [Pending]
+        var counts: [PendingCount]
+        var isEmpty: Bool { samples.isEmpty && counts.isEmpty }
+    }
 
     /// `jitter` draws a delay in seconds (0 up to `maximumJitterSeconds`); the default is
     /// `secureRandomJitter`.
@@ -82,7 +97,7 @@ public final class SharingSession {
         isEnabled = false
         generation = UUID()
         loopTask?.cancel(); loopTask = nil
-        queue.removeAll(); seen.removeAll(); pendingCount = 0
+        clearQueues()
         board = nil; privateKey = nil; consentStartedAt = nil; lastBoardRefresh = nil; lastUploadAttempt = nil
         slotJitter.removeAll()
         isRefreshing = false
@@ -97,12 +112,20 @@ public final class SharingSession {
             seen.insert(metric.id)
             // The cap holds at every moment, not after the batch: the oldest entry makes room.
             if queue.count >= Self.maximumQueued { queue.removeFirst() }
-            queue.append(Pending(localID: metric.id, sample: sample, completedAt: metric.completedAt, uploadableAt: uploadableAt(of: sample, queuedAt: now)))
+            queue.append(Pending(localID: metric.id, sample: sample, completedAt: metric.completedAt, uploadableAt: uploadableAt(observedAt: sample.observedAt, queuedAt: now)))
             largestQueue = max(largestQueue, queue.count)
         }
         // The monitor/history also deduplicates. Bound this session's defense against repeated records.
         if seen.count > 50_000 { seen = Set(queue.map(\.localID)) }
         pendingCount = queue.count
+    }
+
+    /// Counts the request outcomes a poll found (contract "Request outcomes (0.1.22)"). Memory only; they
+    /// are summed per five-minute bucket and queued as request counts once the bucket's period is over.
+    public func enqueueOutcomes(_ finished: [RequestOutcome], now: Date = .now) {
+        guard isEnabled, let consentStartedAt else { return }
+        prune(now: now)
+        outcomes.add(finished, consentStartedAt: consentStartedAt, now: now)
     }
 
     /// Fetches the community board (at most every `refreshInterval`) and uploads the samples whose
@@ -121,17 +144,18 @@ public final class SharingSession {
         if !batch.isEmpty {
             lastUploadAttempt = now
             do {
-                let request = try SampleRequest.signed(samples: batch.map(\.sample), privateKey: privateKey, sentAt: now, baseURL: baseURL)
+                let request = try SampleRequest.signed(
+                    samples: batch.samples.map(\.sample), requestCounts: batch.counts.map(\.entry),
+                    privateKey: privateKey, sentAt: now, baseURL: baseURL
+                )
                 guard isEnabled, generation == currentGeneration, !Task.isCancelled else { return }
                 let (_, code) = try await transport.send(request)
                 guard isEnabled, generation == currentGeneration, !Task.isCancelled else { return }
                 if (200..<300).contains(code) {
-                    let sent = Set(batch.map { $0.sample.sampleId })
-                    queue.removeAll { sent.contains($0.sample.sampleId) }
+                    remove(batch)
                     status = "Sharing new turns"
                 } else if code == 400 || code == 413 || code == 422 {
-                    let rejected = Set(batch.map { $0.sample.sampleId })
-                    queue.removeAll { rejected.contains($0.sample.sampleId) }
+                    remove(batch)
                     status = "Some samples were rejected. Local history is safe."
                 } else if code == 426 {
                     stopForRequiredUpdate()
@@ -174,25 +198,51 @@ public final class SharingSession {
     /// sample may leave, whichever comes first. Never less than a second, so a pending retry cannot spin.
     func secondsUntilNextRefresh(now: Date = .now) -> TimeInterval {
         var due = lastBoardRefresh.map { $0.addingTimeInterval(Self.refreshInterval) } ?? now
-        if let first = queue.map(\.uploadableAt).min() {
+        let firstQueued = (queue.map(\.uploadableAt) + countQueue.map(\.uploadableAt)).min()
+        if let first = firstQueued {
             let retry = lastUploadAttempt.map { $0.addingTimeInterval(Self.refreshInterval) } ?? first
             due = min(due, max(first, retry))
         }
+        // A bucket's totals become request-count entries when their period is over.
+        if let countsDue = outcomes.earliestDueAt { due = min(due, countsDue) }
         return max(1, due.timeIntervalSince(now))
     }
 
-    /// The samples that may leave now: their slot's time has come, and no attempt was made within the
-    /// last `refreshInterval` (a retry after a failed attempt reveals nothing the slot did not).
-    private func uploadBatch(now: Date) -> [Pending] {
-        if let lastUploadAttempt, now >= lastUploadAttempt, now.timeIntervalSince(lastUploadAttempt) < Self.refreshInterval { return [] }
-        return Array(queue.lazy.filter { $0.uploadableAt <= now }.prefix(Self.maximumBatch))
+    /// The samples and request counts that may leave now: their slot's time has come, and no attempt was
+    /// made within the last `refreshInterval` (a retry after a failed attempt reveals nothing the slot
+    /// did not). At most 50 of each, and few enough that the signed body stays within its size limit:
+    /// whichever kind has more items waiting gives one up until the body fits, and the rest leave in a
+    /// later batch.
+    private func uploadBatch(now: Date) -> Batch {
+        if let lastUploadAttempt, now >= lastUploadAttempt, now.timeIntervalSince(lastUploadAttempt) < Self.refreshInterval {
+            return Batch(samples: [], counts: [])
+        }
+        var batch = Batch(
+            samples: Array(queue.lazy.filter { $0.uploadableAt <= now }.prefix(Self.maximumBatch)),
+            counts: Array(countQueue.lazy.filter { $0.uploadableAt <= now }.prefix(Self.maximumBatch))
+        )
+        while !batch.isEmpty,
+              let size = try? SampleEnvelope(sentAt: now, samples: batch.samples.map(\.sample), requestCounts: batch.counts.map(\.entry)).encoded().count,
+              size > SampleRequest.maximumBodyBytes {
+            if batch.samples.count > batch.counts.count { batch.samples.removeLast() } else { batch.counts.removeLast() }
+        }
+        return batch
     }
 
-    /// When the sample may leave: its slot's boundary plus the slot's random delay. The slot is the first
-    /// 5-minute UTC boundary at or after both the moment of queueing and the end of the sample's bucket
-    /// plus one full period; its delay is drawn the first time the slot is needed.
-    private func uploadableAt(of sample: SharedSample, queuedAt: Date) -> Date {
-        let earliest = max(queuedAt.timeIntervalSince1970, sample.observedAt.timeIntervalSince1970 + 2 * Self.bucketSeconds)
+    /// Takes a sent or rejected batch out of both queues.
+    private func remove(_ batch: Batch) {
+        let samples = Set(batch.samples.map { $0.sample.sampleId })
+        queue.removeAll { samples.contains($0.sample.sampleId) }
+        let counts = Set(batch.counts.map { $0.entry.countId })
+        countQueue.removeAll { counts.contains($0.entry.countId) }
+    }
+
+    /// When a sample or request count of the bucket starting at `observedAt` may leave: its slot's
+    /// boundary plus the slot's random delay. The slot is the first 5-minute UTC boundary at or after both
+    /// the moment of queueing and the end of the bucket plus one full period; its delay is drawn the first
+    /// time the slot is needed.
+    private func uploadableAt(observedAt: Date, queuedAt: Date) -> Date {
+        let earliest = max(queuedAt.timeIntervalSince1970, observedAt.timeIntervalSince1970 + 2 * Self.bucketSeconds)
         let slot = Date(timeIntervalSince1970: (earliest / Self.bucketSeconds).rounded(.up) * Self.bucketSeconds)
         let jitter: TimeInterval
         if let known = slotJitter[slot] {
@@ -209,16 +259,44 @@ public final class SharingSession {
         isEnabled = false
         generation = UUID()
         loopTask?.cancel(); loopTask = nil
-        queue.removeAll(); seen.removeAll(); pendingCount = 0
+        clearQueues()
         board = nil; privateKey = nil; consentStartedAt = nil; lastBoardRefresh = nil; lastUploadAttempt = nil
         slotJitter.removeAll()
         isRefreshing = false
         status = "This Tokrate version cannot share. Check for Updates."
     }
 
+    /// Forgets every pending sample, request count and outcome.
+    private func clearQueues() {
+        queue.removeAll(); seen.removeAll(); pendingCount = 0
+        countQueue.removeAll(); outcomes.removeAll()
+    }
+
     private func prune(now: Date) {
+        queueDueCounts(now: now)
         queue.removeAll { now.timeIntervalSince($0.sample.observedAt) > 86_400 }
+        countQueue.removeAll { now.timeIntervalSince($0.entry.observedAt) > 86_400 }
         slotJitter = slotJitter.filter { now.timeIntervalSince($0.key) <= 86_400 }
         pendingCount = queue.count
+    }
+
+    /// Turns the totals of every bucket whose period is over into request-count entries (several when a
+    /// field exceeds 10,000). A group is queued as of its due time, not of the moment this runs, so its
+    /// entries share the slot of the bucket's samples whatever the poll cadence. The queue keeps the
+    /// newest `maximumQueued` entries.
+    private func queueDueCounts(now: Date) {
+        for group in outcomes.takeDue(now: now) {
+            let identity = group.bucket.identity
+            let entries = SharedRequestCount.entries(
+                observedAt: group.observedAt, client: identity.client, clientVersion: identity.clientVersion,
+                parserVersion: identity.parserVersion, model: identity.model, provider: identity.provider,
+                succeeded: group.succeeded, overloaded: group.overloaded, serverError: group.serverError
+            )
+            for entry in entries {
+                if countQueue.count >= Self.maximumQueued { countQueue.removeFirst() }
+                countQueue.append(PendingCount(entry: entry, uploadableAt: uploadableAt(observedAt: entry.observedAt, queuedAt: group.dueAt)))
+                largestCountQueue = max(largestCountQueue, countQueue.count)
+            }
+        }
     }
 }

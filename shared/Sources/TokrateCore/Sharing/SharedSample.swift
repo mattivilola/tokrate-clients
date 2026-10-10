@@ -7,7 +7,7 @@ public struct SharedSample: Encodable, Sendable {
     public let client: String
     public let clientVersion: String
     /// The release this build reports, in every upload and in the `User-Agent` of every community request.
-    public static let appVersion = "0.1.21"
+    public static let appVersion = "0.1.22"
     public let appVersion = SharedSample.appVersion
     public let parserVersion: String
     public let metricVersion: String
@@ -174,12 +174,20 @@ public struct SharedSample: Encodable, Sendable {
     }
 }
 
+/// The body of every upload from 0.1.22 (contract "Request outcomes (0.1.22)"): the completed turns and
+/// the request counts waiting to leave. Both keys are always present, an empty array when there is
+/// nothing of that kind.
 public struct SampleEnvelope: Encodable, Sendable {
-    public let schemaVersion = 1
+    public let schemaVersion = 2
     public let sentAt: Date
     public let samples: [SharedSample]
+    public let requestCounts: [SharedRequestCount]
 
-    public init(sentAt: Date, samples: [SharedSample]) { self.sentAt = sentAt; self.samples = samples }
+    public init(sentAt: Date, samples: [SharedSample], requestCounts: [SharedRequestCount] = []) {
+        self.sentAt = sentAt
+        self.samples = samples
+        self.requestCounts = requestCounts
+    }
     public func encoded() throws -> Data {
         try Self.makeEncoder().encode(self)
     }

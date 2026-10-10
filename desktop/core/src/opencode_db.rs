@@ -54,6 +54,10 @@ pub(crate) struct Assistant {
     pub finish: Option<String>,
     /// `error.name` is present (for example `MessageAbortedError`).
     pub failed: bool,
+    /// `error.name` is `APIError`: the provider's API refused or failed the call.
+    pub api_error: bool,
+    /// `error.data.statusCode` of an API error; `None` when absent or not a usable number.
+    pub error_status: Option<i64>,
     pub created_ms: i64,
     pub completed_ms: Option<i64>,
     /// `tokens.output + tokens.reasoning`.
@@ -116,6 +120,7 @@ const MESSAGE_FIELDS: &str = "m.id AS id, m.session_id AS session_id, \
     json_extract(m.data, '$.modelID') AS model, json_extract(m.data, '$.providerID') AS provider, \
     json_extract(m.data, '$.variant') AS variant, json_extract(m.data, '$.finish') AS finish, \
     json_extract(m.data, '$.error.name') AS error_name, \
+    json_extract(m.data, '$.error.data.statusCode') AS error_status, \
     json_extract(m.data, '$.time.created') AS created, \
     json_extract(m.data, '$.time.completed') AS completed, \
     json_extract(m.data, '$.tokens.output') AS output, \
@@ -156,6 +161,10 @@ fn message_columns() -> String {
         number("input"),
         number("cache_read"),
         number("cache_write"),
+        // Of the error only its name's equality with `APIError` and its HTTP status leave SQLite,
+        // never its message.
+        "CASE WHEN error_name = 'APIError' THEN 1 ELSE 0 END".to_owned(),
+        number("error_status"),
     ]
     .join(", ")
 }
@@ -283,7 +292,7 @@ fn read_messages(
         if read.messages.len() >= MAX_MESSAGES || read.bytes_read >= max_bytes {
             break;
         }
-        let values: Vec<Value> = (0..18)
+        let values: Vec<Value> = (0..20)
             .map(|index| row.get::<_, Value>(index))
             .collect::<rusqlite::Result<_>>()?;
         read.bytes_read += values.iter().map(approximate_size).sum::<usize>();
@@ -438,6 +447,8 @@ fn decode_message(values: &[Value]) -> Option<MessageRow> {
                 variant: identifier(&values[8]),
                 finish: text(&values[9]),
                 failed: matches!(values[10], Value::Integer(1)),
+                api_error: matches!(values[18], Value::Integer(1)),
+                error_status: integer(&values[19]).ok().flatten(),
                 created_ms: created_ms.unwrap_or(row_created_ms),
                 completed_ms: completed.ok().flatten(),
                 output_tokens: output.saturating_add(reasoning),

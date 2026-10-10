@@ -1,7 +1,8 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
-    response_qualifies, speed_is_plausible, ReportedReasoningEffort, ResponseMetric,
-    ResponseTotals, ToolSurface, TurnMetric,
+    push_outcomes, request_outcome_key, response_qualifies, speed_is_plausible,
+    ReportedReasoningEffort, RequestOutcome, RequestOutcomeKind, ResponseMetric, ResponseTotals,
+    ToolSurface, TurnMetric, CODEX_CLIENT, CODEX_PARSER_VERSION,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Number, Value};
@@ -33,6 +34,10 @@ pub(crate) trait JsonlEventParser: Send {
     }
     /// Primary-turn and delegated-work events since the last call (the attribution stream).
     fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
+        Vec::new()
+    }
+    /// Finished model requests (successes and provider-side failures) since the last call.
+    fn take_outcomes(&mut self) -> Vec<RequestOutcome> {
         Vec::new()
     }
 }
@@ -103,6 +108,7 @@ pub(crate) struct CodexEventParser {
     /// The trigger in force when the current response's first item arrived.
     response_start: Option<DateTime<Utc>>,
     responses: Vec<ResponseMetric>,
+    outcomes: Vec<RequestOutcome>,
 }
 
 impl CodexEventParser {
@@ -124,6 +130,7 @@ impl CodexEventParser {
             latest_trigger: None,
             response_start: None,
             responses: Vec::new(),
+            outcomes: Vec::new(),
         }
     }
 
@@ -242,6 +249,9 @@ impl CodexEventParser {
 
         let session_kind = self.session_kind;
         let already_emitted = self.emitted_turn_ids.contains(turn_id);
+        let state = self.turn_state_mut(turn_id);
+        let turn_model = state_model(state);
+        self.observe_failed_turn(turn_id, turn_model, payload, event_date);
         let state = self.turn_state_mut(turn_id);
         if state.started_at.is_none() {
             state.started_at = parse_date(payload.get("started_at"));
@@ -420,6 +430,7 @@ impl CodexEventParser {
         payload: &Map<String, Value>,
         at: Option<DateTime<Utc>>,
     ) {
+        self.observe_response_outcome(turn_id, payload, at);
         // Without a recorded first item the latest trigger still starts the response.
         let start = self.response_start.take().or(self.latest_trigger);
         let (Some(start), Some(end)) = (start, at) else {
@@ -497,6 +508,99 @@ impl CodexEventParser {
             output_tokens: tokens,
             duration_seconds: duration,
         });
+    }
+
+    /// Whether this rollout takes part in the request outcomes: a user-facing or delegated session
+    /// of a Codex new enough to record why a turn failed, on OpenAI's own service. An older one
+    /// would show successes without their failures.
+    fn records_outcomes(&self) -> bool {
+        self.session_kind != SessionKind::Excluded
+            && self.provider == "openai"
+            && version_records_turn_errors(self.client_version.as_deref())
+    }
+
+    /// One `token_usage_record` with a response id is one finished model request, whatever its
+    /// length (the response-speed thresholds do not apply).
+    fn observe_response_outcome(
+        &mut self,
+        turn_id: &str,
+        payload: &Map<String, Value>,
+        at: Option<DateTime<Utc>>,
+    ) {
+        let (Some(at), true) = (at, self.records_outcomes()) else {
+            return;
+        };
+        let Some(response_id) = payload
+            .get("response_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= MAX_TURN_ID_BYTES)
+        else {
+            return;
+        };
+        if nonnegative_integer(
+            payload
+                .get("usage")
+                .and_then(Value::as_object)
+                .and_then(|usage| usage.get("output_tokens")),
+        )
+        .is_none()
+        {
+            return;
+        }
+        let model = state_model(self.turn_state_mut(turn_id));
+        self.push_outcome(
+            request_outcome_key(&[CODEX_CLIENT, "response", response_id]),
+            at,
+            model,
+            RequestOutcomeKind::Succeeded,
+        );
+    }
+
+    /// A `task_complete` that carries a terminal error is one failed turn. Only the error's enum
+    /// and status fields are read, never its message.
+    fn observe_failed_turn(
+        &mut self,
+        turn_id: &str,
+        model: Option<String>,
+        payload: &Map<String, Value>,
+        event_date: Option<DateTime<Utc>>,
+    ) {
+        if !self.records_outcomes() {
+            return;
+        }
+        let Some(kind) = payload.get("error").and_then(classify_turn_error) else {
+            return;
+        };
+        let Some(at) = event_date.or_else(|| parse_date(payload.get("completed_at"))) else {
+            return;
+        };
+        self.push_outcome(
+            request_outcome_key(&[CODEX_CLIENT, "turn-error", turn_id]),
+            at,
+            model,
+            kind,
+        );
+    }
+
+    fn push_outcome(
+        &mut self,
+        dedupe_key: String,
+        occurred_at: DateTime<Utc>,
+        model: Option<String>,
+        kind: RequestOutcomeKind,
+    ) {
+        if let Some(outcome) = RequestOutcome::new(
+            dedupe_key,
+            occurred_at,
+            CODEX_CLIENT,
+            self.client_version.clone(),
+            CODEX_PARSER_VERSION,
+            model.as_deref(),
+            Some(&self.provider),
+            kind,
+        ) {
+            push_outcomes(&mut self.outcomes, vec![outcome]);
+        }
     }
 
     fn consume_session_meta(&mut self, payload: &Map<String, Value>) {
@@ -626,6 +730,74 @@ impl JsonlEventParser for CodexEventParser {
 
     fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
         std::mem::take(&mut self.delegation_events)
+    }
+
+    fn take_outcomes(&mut self) -> Vec<RequestOutcome> {
+        std::mem::take(&mut self.outcomes)
+    }
+}
+
+/// The model of a turn when it has exactly one.
+fn state_model(state: &TurnState) -> Option<String> {
+    match (&state.model, state.model_was_ambiguous) {
+        (Some(model), false) => Some(model.clone()),
+        _ => None,
+    }
+}
+
+/// The first Codex version whose rollouts record why a turn failed (`task_complete.error`).
+const FIRST_VERSION_WITH_TURN_ERRORS: (u64, u64, u64) = (0, 145, 0);
+
+/// Whether a `cli_version` is at least 0.145.0 by semantic-version precedence: a pre-release of
+/// 0.145.0 is older than it, build metadata is ignored, and a version that is not three numbers
+/// (or is missing) counts as too old.
+fn version_records_turn_errors(version: Option<&str>) -> bool {
+    let Some(version) = version else {
+        return false;
+    };
+    let version = version.split('+').next().unwrap_or(version);
+    let (core, pre_release) = match version.split_once('-') {
+        Some((core, pre_release)) => (core, !pre_release.is_empty()),
+        None => (version, false),
+    };
+    let parts: Vec<Option<u64>> = core
+        .split('.')
+        .map(|part| {
+            (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| part.parse().ok())
+                .flatten()
+        })
+        .collect();
+    let [Some(major), Some(minor), Some(patch)] = parts[..] else {
+        return false;
+    };
+    let version = (major, minor, patch);
+    version > FIRST_VERSION_WITH_TURN_ERRORS
+        || version == FIRST_VERSION_WITH_TURN_ERRORS && !pre_release
+}
+
+/// The provider-side failure a `task_complete.error` records, from its `codex_error_info` alone
+/// (the message is never read): a unit variant by name, or a variant that carries the HTTP status.
+fn classify_turn_error(error: &Value) -> Option<RequestOutcomeKind> {
+    match error.get("codex_error_info")? {
+        Value::String(name) => match name.as_str() {
+            "server_overloaded" => Some(RequestOutcomeKind::Overloaded),
+            "internal_server_error" => Some(RequestOutcomeKind::ServerError),
+            _ => None,
+        },
+        Value::Object(variants) if variants.len() == 1 => {
+            let (variant, body) = variants.iter().next()?;
+            matches!(
+                variant.as_str(),
+                "response_too_many_failed_attempts"
+                    | "http_connection_failed"
+                    | "response_stream_connection_failed"
+            )
+            .then(|| body.get("http_status_code").and_then(Value::as_i64))
+            .flatten()
+            .and_then(RequestOutcomeKind::from_http_status)
+        }
+        _ => None,
     }
 }
 

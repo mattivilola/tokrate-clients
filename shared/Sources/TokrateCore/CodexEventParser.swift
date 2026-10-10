@@ -51,6 +51,11 @@ public struct CodexEventParser: Sendable {
     /// The trigger the response in progress answers, fixed when its first output item arrives.
     private var responseStartedAt: Date?
     private var completedResponses: [LiveResponse] = []
+    /// Request outcomes since the last drain (see `RequestOutcome`).
+    private var requestOutcomes: [RequestOutcome] = []
+    /// Whether this rollout records why a turn failed (`cli_version` 0.145.0 or later): without that,
+    /// its successes would be counted against failures nobody can see.
+    private var recordsFailureCauses = false
 
     /// An agent session that is not delegated work has nothing to read at all.
     var isSkippedSession: Bool { isAgentSession && delegatedRootKey == nil }
@@ -77,12 +82,20 @@ public struct CodexEventParser: Sendable {
         lastTriggerAt = nil
         responseStartedAt = nil
         completedResponses.removeAll(keepingCapacity: true)
+        requestOutcomes.removeAll(keepingCapacity: true)
+        recordsFailureCauses = false
     }
 
     /// Qualifying responses completed since the last call.
     mutating func drainCompletedResponses() -> [LiveResponse] {
         defer { completedResponses.removeAll(keepingCapacity: true) }
         return completedResponses
+    }
+
+    /// Request outcomes recognised since the last call.
+    mutating func drainRequestOutcomes() -> [RequestOutcome] {
+        defer { requestOutcomes.removeAll(keepingCapacity: true) }
+        return requestOutcomes
     }
 
     /// Delegated-work events since the last call.
@@ -104,6 +117,7 @@ public struct CodexEventParser: Sendable {
             if let version = payload["cli_version"] as? String, version.range(of: "^[a-zA-Z0-9._+-]{1,40}$", options: .regularExpression) != nil { clientVersion = version }
             surface = ToolSurface.codex(originator: payload["originator"] as? String)
             provider = payload["model_provider"] as? String == "openai" ? "openai" : "unknown"
+            recordsFailureCauses = Self.recordsFailureCauses(cliVersion: payload["cli_version"] as? String)
             if let source = payload["source"] as? String, ["cli", "vscode", "exec", "desktop", "app"].contains(source) { sourceKind = "primary" }
             if let source = payload["source"] as? [String: Any], source["subagent"] != nil { isAgentSession = true }
             if let id = Self.identifier(payload["id"]) { sessionIdentity = id }
@@ -190,6 +204,7 @@ public struct CodexEventParser: Sendable {
         state.ttftMilliseconds = nonnegativeFiniteNumber(payload["time_to_first_token_ms"])
 
         let completedAt = parseDate(payload["completed_at"]) ?? eventDate
+        recordTurnFailure(payload, turnID: turnID, state: state, at: completedAt)
         let duration = state.durationMilliseconds.map { $0 / 1_000 }
             ?? state.startedAt.flatMap { start in completedAt.map { $0.timeIntervalSince(start) } }
         // A completion whose start was never observed (the reader began mid-turn) may carry no
@@ -299,11 +314,15 @@ public struct CodexEventParser: Sendable {
     private mutating func consumeResponseUsage(_ payload: [String: Any], completedAt: Date?, turnID: String, state: inout TurnState) {
         let started = responseStartedAt ?? lastTriggerAt
         responseStartedAt = nil
-        guard let completedAt, let started,
+        guard let completedAt,
               let responseID = Self.identifier(payload["response_id"]),
               let usage = payload["usage"] as? [String: Any],
               let tokens = nonnegativeInteger(usage["output_tokens"]),
               !state.seenResponseIDs.contains(responseID) else { return }
+        // Before the response-speed filter and whether or not its start was seen: every completed
+        // response is one succeeded request.
+        recordSuccess(responseID: responseID, state: state, at: completedAt)
+        guard let started else { return }
         if state.seenResponseIDs.count < 4_096 { state.seenResponseIDs.insert(responseID) }
         let duration = completedAt.timeIntervalSince(started)
         guard ResponseSpeed.qualifies(outputTokens: tokens, durationSeconds: duration) else { return }
@@ -325,6 +344,89 @@ public struct CodexEventParser: Sendable {
             outputTokens: tokens,
             durationSeconds: duration
         ))
+    }
+
+    // MARK: Request outcomes
+
+    /// The model and provider of an outcome: the turn's own model (nil when its turns disagree) and
+    /// OpenAI, in a rollout that records failure causes. Sessions that are neither a primary session
+    /// nor a spawned child (approval-review sessions) are not requests of the user's work.
+    private func outcomeModel(of state: TurnState) -> String? {
+        guard recordsFailureCauses, !isSkippedSession, provider == "openai", !state.modelWasAmbiguous else { return nil }
+        return state.model
+    }
+
+    private mutating func recordSuccess(responseID: String, state: TurnState, at completedAt: Date) {
+        guard let model = outcomeModel(of: state) else { return }
+        append(RequestOutcome(
+            dedupeKey: RequestOutcome.key(TurnMetric.codexClient, sessionIdentity ?? sourceIdentity, responseID),
+            occurredAt: completedAt, client: TurnMetric.codexClient, clientVersion: clientVersion,
+            parserVersion: TurnMetric.codexParserVersion, model: model, provider: provider, kind: .succeeded
+        ))
+    }
+
+    /// A turn that ended with a terminal provider-side error is one failed request. Only the error's
+    /// enum (and the status of the variants that carry one) is read, never its message.
+    private mutating func recordTurnFailure(_ payload: [String: Any], turnID: String, state: TurnState, at completedAt: Date?) {
+        guard let completedAt, let model = outcomeModel(of: state), let error = payload["error"] as? [String: Any],
+              let kind = Self.failureKind(error["codex_error_info"]) else { return }
+        append(RequestOutcome(
+            dedupeKey: RequestOutcome.key(TurnMetric.codexClient, sessionIdentity ?? sourceIdentity, turnID, "failure"),
+            occurredAt: completedAt, client: TurnMetric.codexClient, clientVersion: clientVersion,
+            parserVersion: TurnMetric.codexParserVersion, model: model, provider: provider, kind: kind
+        ))
+    }
+
+    private mutating func append(_ outcome: RequestOutcome?) {
+        if let outcome { requestOutcomes.append(outcome) }
+    }
+
+    private static let statusVariants = ["response_too_many_failed_attempts", "http_connection_failed", "response_stream_connection_failed"]
+
+    /// The provider-side class of a `codex_error_info` value (contract "Per-tool mapping"); nil for every
+    /// other error, including a connection failure that carries no status and every 429.
+    static func failureKind(_ info: Any?) -> RequestOutcome.Kind? {
+        if let name = info as? String {
+            return switch name {
+            case "server_overloaded": .overloaded
+            case "internal_server_error": .serverError
+            default: nil
+            }
+        }
+        guard let variants = info as? [String: Any] else { return nil }
+        for name in statusVariants {
+            guard let fields = variants[name] as? [String: Any], let status = fields["http_status_code"] as? NSNumber,
+                  CFGetTypeID(status) != CFBooleanGetTypeID(), (500...599).contains(status.intValue),
+                  status.doubleValue == Double(status.intValue) else { continue }
+            // HTTP 529 is overloaded in every tool.
+            return status.intValue == 529 ? .overloaded : .serverError
+        }
+        return nil
+    }
+
+    /// The first Codex release that persists terminal errors in `task_complete`.
+    private static let firstVersionWithFailureCauses = (major: 0, minor: 145, patch: 0)
+
+    /// Whether a rollout's `cli_version` is 0.145.0 or later by semantic-version order (a pre-release of
+    /// 0.145.0 is earlier). A missing or unparseable version records no outcomes.
+    static func recordsFailureCauses(cliVersion: String?) -> Bool {
+        guard let cliVersion,
+              let match = versionExpression.firstMatch(in: cliVersion, range: NSRange(cliVersion.startIndex..., in: cliVersion)),
+              let major = number(match, 1, in: cliVersion), let minor = number(match, 2, in: cliVersion),
+              let patch = number(match, 3, in: cliVersion) else { return false }
+        let floor = firstVersionWithFailureCauses
+        if (major, minor, patch) != (floor.major, floor.minor, floor.patch) {
+            return (major, minor, patch) > (floor.major, floor.minor, floor.patch)
+        }
+        return match.range(at: 4).location == NSNotFound
+    }
+
+    private static let versionExpression = try! NSRegularExpression(
+        pattern: "^([0-9]{1,6})\\.([0-9]{1,6})\\.([0-9]{1,6})(?:-([0-9A-Za-z.-]+))?(?:\\+[0-9A-Za-z.-]+)?\\z"
+    )
+
+    private static func number(_ match: NSTextCheckingResult, _ group: Int, in text: String) -> Int? {
+        Range(match.range(at: group), in: text).flatMap { Int(text[$0]) }
     }
 
     private func updateReasoningEffort(_ value: Any?, in state: inout TurnState) {

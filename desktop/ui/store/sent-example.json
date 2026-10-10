@@ -1,7 +1,23 @@
 {
+  "requestCounts": [
+    {
+      "appVersion": "0.1.22",
+      "client": "codex",
+      "clientVersion": "1.2.3",
+      "countId": "00000000-0000-4000-8000-000000000001",
+      "metricVersion": "request-outcome-v1",
+      "model": "example-model",
+      "observedAt": "2026-01-01T12:00:00Z",
+      "overloaded": 3,
+      "parserVersion": "codex-rollout-v2",
+      "provider": "openai",
+      "serverError": 0,
+      "succeeded": 41
+    }
+  ],
   "samples": [
     {
-      "appVersion": "0.1.21",
+      "appVersion": "0.1.22",
       "cacheReadInputTokens": 36000,
       "cacheWriteInputTokens": null,
       "client": "codex",
@@ -27,6 +43,6 @@
       "ttftMs": 840.0
     }
   ],
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sentAt": "2026-01-01T12:05:00Z"
 }

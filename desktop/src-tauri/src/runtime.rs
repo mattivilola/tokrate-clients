@@ -19,11 +19,12 @@ use tauri::Manager;
 use tokrate_core::{
     signed_request, tray_reading, AntigravityMonitor, AutoSelector, History, LiveResponses,
     ModelKey, OpenCodeMonitor, ProviderBadge, ResponseMetric, SelectionMode, SharingQueue,
-    SourceChange, SourceCheckpoints, SourceMonitor, TrayReadingKind, TurnMetric, APP_VERSION,
+    SourceChange, SourceCheckpoints, SourceMonitor, TrayReadingKind, TurnMetric, UploadBatch,
+    APP_VERSION,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-06-v4";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-09-v5";
 /// While records keep arriving, local history is written at most this often. What is not written
 /// yet is safe: the checkpoints are saved with the records they belong to, so after a crash the
 /// files behind the unwritten records are read again.
@@ -635,6 +636,31 @@ impl Runtime {
         self.signal.request();
         Ok(())
     }
+    /// Applies the server's answer to an upload (`None`: no answer) to the queue and the status:
+    /// 2xx removes the batch's samples and request counts, 400, 413 and 422 drop them as refused,
+    /// 426 stops sharing and clears everything, anything else keeps them for a retry. False when
+    /// sharing has stopped.
+    fn finish_upload(&mut self, status: Option<u16>, batch: &UploadBatch) -> bool {
+        match status {
+            Some(200..=299) => {
+                self.queue.ack_batch(batch);
+                self.status = "Sharing new turns".into()
+            }
+            Some(426) => {
+                self.queue.disable();
+                self.sharing_active = false;
+                self.board = None;
+                self.status = "Update Tokrate before sharing again. Open Application updates and check for a newer version.".into();
+                return false;
+            }
+            Some(400 | 413 | 422) => {
+                self.queue.ack_batch(batch);
+                self.status = "Some reports were rejected. Local history is safe.".into()
+            }
+            _ => self.status = "Upload unavailable. Retrying while sharing is on.".into(),
+        }
+        true
+    }
     fn valid(&self, g: u64) -> bool {
         self.settings.sharing_authorized() && self.generation == g
     }
@@ -675,6 +701,12 @@ impl Runtime {
         if self.settings.monitoring {
             match self.monitor.poll(now) {
                 Ok(found) => {
+                    // Request outcomes go to sharing and nowhere else: not into history, the
+                    // snapshot or any export. Without sharing they are dropped.
+                    let outcomes = self.monitor.take_request_outcomes();
+                    if self.sharing_active {
+                        self.queue.enqueue_outcomes(&outcomes, now);
+                    }
                     let mut responses = self.monitor.take_live_responses();
                     // Grok Build reports speed per turn only: each of its turns is one live
                     // response, and only turns completed since launch count (`push` drops others).
@@ -1226,10 +1258,12 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
             if !s.valid(generation) {
                 return;
             }
-            s.queue.batch(Utc::now())
+            s.queue.upload_batch(Utc::now())
         };
         if !batch.is_empty() {
-            if let Ok(request) = signed_request(&batch, &key, Utc::now()) {
+            if let Ok(request) =
+                signed_request(&batch.samples, &batch.request_counts, &key, Utc::now())
+            {
                 let upload = {
                     let s = shared.lock().unwrap();
                     authorized_effect(s.valid(generation), || {
@@ -1250,25 +1284,8 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
                 if !s.valid(generation) {
                     return;
                 }
-                match result {
-                    Ok(r) if r.status().is_success() => {
-                        s.queue
-                            .ack(&batch.iter().map(|m| m.sample_id).collect::<Vec<_>>());
-                        s.status = "Sharing new turns".into()
-                    }
-                    Ok(r) if r.status().as_u16() == 426 => {
-                        s.queue.disable();
-                        s.sharing_active = false;
-                        s.board = None;
-                        s.status = "Update Tokrate before sharing again. Open Application updates and check for a newer version.".into();
-                        return;
-                    }
-                    Ok(r) if [400, 413, 422].contains(&r.status().as_u16()) => {
-                        s.queue
-                            .ack(&batch.iter().map(|m| m.sample_id).collect::<Vec<_>>());
-                        s.status = "Some reports were rejected. Local history is safe.".into()
-                    }
-                    _ => s.status = "Upload unavailable. Retrying while sharing is on.".into(),
+                if !s.finish_upload(result.ok().map(|r| r.status().as_u16()), &batch) {
+                    return;
                 }
             }
         }
@@ -2073,6 +2090,7 @@ mod tests {
     }
     const OLD_NOTICE: &str = "2026-10-04-v1";
     const PREVIOUS_NOTICE: &str = "2026-10-05-v2";
+    const NOTICE_V4: &str = "2026-10-06-v4";
     fn saved_settings(sharing: bool, consent: Option<(&str, &str)>) -> serde_json::Value {
         let mut settings = serde_json::to_value(Settings::default()).unwrap();
         settings["sharing"] = sharing.into();
@@ -2082,9 +2100,9 @@ mod tests {
         settings
     }
     #[test]
-    fn notice_version_three_pauses_sharing_that_was_accepted_under_earlier_versions() {
-        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-06-v4");
-        for old in [OLD_NOTICE, PREVIOUS_NOTICE] {
+    fn notice_version_five_pauses_sharing_that_was_accepted_under_earlier_versions() {
+        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-09-v5");
+        for old in [OLD_NOTICE, PREVIOUS_NOTICE, NOTICE_V4] {
             assert_ne!(SHARING_NOTICE_VERSION, old);
             let dir = temporary();
             write_settings(&dir, saved_settings(true, Some((old, "accepted"))));
@@ -2109,6 +2127,9 @@ mod tests {
             Some((PREVIOUS_NOTICE, "declined")),
             Some((PREVIOUS_NOTICE, "withdrawn")),
             Some((PREVIOUS_NOTICE, "accepted")),
+            Some((NOTICE_V4, "declined")),
+            Some((NOTICE_V4, "withdrawn")),
+            Some((NOTICE_V4, "accepted")),
         ] {
             write_settings(&dir, saved_settings(false, consent));
             let runtime = Runtime::load(dir.clone()).unwrap();
@@ -3198,6 +3219,208 @@ mod tests {
         // Polling again does not count the turn twice.
         runtime.poll_monitor_at(now + chrono::Duration::seconds(2));
         assert_eq!(runtime.live.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A Claude Code transcript with one real response and, after it, one 529 overload, both a few
+    /// seconds before `now`.
+    fn write_claude_outcomes(dir: &std::path::Path, now: DateTime<Utc>) {
+        let at = |seconds: i64| {
+            (now - chrono::Duration::seconds(seconds))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let real = serde_json::json!({
+            "type": "assistant", "uuid": "real-1", "timestamp": at(20), "sessionId": "s1",
+            "isSidechain": false, "userType": "external", "version": "2.1.295",
+            "requestId": "req_000000000000000000000001",
+            "message": {"id": "msg_010000000000000000000001", "model": "claude-opus-5-5",
+                "role": "assistant", "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "ok"}], "usage": {"output_tokens": 5}}
+        });
+        let overload = serde_json::json!({
+            "type": "assistant", "uuid": "err-1", "timestamp": at(10), "sessionId": "s1",
+            "isSidechain": false, "userType": "external", "version": "2.1.295",
+            "isApiErrorMessage": true, "error": "server_error", "apiErrorStatus": 529,
+            "message": {"id": "err-1-message", "model": "<synthetic>", "role": "assistant",
+                "stop_reason": "stop_sequence",
+                "content": [{"type": "text", "text": "API Error: Repeated 529 Overloaded errors."}],
+                "usage": {"output_tokens": 0}}
+        });
+        let folder = dir.join("claude-projects/project");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("session.jsonl"),
+            format!("{real}\n{overload}\n"),
+        )
+        .unwrap();
+    }
+    /// The request counts the queue would upload once everything has come due.
+    fn due_request_counts(
+        runtime: &mut Runtime,
+        now: DateTime<Utc>,
+    ) -> Vec<tokrate_core::SharedRequestCount> {
+        let due = (now.timestamp() + 900).div_euclid(300) * 300 + 300;
+        let due = DateTime::<Utc>::from_timestamp(due, 0).unwrap();
+        runtime.queue.upload_batch(due);
+        runtime
+            .queue
+            .upload_batch(due + chrono::Duration::seconds(61))
+            .request_counts
+    }
+    fn totals(entries: &[tokrate_core::SharedRequestCount]) -> (u32, u32, u32) {
+        entries.iter().fold((0, 0, 0), |sum, entry| {
+            (
+                sum.0 + entry.succeeded,
+                sum.1 + entry.overloaded,
+                sum.2 + entry.server_error,
+            )
+        })
+    }
+    #[test]
+    fn request_outcomes_reach_sharing_only_while_it_is_on_and_never_the_history() {
+        let now = Utc::now();
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        write_claude_outcomes(&dir, now);
+        runtime.sharing_active = true;
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        let entries = due_request_counts(&mut runtime, now);
+        assert_eq!(totals(&entries), (1, 1, 0));
+        assert!(entries.iter().all(|entry| entry.client == "claude-code"
+            && entry.provider == "anthropic"
+            && entry.model == "claude-opus-5-5"
+            && entry.client_version == "2.1.295"));
+        // They are no part of the history or its file.
+        assert!(runtime.history.records().is_empty());
+        runtime.save_on_exit();
+        let saved = std::fs::read_to_string(dir.join("history.json")).unwrap_or_default();
+        assert!(!saved.contains("overloaded") && !saved.contains("requestCount"));
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // With sharing off the outcomes are drained and dropped: turning it on later finds none.
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        write_claude_outcomes(&dir, now);
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        runtime.sharing_active = true;
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        assert!(due_request_counts(&mut runtime, now).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn stopping_sharing_clears_the_pending_request_counts() {
+        let now = Utc::now();
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        write_claude_outcomes(&dir, now);
+        runtime.sharing_active = true;
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        assert!(runtime.queue.next_eligible_after(now).is_some());
+        runtime.stop_sharing();
+        assert!(runtime.queue.next_eligible_after(now).is_none());
+        assert!(due_request_counts(&mut runtime, now).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_servers_answer_decides_what_happens_to_the_samples_and_counts_of_an_upload() {
+        let now = Utc::now();
+        let dir = temporary();
+        let (mut runtime, _stopped) = sharing_runtime(&dir);
+        write_claude_outcomes(&dir, now);
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        runtime.queue.enqueue_outcomes(
+            &[tokrate_core::RequestOutcome::new(
+                "k".into(),
+                now - chrono::Duration::minutes(2),
+                "codex",
+                None,
+                "codex-rollout-v2",
+                Some("gpt-test"),
+                Some("openai"),
+                tokrate_core::RequestOutcomeKind::ServerError,
+            )
+            .unwrap()],
+            now,
+        );
+        let due =
+            DateTime::<Utc>::from_timestamp((now.timestamp() + 900).div_euclid(300) * 300 + 300, 0)
+                .unwrap();
+        let batch = |runtime: &mut Runtime| {
+            runtime.queue.upload_batch(due);
+            runtime
+                .queue
+                .upload_batch(due + chrono::Duration::seconds(61))
+        };
+        let first = batch(&mut runtime);
+        assert_eq!((first.samples.len(), first.request_counts.len()), (1, 1));
+        // No answer, a server error and a rate limit keep both for a retry.
+        for status in [None, Some(500), Some(503), Some(429), Some(404)] {
+            assert!(runtime.finish_upload(status, &first), "{status:?}");
+            assert_eq!(batch(&mut runtime), first, "{status:?}");
+        }
+        // Accepted: both are gone.
+        assert!(runtime.finish_upload(Some(200), &first));
+        assert!(batch(&mut runtime).is_empty());
+        // Refused for good: both are dropped too.
+        for status in [400, 413, 422] {
+            runtime.queue.disable();
+            runtime.queue.enable(now - chrono::Duration::minutes(10));
+            runtime.queue.enqueue(
+                &[turn(
+                    "again",
+                    "codex",
+                    "gpt-test",
+                    now - chrono::Duration::minutes(1),
+                )],
+                now,
+            );
+            runtime.queue.enqueue_outcomes(
+                &[tokrate_core::RequestOutcome::new(
+                    "again".into(),
+                    now - chrono::Duration::minutes(2),
+                    "codex",
+                    None,
+                    "codex-rollout-v2",
+                    Some("gpt-test"),
+                    Some("openai"),
+                    tokrate_core::RequestOutcomeKind::Succeeded,
+                )
+                .unwrap()],
+                now,
+            );
+            let pending = batch(&mut runtime);
+            assert!(!pending.is_empty());
+            assert!(runtime.finish_upload(Some(status), &pending));
+            assert!(batch(&mut runtime).is_empty(), "{status}");
+        }
+        // 426: sharing stops and everything queued is cleared.
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        runtime.queue.enqueue(
+            &[turn(
+                "late",
+                "codex",
+                "gpt-test",
+                now - chrono::Duration::minutes(1),
+            )],
+            now,
+        );
+        assert!(!runtime.finish_upload(Some(426), &first));
+        assert!(!runtime.sharing_active);
+        assert!(runtime.board.is_none());
+        assert!(runtime.queue.is_empty());
+        assert!(batch(&mut runtime).is_empty());
+        assert!(runtime.status.starts_with("Update Tokrate"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -30,6 +30,8 @@ mod kimi_tests;
 #[cfg(test)]
 mod opencode_tests;
 #[cfg(test)]
+mod outcome_tests;
+#[cfg(test)]
 mod tests;
 
 pub use antigravity::AntigravityMonitor;
@@ -39,13 +41,14 @@ pub use live::{
     LiveResponses, LiveScope, LiveValue, LIVE_CAPACITY, LIVE_VALUE_COUNT, LIVE_VALUE_WINDOW_MINUTES,
 };
 pub use model::{
-    response_qualifies, ProviderBadge, ReportedReasoningEffort, ResponseMetric, ToolSurface,
-    TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
-    CLAUDE_CLIENT, CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
-    CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
+    request_outcome_key, response_qualifies, ProviderBadge, ReportedReasoningEffort,
+    RequestOutcome, RequestOutcomeKind, ResponseMetric, ToolSurface, TurnMetric,
+    ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION, CLAUDE_CLIENT,
+    CLAUDE_METRIC_VERSION, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT,
+    CODEX_METRIC_VERSION, CODEX_PARSER_VERSION, GROK_CLIENT, GROK_METRIC_VERSION,
     GROK_PARSER_VERSION, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, OPENCODE_CLIENT,
-    OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION, RESPONSE_MAX_DURATION_SECONDS,
-    RESPONSE_METRIC_VERSION, RESPONSE_MIN_OUTPUT_TOKENS,
+    OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION, REQUEST_OUTCOME_METRIC_VERSION,
+    RESPONSE_MAX_DURATION_SECONDS, RESPONSE_METRIC_VERSION, RESPONSE_MIN_OUTPUT_TOKENS,
 };
 pub use monitor::{Monitor, SourceChange, SourceFileCheckpoint};
 pub use opencode::OpenCodeMonitor;
@@ -55,8 +58,9 @@ pub use selector::{
     TrayReadingKind, AUTO_LEAD_SECONDS, AUTO_WINDOW_MINUTES,
 };
 pub use sharing::{
-    example_request_json, signed_request, SharedSample, SharedSampleEnvelope, SharingQueue,
-    SignedRequest, APP_VERSION, MAX_PENDING_SAMPLES,
+    example_request_json, signed_request, SharedRequestCount, SharedSample, SharedSampleEnvelope,
+    SharingQueue, SignedRequest, UploadBatch, APP_VERSION, MAX_PENDING_REQUEST_COUNTS,
+    MAX_PENDING_SAMPLES,
 };
 pub use sources::{SourceCheckpoints, SourceMonitor, WatchFolder};
 

@@ -73,6 +73,9 @@ struct OpenCodeMessage: Sendable, Equatable {
     let effort: String?
     let finish: String?
     let failed: Bool
+    /// The failure is an `APIError` carrying a plain three-digit `statusCode`; nil for every other
+    /// failure and for a message that did not fail. The only error field ever kept.
+    let apiErrorStatus: Int?
     /// `time.created` and `time.completed` in milliseconds since the epoch; nil when absent.
     let createdMs: Int64?
     let completedMs: Int64?
@@ -100,6 +103,11 @@ struct OpenCodeMessage: Sendable, Equatable {
         effort = row.variant.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         finish = row.finish
         failed = row.hasErrorName
+        if row.isAPIError, case .value(let status) = row.errorStatus, (100...999).contains(status) {
+            apiErrorStatus = Int(status)
+        } else {
+            apiErrorStatus = nil
+        }
         rowCreatedMs = row.timeCreated
         updatedMs = row.timeUpdated
 

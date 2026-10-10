@@ -232,8 +232,8 @@ describe("AppStore", () => {
     expect(store.getState().ui.chartMetric).toBe("response");
   });
 
-  it("uses the consent notice version 4", () => {
-    expect(SHARING_NOTICE_VERSION).toBe("2026-10-06-v4");
+  it("uses the consent notice version 5", () => {
+    expect(SHARING_NOTICE_VERSION).toBe("2026-10-09-v5");
   });
 
   it("lists Kimi Code as one source and filters by the Moonshot AI provider", async () => {

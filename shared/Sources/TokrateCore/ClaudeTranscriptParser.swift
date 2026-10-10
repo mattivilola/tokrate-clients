@@ -56,6 +56,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         let turnID: String?
         let sessionID: String?
         let agentID: String?
+        /// The `version` of the response's first record, for its request outcome.
+        let clientVersion: String?
     }
 
     private struct TurnState: Sendable {
@@ -101,6 +103,11 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     /// record): the request for the next response is sent after it.
     private var lastTriggerAt: Date?
     private var openResponse: ResponseTrack?
+    /// Request outcomes since the last drain (see `RequestOutcome`).
+    private var requestOutcomes: [RequestOutcome] = []
+    /// Model and provider of the most recent real response of this file, once both are known: the
+    /// evidence a failed request is attributed to, because a synthetic error record names neither.
+    private var lastResponseEvidence: (model: String, provider: String)?
     /// uuid → timestamp of the latest accepted records of this file (any type), bounded; the parent
     /// of a response's first assistant record is its request trigger.
     private var recordTimestamps: [String: Date] = [:]
@@ -127,6 +134,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         isSynchronised = true
         emittedUserTurnIDs.removeAll(keepingCapacity: true)
         completedResponses.removeAll(keepingCapacity: true)
+        requestOutcomes.removeAll(keepingCapacity: true)
+        lastResponseEvidence = nil
         lastTriggerAt = nil
         openResponse = nil
         recordTimestamps.removeAll(keepingCapacity: true)
@@ -250,6 +259,11 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         return delegationEvents
     }
 
+    mutating func drainRequestOutcomes() -> [RequestOutcome] {
+        defer { requestOutcomes.removeAll(keepingCapacity: true) }
+        return requestOutcomes
+    }
+
     /// The attribution key of the session this turn belongs to; nil when the records name none.
     private func rootKey(of state: TurnState) -> String? {
         state.sessionID.map { DelegationRoot.key(client: "claude-code", rawSessionID: $0) }
@@ -335,6 +349,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         if message["model"] as? String == Self.syntheticModel {
             // Anything before this record is a different response, and it is complete.
             finalizeOpenResponse()
+            recordRequestFailure(root, message: message)
             if var state = turn {
                 if let timestamp { state.lastActivityAt = max(state.lastActivityAt, timestamp) }
                 state.hasSyntheticMessage = true
@@ -409,6 +424,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
 
     /// Times the response `messageID` belongs to. The start is fixed by its first record.
     private mutating func trackResponse(_ messageID: String, root: [String: Any], message: [String: Any], timestamp: Date?, stopReason: String?) {
+        let model = safeIdentifier(ClaudeModelID.normalized(message["model"] as? String), maximum: 80)
+        let provider = ClaudeProviderEvidence.provider(messageID: message["id"] as? String, requestID: root["requestId"] as? String)
+        lastResponseEvidence = model.flatMap { model in provider.map { (model: model, provider: $0) } }
         guard !finalizedMessageIDs.contains(messageID) else { return }
         let output = nonnegativeInteger((message["usage"] as? [String: Any])?["output_tokens"])
         let blocks = message["content"] as? [[String: Any]]
@@ -417,12 +435,13 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             startedAt: requestStart(for: root, at: timestamp),
             turnID: turn?.userTurnID,
             sessionID: safeIdentifier(root["sessionId"] as? String, maximum: 120) ?? turn?.sessionID,
-            agentID: scope == .subagent ? safeIdentifier(root["agentId"] as? String, maximum: 120) : nil
+            agentID: scope == .subagent ? safeIdentifier(root["agentId"] as? String, maximum: 120) : nil,
+            clientVersion: validatedVersion(root["version"])
         )
         if let output, track.outputTokens.map({ output >= $0 }) ?? true { track.outputTokens = output }
         if let timestamp { track.endedAt = max(track.endedAt ?? timestamp, timestamp) } else { track.endedAt = nil }
-        track.model = safeIdentifier(ClaudeModelID.normalized(message["model"] as? String), maximum: 80)
-        track.provider = ClaudeProviderEvidence.provider(messageID: message["id"] as? String, requestID: root["requestId"] as? String) ?? "unknown"
+        track.model = model
+        track.provider = provider ?? "unknown"
         track.effort = (root["perTurnEffort"] ?? root["effort"] ?? message["perTurnEffort"] ?? message["effort"]).flatMap { value in
             (value as? String).flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         }
@@ -439,6 +458,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         pendingSince = nil
         if finalizedMessageIDs.count > 8_192 { finalizedMessageIDs.removeAll(keepingCapacity: true) }
         finalizedMessageIDs.insert(track.id)
+        recordSuccess(of: track)
         guard let tokens = track.outputTokens, let start = track.startedAt, let end = track.endedAt else { return }
         let duration = end.timeIntervalSince(start)
         guard ResponseSpeed.qualifies(outputTokens: tokens, durationSeconds: duration) else { return }
@@ -465,6 +485,66 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             outputTokens: tokens,
             durationSeconds: duration
         ))
+    }
+
+    // MARK: Request outcomes
+
+    /// A completed real response is one succeeded request, counted before the response-speed filter so
+    /// short and tool-call-only responses count too. One without a model, a hosted provider, usage or a
+    /// time is not a usable response.
+    private mutating func recordSuccess(of track: ResponseTrack) {
+        guard track.outputTokens != nil, let end = track.endedAt, let provider = track.provider else { return }
+        append(RequestOutcome(
+            dedupeKey: RequestOutcome.key("claude-code", track.sessionID ?? sourceIdentity, track.agentID ?? "", track.id),
+            occurredAt: end, client: "claude-code", clientVersion: track.clientVersion, parserVersion: Self.parserVersion,
+            model: track.model, provider: provider, kind: .succeeded
+        ))
+    }
+
+    /// A synthetic API error record is one failed request when it is a provider-side failure. Only the
+    /// status field and fixed text prefixes are read, in memory; the text is never kept. The model and
+    /// provider are those of the most recent real response of the file: a first request that fails has
+    /// none, and the failure is dropped.
+    private mutating func recordRequestFailure(_ root: [String: Any], message: [String: Any]) {
+        guard root["isApiErrorMessage"] as? Bool == true, let evidence = lastResponseEvidence,
+              let kind = Self.failureKind(status: nonnegativeInteger(root["apiErrorStatus"]), content: message["content"]),
+              let occurredAt = parseDate(root["timestamp"]),
+              let record = safeIdentifier(root["uuid"] as? String, maximum: 120) ?? safeIdentifier(message["id"] as? String, maximum: 120)
+        else { return }
+        append(RequestOutcome(
+            dedupeKey: RequestOutcome.key(
+                "claude-code", safeIdentifier(root["sessionId"] as? String, maximum: 120) ?? sourceIdentity,
+                scope == .subagent ? safeIdentifier(root["agentId"] as? String, maximum: 120) ?? "" : "", "failure", record
+            ),
+            occurredAt: occurredAt, client: "claude-code", clientVersion: validatedVersion(root["version"]),
+            parserVersion: Self.parserVersion, model: evidence.model, provider: evidence.provider, kind: kind
+        ))
+    }
+
+    private mutating func append(_ outcome: RequestOutcome?) {
+        if let outcome { requestOutcomes.append(outcome) }
+    }
+
+    /// The provider-side class of a synthetic error record (contract "Per-tool mapping"), nil for every
+    /// other failure: a 429 that is the user's own limit, sign-in and key problems, invalid requests, and
+    /// connection failures or timeouts that carry no status.
+    static func failureKind(status: Int?, content: Any?) -> RequestOutcome.Kind? {
+        let texts = textBlocks(of: content)
+        if status == 529
+            || texts.contains(where: { $0.hasPrefix("API Error: Repeated 529") || $0.contains("is experiencing high load") || $0.contains("not your usage limit") }) {
+            return .overloaded
+        }
+        if status.map({ (500...599).contains($0) }) == true
+            || texts.contains(where: { $0.hasPrefix("API Error: Server error mid-response") }) {
+            return .serverError
+        }
+        return nil
+    }
+
+    private static func textBlocks(of content: Any?) -> [String] {
+        if let text = content as? String { return [text] }
+        guard let blocks = content as? [[String: Any]] else { return [] }
+        return blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
     }
 
     /// Emits the pending turn once its terminal message is complete, and reports it to the delegation
@@ -705,6 +785,7 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
     mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { parser.pollEnded(now: now, isFinal: isFinal) }
     mutating func drainCompletedResponses() -> [LiveResponse] { parser.drainCompletedResponses() }
     mutating func drainDelegationEvents() -> [DelegationEvent] { parser.drainDelegationEvents() }
+    mutating func drainRequestOutcomes() -> [RequestOutcome] { parser.drainRequestOutcomes() }
     mutating func reset(sourceIdentity: String) { parser.reset(sourceIdentity: sourceIdentity) }
     mutating func markStartedMidFile() { parser.markStartedMidFile() }
 }
@@ -770,7 +851,8 @@ public actor ClaudeSessionMonitor {
         let primaryMetrics = DelegationAttributor.merging(primaryUpdate.metrics, finals: finals)
         return MonitorUpdate(
             metrics: (primaryMetrics + subagentUpdate.metrics).sorted { $0.completedAt > $1.completedAt },
-            responses: (primaryUpdate.responses + subagentUpdate.responses).sorted { $0.completedAt > $1.completedAt }
+            responses: (primaryUpdate.responses + subagentUpdate.responses).sorted { $0.completedAt > $1.completedAt },
+            outcomes: primaryUpdate.outcomes + subagentUpdate.outcomes
         )
     }
 

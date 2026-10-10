@@ -316,11 +316,12 @@ final class PresentationTests: XCTestCase {
     func testSamplePayloadUsesTheRealUploadFieldsWithFakeValues() throws {
         let data = Data(SamplePayload.exampleJSON().utf8)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(object["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(object["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(Set(object.keys), ["schemaVersion", "sentAt", "samples", "requestCounts"])
         let sample = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
         let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]
         XCTAssertEqual(Set(sample.keys), expected)
-        XCTAssertEqual(sample["appVersion"] as? String, "0.1.21")
+        XCTAssertEqual(sample["appVersion"] as? String, "0.1.22")
         XCTAssertEqual(sample["surface"] as? String, "cli")
         XCTAssertEqual(sample["inputTokens"] as? Int, 48_000)
         XCTAssertEqual(sample["cacheReadInputTokens"] as? Int, 36_000)
@@ -330,6 +331,18 @@ final class PresentationTests: XCTestCase {
         XCTAssertTrue(SamplePayload.exampleJSON().contains("providerRegion"))
         XCTAssertEqual(sample["model"] as? String, "example-model")
         XCTAssertFalse(SamplePayload.exampleJSON().contains("example-local-id-never-uploaded"))
+
+        // The example carries one request-count entry, produced by the real serializer.
+        let counts = try XCTUnwrap(object["requestCounts"] as? [[String: Any]])
+        XCTAssertEqual(counts.count, 1)
+        let count = try XCTUnwrap(counts.first)
+        XCTAssertEqual(Set(count.keys), ["countId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "succeeded", "overloaded", "serverError"])
+        XCTAssertEqual(count["appVersion"] as? String, "0.1.22")
+        XCTAssertEqual(count["metricVersion"] as? String, "request-outcome-v1")
+        XCTAssertEqual(count["model"] as? String, "example-model")
+        XCTAssertEqual(count["succeeded"] as? Int, 41)
+        XCTAssertEqual(count["overloaded"] as? Int, 3)
+        XCTAssertEqual(count["serverError"] as? Int, 0)
     }
 
     func testSharingStateLabels() {

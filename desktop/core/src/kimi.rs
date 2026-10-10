@@ -6,8 +6,9 @@
 
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
-    response_qualifies, speed_is_plausible, ReportedReasoningEffort, ResponseMetric,
-    ResponseTotals, ToolSurface, TurnMetric, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION,
+    push_outcomes, request_outcome_key, response_qualifies, speed_is_plausible,
+    ReportedReasoningEffort, RequestOutcome, RequestOutcomeKind, ResponseMetric, ResponseTotals,
+    ToolSurface, TurnMetric, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION,
 };
 use crate::parser::JsonlEventParser;
 use chrono::{DateTime, Utc};
@@ -87,6 +88,14 @@ struct Request {
     effort: Option<String>,
 }
 
+/// The model and provider of the `llm.request` a step's call was made with, kept after the step
+/// ended: a `turn.ended` failure is attributed to them.
+#[derive(Clone)]
+struct StepRequest {
+    model: Option<String>,
+    provider: &'static str,
+}
+
 /// A step between its `step.begin` and its `step.end`.
 struct OpenStep {
     step: u64,
@@ -132,6 +141,8 @@ struct TurnState {
     /// A step failed or has no request, or the turn was ended without an answer.
     failed: bool,
     open: Option<OpenStep>,
+    /// The request of the latest step, cleared when a step begins.
+    step_request: Option<StepRequest>,
     output_tokens: i64,
     input_tokens: i64,
     cache_read_tokens: i64,
@@ -150,6 +161,7 @@ impl TurnState {
             completed: false,
             failed: false,
             open: None,
+            step_request: None,
             output_tokens: 0,
             input_tokens: 0,
             cache_read_tokens: 0,
@@ -200,6 +212,7 @@ pub(crate) struct KimiWireParser {
     turn: Option<TurnState>,
     responses: Vec<ResponseMetric>,
     delegation_events: Vec<DelegationEvent>,
+    outcomes: Vec<RequestOutcome>,
 }
 
 impl KimiWireParser {
@@ -230,6 +243,7 @@ impl KimiWireParser {
             turn: None,
             responses: Vec::new(),
             delegation_events: Vec::new(),
+            outcomes: Vec::new(),
         }
     }
 
@@ -242,7 +256,10 @@ impl KimiWireParser {
             "llm.request" => self.observe_request(root, at_ms),
             "context.append_loop_event" => return self.consume_loop_event(root, at_ms),
             "turn.step.interrupted" => self.end_turn_early(root, None),
-            "turn.ended" => self.end_turn_early(root, Some(("reason", &FAILED_TURN_REASONS))),
+            "turn.ended" => {
+                self.observe_turn_error(root, at_ms);
+                self.end_turn_early(root, Some(("reason", &FAILED_TURN_REASONS)))
+            }
             "agent.turn.ended" => {
                 self.end_turn_early(root, Some(("outcome", &["failed", "aborted"])))
             }
@@ -290,6 +307,7 @@ impl KimiWireParser {
             self.fail_turn();
         }
         if let Some(turn) = self.turn.as_mut() {
+            turn.step_request = None;
             turn.open = Some(OpenStep {
                 step,
                 request: None,
@@ -343,21 +361,91 @@ impl KimiWireParser {
             return;
         }
         let text = |name: &str| root.get(name).and_then(Value::as_str);
+        let model = text("model")
+            .filter(|model| safe_model(model))
+            .map(str::to_owned);
+        // Kimi Code's provider type for Moonshot's own API; any other is a third-party service.
+        let provider = if text("provider") == Some("kimi") {
+            "moonshot"
+        } else {
+            "unknown"
+        };
+        turn.step_request = Some(StepRequest {
+            model: model.clone(),
+            provider,
+        });
         open.request = Some(Request {
             at_ms,
-            model: text("model")
-                .filter(|model| safe_model(model))
-                .map(str::to_owned),
-            // Kimi Code's provider type for Moonshot's own API; any other is a third-party service.
-            provider: if text("provider") == Some("kimi") {
-                "moonshot"
-            } else {
-                "unknown"
-            },
+            model,
+            provider,
             effort: text("thinkingEffort")
                 .filter(|effort| ReportedReasoningEffort::is_allowed(effort))
                 .map(str::to_owned),
         });
+    }
+
+    /// A `turn.ended` that carries an error is one failed request when the error is a
+    /// provider-side one: `provider.overloaded`, or `provider.api_error` with a 5xx status. The
+    /// other records of the failed turn (`step.end`, `turn.step.interrupted`, `agent.turn.ended`)
+    /// and the retries before it are not counted. Only the error's code and status are read.
+    fn observe_turn_error(&mut self, root: &Map<String, Value>, at_ms: i64) {
+        let (Some(error), Some(turn_id)) = (
+            root.get("error").and_then(Value::as_object),
+            identifier(root.get("turnId")),
+        ) else {
+            return;
+        };
+        let Some(kind) = classify_turn_error(error) else {
+            return;
+        };
+        // The failure belongs to the request of the current turn's latest step.
+        let Some(request) = self
+            .turn
+            .as_ref()
+            .filter(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.step_request.clone())
+        else {
+            return;
+        };
+        self.push_outcome(
+            request_outcome_key(&[
+                KIMI_CLIENT,
+                "turn-error",
+                &self.session,
+                &self.agent,
+                &turn_id,
+                &at_ms.to_string(),
+            ]),
+            at_ms,
+            request.model.as_deref(),
+            request.provider,
+            kind,
+        );
+    }
+
+    fn push_outcome(
+        &mut self,
+        dedupe_key: String,
+        at_ms: i64,
+        model: Option<&str>,
+        provider: &str,
+        kind: RequestOutcomeKind,
+    ) {
+        let Some(occurred_at) = DateTime::<Utc>::from_timestamp_millis(at_ms) else {
+            return;
+        };
+        if let Some(outcome) = RequestOutcome::new(
+            dedupe_key,
+            occurred_at,
+            KIMI_CLIENT,
+            None,
+            KIMI_PARSER_VERSION,
+            model,
+            Some(provider),
+            kind,
+        ) {
+            push_outcomes(&mut self.outcomes, vec![outcome]);
+        }
     }
 
     /// A step ended. The first successful `end_turn` of a turn whose steps all succeeded completes
@@ -381,6 +469,25 @@ impl KimiWireParser {
             matches!(finish, Some("tool_use" | "end_turn")),
         ) else {
             self.fail_turn();
+            return None;
+        };
+        // A successful step is one succeeded request, whatever its length.
+        self.push_outcome(
+            request_outcome_key(&[
+                KIMI_CLIENT,
+                "step",
+                &self.session,
+                &self.agent,
+                turn_id,
+                &step.to_string(),
+                &at_ms.to_string(),
+            ]),
+            at_ms,
+            request.model.as_deref(),
+            request.provider,
+            RequestOutcomeKind::Succeeded,
+        );
+        let Some(turn) = self.turn.as_mut().filter(|turn| turn.id == turn_id) else {
             return None;
         };
         let duration = (at_ms - request.at_ms) as f64 / 1_000.0;
@@ -598,6 +705,26 @@ impl JsonlEventParser for KimiWireParser {
 
     fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
         std::mem::take(&mut self.delegation_events)
+    }
+
+    fn take_outcomes(&mut self) -> Vec<RequestOutcome> {
+        std::mem::take(&mut self.outcomes)
+    }
+}
+
+/// The provider-side failure a `turn.ended` error stands for: `provider.overloaded`, or
+/// `provider.api_error` whose `details.statusCode` is a 5xx. Rate limits, sign-in problems,
+/// connection errors and every other code are the user's side and `None`.
+fn classify_turn_error(error: &Map<String, Value>) -> Option<RequestOutcomeKind> {
+    match error.get("code").and_then(Value::as_str)? {
+        "provider.overloaded" => Some(RequestOutcomeKind::Overloaded),
+        "provider.api_error" => error
+            .get("details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("statusCode"))
+            .and_then(Value::as_i64)
+            .and_then(RequestOutcomeKind::from_http_status),
+        _ => None,
     }
 }
 

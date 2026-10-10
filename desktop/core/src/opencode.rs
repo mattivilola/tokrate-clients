@@ -1,10 +1,10 @@
 //! Monitor for OpenCode (sst/opencode: the TUI, `opencode run`, its desktop app and IDE
 //! integrations), which keeps all sessions in one SQLite database under its data folder.
 
-use crate::model::{ResponseMetric, TurnMetric};
+use crate::model::{push_outcomes, RequestOutcome, ResponseMetric, TurnMetric};
 use crate::monitor::SourceChange;
 use crate::opencode_db::{read_database, MessageScope};
-use crate::opencode_turns::{live_response, Index, DELEGATION_MAX_WAIT_MS};
+use crate::opencode_turns::{live_response, request_outcome, Index, DELEGATION_MAX_WAIT_MS};
 use crate::sqlite_read::{retry_delay, DatabaseSignature, Remembered};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
@@ -47,10 +47,13 @@ pub struct OpenCodeMonitor {
     retry_at: Option<DateTime<Utc>>,
     emitted: HashMap<String, Emitted>,
     published: Remembered<String>,
+    /// The messages whose request outcome was reported already.
+    outcomes_published: Remembered<String>,
     /// First poll time: only responses completed after it are published live.
     started_at: Option<DateTime<Utc>>,
     bytes_read_last_poll: usize,
     live_responses: Vec<ResponseMetric>,
+    request_outcomes: Vec<RequestOutcome>,
 }
 
 impl OpenCodeMonitor {
@@ -67,9 +70,11 @@ impl OpenCodeMonitor {
             retry_at: None,
             emitted: HashMap::new(),
             published: Remembered::new(),
+            outcomes_published: Remembered::new(),
             started_at: None,
             bytes_read_last_poll: 0,
             live_responses: Vec::new(),
+            request_outcomes: Vec::new(),
         }
     }
 
@@ -151,6 +156,20 @@ impl OpenCodeMonitor {
                         dirty.extend(self.index.primary_sessions());
                     }
                     for (session_id, message_id) in merged.assistants {
+                        // Memory only, and only what finished after this monitor started: the
+                        // history the database holds is not a request made while sharing was on.
+                        if !self.outcomes_published.contains(&message_id) {
+                            let outcome = self
+                                .index
+                                .measured_assistant(&session_id, &message_id)
+                                .and_then(|(version, assistant)| {
+                                    request_outcome(&message_id, version, assistant, started_at)
+                                });
+                            if let Some(outcome) = outcome {
+                                self.outcomes_published.insert(message_id.clone());
+                                push_outcomes(&mut self.request_outcomes, vec![outcome]);
+                            }
+                        }
                         let Some(assistant) =
                             self.index.primary_assistant(&session_id, &message_id)
                         else {
@@ -261,6 +280,11 @@ impl OpenCodeMonitor {
             })
             .map(|_| self.retry_at.map_or(now, |retry| retry.max(now)));
         [settle, read].into_iter().flatten().min()
+    }
+
+    /// Request outcomes of the assistant messages that finished since the last call. Memory only.
+    pub fn take_request_outcomes(&mut self) -> Vec<RequestOutcome> {
+        std::mem::take(&mut self.request_outcomes)
     }
 
     /// Qualifying assistant messages completed since the last call, oldest first.

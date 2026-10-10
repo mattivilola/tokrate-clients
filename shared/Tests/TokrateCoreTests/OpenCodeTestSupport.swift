@@ -23,6 +23,8 @@ struct SyntheticOpenCodeMessage {
     var provider: String? = "anthropic"
     var finish: String?
     var errorName: String?
+    /// `error.data.statusCode` of an `APIError`.
+    var errorStatus: Int?
     var variant: String?
     /// Replaces the encoded JSON (for malformed-row tests).
     var rawData: String?
@@ -44,7 +46,11 @@ struct SyntheticOpenCodeMessage {
             if let provider { object["providerID"] = provider }
             if let variant { object["variant"] = variant }
             if let finish { object["finish"] = finish }
-            if let errorName { object["error"] = ["name": errorName, "data": ["message": SyntheticOpenCodeDatabase.privateText]] }
+            if let errorName {
+                var errorData: [String: Any] = ["message": SyntheticOpenCodeDatabase.privateText]
+                if let errorStatus { errorData["statusCode"] = errorStatus }
+                object["error"] = ["name": errorName, "data": errorData]
+            }
             var tokens: [String: Any] = rawTokens ?? [:]
             if let output { tokens["output"] = output }
             if let reasoning { tokens["reasoning"] = reasoning }

@@ -40,6 +40,7 @@ public actor OpenCodeMonitor {
     /// User messages whose turn is emitted with a pending (nil) delegated total, and when each stops waiting.
     private var pending: [String: Date] = [:]
     private var publishedResponses = BoundedSet<String>(limit: OpenCodeMonitor.maximumRememberedItems)
+    private var publishedOutcomes = BoundedSet<String>(limit: OpenCodeMonitor.maximumRememberedItems)
     private var failureCount = 0
     private var nextAttemptAt = Date.distantPast
     private(set) var rootIsAvailable = false
@@ -204,6 +205,12 @@ public actor OpenCodeMonitor {
                 outputTokens: tokens,
                 durationSeconds: seconds
             ))
+        }
+
+        // The message ids of outcomes already handed over, so a re-read of the index never repeats one.
+        let outcomes = builder.requestOutcomes(completedSince: liveSinceMilliseconds, excluding: { publishedOutcomes.contains($0) })
+        for (messageID, outcome) in outcomes where publishedOutcomes.insert(messageID) {
+            update.outcomes.append(outcome)
         }
     }
 }

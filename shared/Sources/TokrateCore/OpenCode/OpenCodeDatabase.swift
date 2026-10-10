@@ -41,6 +41,10 @@ final class OpenCodeDatabase {
         let input: JSONInteger
         let cacheRead: JSONInteger
         let cacheWrite: JSONInteger
+        /// `error.name` is `APIError`, the only failure whose status can mean the provider failed.
+        let isAPIError: Bool
+        /// `error.data.statusCode`, only ever read for an `APIError`.
+        let errorStatus: JSONInteger
     }
 
     /// Longest role, model, provider, variant, finish, error name, version or number read, in
@@ -60,7 +64,7 @@ final class OpenCodeDatabase {
     /// How many generations of ancestors of a session are looked up (subagent chains are short).
     static let maximumAncestorRounds = 16
     private static let sessionChunk = 400
-    private static let messageColumnCount: Int32 = 18
+    private static let messageColumnCount: Int32 = 20
 
     /// The values of a message row. Each JSON path is extracted once, here, and bounded where the result
     /// is selected by `messageColumns`; the `data` text itself is never loaded.
@@ -70,6 +74,7 @@ final class OpenCodeDatabase {
         json_extract(m.data, '$.modelID') AS model, json_extract(m.data, '$.providerID') AS provider,
         json_extract(m.data, '$.variant') AS variant, json_extract(m.data, '$.finish') AS finish,
         json_extract(m.data, '$.error.name') AS error_name,
+        json_extract(m.data, '$.error.data.statusCode') AS error_status,
         json_extract(m.data, '$.time.created') AS created, json_extract(m.data, '$.time.completed') AS completed,
         json_extract(m.data, '$.tokens.output') AS output, json_extract(m.data, '$.tokens.reasoning') AS reasoning,
         json_extract(m.data, '$.tokens.input') AS input, json_extract(m.data, '$.tokens.cache.read') AS cache_read,
@@ -94,7 +99,10 @@ final class OpenCodeDatabase {
             // Only whether a non-empty name is present is used.
             "CASE WHEN typeof(error_name) = 'text' AND length(error_name) > 0 THEN 1 ELSE 0 END",
             number("created"), number("completed"), number("output"), number("reasoning"),
-            number("input"), number("cache_read"), number("cache_write")
+            number("input"), number("cache_read"), number("cache_write"),
+            // Only the name `APIError` and its numeric status are read, never the message beside them.
+            "CASE WHEN typeof(error_name) = 'text' AND error_name = 'APIError' THEN 1 ELSE 0 END",
+            "CASE WHEN typeof(error_name) = 'text' AND error_name = 'APIError' THEN \(number("error_status")) END"
         ].joined(separator: ", ")
     }()
 
@@ -267,7 +275,7 @@ final class OpenCodeDatabase {
             variant: row.text(8), finish: row.text(9), hasErrorName: (row.int64(10) ?? 0) != 0,
             created: integer(row, 11), completed: integer(row, 12), output: integer(row, 13),
             reasoning: integer(row, 14), input: integer(row, 15), cacheRead: integer(row, 16),
-            cacheWrite: integer(row, 17)
+            cacheWrite: integer(row, 17), isAPIError: (row.int64(18) ?? 0) != 0, errorStatus: integer(row, 19)
         )
     }
 

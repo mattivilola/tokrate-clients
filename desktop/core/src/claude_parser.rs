@@ -1,6 +1,7 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
-    bedrock_region_or_unknown, response_qualifies, speed_is_plausible, ReportedReasoningEffort,
+    bedrock_region_or_unknown, push_outcomes, request_outcome_key, response_qualifies,
+    speed_is_plausible, ReportedReasoningEffort, RequestOutcome, RequestOutcomeKind,
     ResponseMetric, ResponseTotals, ToolSurface, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
     CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
 };
@@ -25,6 +26,14 @@ const MAX_IDENTIFIER_BYTES: usize = 512;
 const INTERJECTION_CONTINUATION_MINUTES: i64 = 30;
 const INTERRUPTION_MARKER: &str = "[Request interrupted by user";
 const SYNTHETIC_MODEL: &str = "<synthetic>";
+/// Fixed beginnings of the error texts Claude Code writes into a synthetic API-error record. They
+/// are matched in memory and the text is discarded (contract "Request outcomes (0.1.22)").
+const REPEATED_OVERLOAD_PREFIX: &str = "API Error: Repeated 529";
+const MID_RESPONSE_SERVER_ERROR_PREFIX: &str = "API Error: Server error mid-response";
+/// Fixed fragments of the texts of a provider capacity switch and of a throttle the tool labels as
+/// not the user's own limit.
+const HIGH_LOAD_FRAGMENT: &str = "is experiencing high load";
+const NOT_USER_LIMIT_FRAGMENT: &str = "not your usage limit";
 /// `attachment.type` values Claude Code writes when an API response arrives, not when its request
 /// is made. They carry the response's own arrival time, so they never start a response.
 const BOOKKEEPING_ATTACHMENT_TYPES: [&str; 1] = ["deferred_tools_record"];
@@ -223,6 +232,10 @@ pub(crate) struct ClaudeTranscriptParser {
     closed_order: VecDeque<String>,
     responses: Vec<ResponseMetric>,
     delegation_events: Vec<DelegationEvent>,
+    outcomes: Vec<RequestOutcome>,
+    /// Model and provider evidence of the most recent real (non-synthetic) response of this file,
+    /// which a synthetic API-error record is attributed to: it names no model of its own.
+    last_real_response: Option<(Option<String>, Option<&'static str>)>,
 }
 
 impl ClaudeTranscriptParser {
@@ -272,6 +285,8 @@ impl ClaudeTranscriptParser {
             closed_order: VecDeque::new(),
             responses: Vec::new(),
             delegation_events: Vec::new(),
+            outcomes: Vec::new(),
+            last_real_response: None,
         }
     }
 
@@ -394,7 +409,10 @@ impl ClaudeTranscriptParser {
                 });
                 return None;
             }
-            "assistant" => self.track_response(object, message),
+            "assistant" => {
+                self.track_response(object, message);
+                self.observe_api_error(object, message);
+            }
             _ => return None,
         }
 
@@ -651,24 +669,27 @@ impl ClaudeTranscriptParser {
                 return;
             }
             let synthetic = message.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL);
+            let model = if synthetic {
+                None
+            } else {
+                message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_claude_model)
+            };
+            let provider =
+                provider_evidence(message_id, root.get("requestId").and_then(Value::as_str));
+            if !synthetic {
+                self.last_real_response = Some((model.clone(), provider));
+            }
             self.open_response = Some(OpenResponse {
                 message_id: message_id.to_owned(),
                 trigger: self.response_trigger(root, timestamp),
                 last_at: None,
                 output_tokens: None,
                 unusable: synthetic,
-                model: if synthetic {
-                    None
-                } else {
-                    message
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .and_then(normalize_claude_model)
-                },
-                provider: provider_evidence(
-                    message_id,
-                    root.get("requestId").and_then(Value::as_str),
-                ),
+                model,
+                provider,
                 effort: None,
                 complete: false,
                 turn_serial: self.turn.as_ref().map(|turn| turn.serial),
@@ -730,6 +751,7 @@ impl ClaudeTranscriptParser {
         if open.unusable {
             return;
         }
+        self.observe_success(&open);
         let (Some(trigger), Some(end), Some(tokens)) =
             (open.trigger, open.last_at, open.output_tokens)
         else {
@@ -785,6 +807,77 @@ impl ClaudeTranscriptParser {
             output_tokens: tokens,
             duration_seconds: duration,
         });
+    }
+
+    /// A closed, usable response with a `msg_` id is one succeeded request, counted before (and
+    /// whatever) the response-speed thresholds say.
+    fn observe_success(&mut self, open: &OpenResponse) {
+        let Some(at) = open.last_at.filter(|_| open.message_id.starts_with("msg_")) else {
+            return;
+        };
+        self.push_outcome(
+            request_outcome_key(&[CLAUDE_CLIENT, "response", &open.message_id]),
+            at,
+            open.model.as_deref(),
+            open.provider,
+            RequestOutcomeKind::Succeeded,
+        );
+    }
+
+    /// A synthetic API-error record that is a provider-side failure is one failed request,
+    /// attributed to the model and provider of the most recent real response of this file. Only
+    /// its status and fixed text prefixes are read; the text itself is never kept.
+    fn observe_api_error(
+        &mut self,
+        root: &serde_json::Map<String, Value>,
+        message: Option<&serde_json::Map<String, Value>>,
+    ) {
+        if root.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
+        let Some(kind) = message.and_then(|message| classify_api_error(root, message)) else {
+            return;
+        };
+        let (Some(at), Some(uuid)) = (
+            parse_date(root.get("timestamp")),
+            root.get("uuid")
+                .and_then(Value::as_str)
+                .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES)),
+        ) else {
+            return;
+        };
+        let Some((model, provider)) = self.last_real_response.clone() else {
+            return;
+        };
+        self.push_outcome(
+            request_outcome_key(&[CLAUDE_CLIENT, "api-error", uuid]),
+            at,
+            model.as_deref(),
+            provider,
+            kind,
+        );
+    }
+
+    fn push_outcome(
+        &mut self,
+        dedupe_key: String,
+        occurred_at: DateTime<Utc>,
+        model: Option<&str>,
+        provider: Option<&str>,
+        kind: RequestOutcomeKind,
+    ) {
+        if let Some(outcome) = RequestOutcome::new(
+            dedupe_key,
+            occurred_at,
+            CLAUDE_CLIENT,
+            self.client_version.clone(),
+            CLAUDE_PARSER_VERSION,
+            model,
+            provider,
+            kind,
+        ) {
+            push_outcomes(&mut self.outcomes, vec![outcome]);
+        }
     }
 
     fn accepts_record(&self, root: &serde_json::Map<String, Value>) -> bool {
@@ -1039,6 +1132,7 @@ impl JsonlEventParser for ClaudeTranscriptParser {
         self.record_times.clear();
         self.record_order.clear();
         self.open_response = None;
+        self.last_real_response = None;
     }
 
     fn take_responses(&mut self) -> Vec<ResponseMetric> {
@@ -1047,6 +1141,10 @@ impl JsonlEventParser for ClaudeTranscriptParser {
 
     fn take_delegation_events(&mut self) -> Vec<DelegationEvent> {
         std::mem::take(&mut self.delegation_events)
+    }
+
+    fn take_outcomes(&mut self) -> Vec<RequestOutcome> {
+        std::mem::take(&mut self.outcomes)
     }
 
     fn flush_pending(&mut self, now: DateTime<Utc>, final_read: bool) -> Option<TurnMetric> {
@@ -1072,6 +1170,53 @@ impl JsonlEventParser for ClaudeTranscriptParser {
             self.close_response();
         }
         None
+    }
+}
+
+/// The provider-side failure a synthetic API-error record stands for, from its `apiErrorStatus`
+/// (529 overloaded, any other 5xx a server error) or else from fixed text fragments: an explicit
+/// overload, a capacity switch, or a throttle the tool labels as not the user's limit (overloaded),
+/// and a server error that ended a response mid-stream. Every other failure (the user's own
+/// limits, sign-in, invalid requests, local connection trouble) is `None`.
+fn classify_api_error(
+    root: &serde_json::Map<String, Value>,
+    message: &serde_json::Map<String, Value>,
+) -> Option<RequestOutcomeKind> {
+    if let Some(kind) = root
+        .get("apiErrorStatus")
+        .and_then(Value::as_i64)
+        .and_then(RequestOutcomeKind::from_http_status)
+    {
+        return Some(kind);
+    }
+    let mut kind = None;
+    for_each_text(message.get("content"), &mut |text| {
+        if text.starts_with(REPEATED_OVERLOAD_PREFIX)
+            || text.contains(HIGH_LOAD_FRAGMENT)
+            || text.contains(NOT_USER_LIMIT_FRAGMENT)
+        {
+            kind = Some(RequestOutcomeKind::Overloaded);
+        } else if kind.is_none() && text.starts_with(MID_RESPONSE_SERVER_ERROR_PREFIX) {
+            kind = Some(RequestOutcomeKind::ServerError);
+        }
+    });
+    kind
+}
+
+/// Calls `visit` with each text of a message's content (a string, or the text blocks of a list).
+fn for_each_text(content: Option<&Value>, visit: &mut dyn FnMut(&str)) {
+    match content {
+        Some(Value::String(text)) => visit(text),
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        visit(text);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

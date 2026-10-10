@@ -68,6 +68,30 @@ enum KimiLog {
         line(["type": "turn.ended", "time": milliseconds(seconds), "turnId": turnID, "reason": reason])
     }
 
+    /// A `turn.ended` that carries an error; the message is private text that must never be read.
+    static func turnFailed(
+        _ turnID: Any, code: String, status: Int? = nil, name: String = "APIStatusError", at seconds: Double
+    ) -> Data {
+        var details: [String: Any] = ["requestId": NSNull(), "traceId": "trace"]
+        details["statusCode"] = status
+        return line([
+            "type": "turn.ended", "time": milliseconds(seconds), "turnId": turnID, "reason": "failed", "durationMs": 1_000,
+            "error": ["code": code, "name": name, "message": "PRIVATE_ERROR_TEXT", "details": details, "retryable": false]
+        ])
+    }
+
+    static func stepRetrying(_ turnID: String, at seconds: Double, status: Int = 529) -> Data {
+        line([
+            "type": "turn.step.retrying", "time": milliseconds(seconds), "turnId": turnID, "step": 1, "failedAttempt": 1,
+            "nextAttempt": 2, "maxAttempts": 3, "delayMs": 500, "errorName": "APIProviderOverloadedError",
+            "errorMessage": "PRIVATE_ERROR_TEXT", "statusCode": status
+        ])
+    }
+
+    static func promptCompleted(at seconds: Double) -> Data {
+        line(["type": "prompt.completed", "time": milliseconds(seconds), "promptId": "p1", "reason": "failed"])
+    }
+
     static func agentTurnEnded(_ turnID: Any, outcome: String, at seconds: Double) -> Data {
         line(["type": "agent.turn.ended", "time": milliseconds(seconds), "turnId": turnID, "outcome": outcome])
     }
@@ -102,6 +126,7 @@ struct KimiParse {
     var metrics: [TurnMetric] = []
     var responses: [LiveResponse] = []
     var events: [DelegationEvent] = []
+    var outcomes: [RequestOutcome] = []
 }
 
 extension KimiWireParser {
@@ -116,6 +141,7 @@ extension KimiWireParser {
         for line in lines { if let metric = parser.consume(line: line) { result.metrics.append(metric) } }
         result.responses = parser.drainCompletedResponses()
         result.events = parser.drainDelegationEvents()
+        result.outcomes = parser.drainRequestOutcomes()
         return result
     }
 }
