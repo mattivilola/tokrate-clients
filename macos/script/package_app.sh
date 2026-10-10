@@ -8,9 +8,9 @@ case "$CONFIGURATION" in debug|release) ;; *) echo 'Expected debug or release' >
 "${SWIFT_BUILD[@]}" --package-path "$ROOT_DIR" --build-system native -j 2 --configuration "$CONFIGURATION" --product TokrateApp
 BIN_DIR="$("${SWIFT_BUILD[@]}" --package-path "$ROOT_DIR" --build-system native --configuration "$CONFIGURATION" --show-bin-path)"
 if [[ "$CONFIGURATION" == release ]]; then
-    DEFAULT_BUNDLE="$ROOT_DIR/macos/dist/0.1.20/Tokrate.app"
+    DEFAULT_BUNDLE="$ROOT_DIR/macos/dist/0.1.22/Tokrate.app"
 else
-    DEFAULT_BUNDLE="$ROOT_DIR/macos/dist/0.1.20-debug/Tokrate.app"
+    DEFAULT_BUNDLE="$ROOT_DIR/macos/dist/0.1.22-debug/Tokrate.app"
 fi
 BUNDLE="${TOKRATE_BUNDLE_PATH:-$DEFAULT_BUNDLE}"
 SPARKLE_SOURCE="$BIN_DIR/Sparkle.framework"
@@ -79,8 +79,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Tokrate</string>
 <key>CFBundleDisplayName</key><string>Tokrate</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.20</string>
-<key>CFBundleVersion</key><string>21</string>
+<key>CFBundleShortVersionString</key><string>0.1.22</string>
+<key>CFBundleVersion</key><string>23</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

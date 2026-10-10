@@ -5001,7 +5001,7 @@ dependencies = [
 
 [[package]]
 name = "tokrate-core"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5018,7 +5018,7 @@ dependencies = [
 
 [[package]]
 name = "tokrate-desktop"
-version = "0.1.20"
+version = "0.1.22"
 dependencies = [
  "chrono",
  "futures-util",

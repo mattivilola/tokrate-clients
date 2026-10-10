@@ -26,11 +26,11 @@ final class UpdaterConfigurationTests: XCTestCase {
     }
 
     func testOnlyPackagesOnTheReleaseRepositoryOfGitHubOverHTTPSAreDownloaded() {
-        let base = "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.20/Tokrate-0.1.20.zip"
+        let base = "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.22/Tokrate-0.1.22-macos-arm64.zip"
         XCTAssertTrue(UpdateDownloadPolicy.permits(URL(string: base)))
-        XCTAssertTrue(UpdateDownloadPolicy.permits(URL(string: "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.20/Tokrate%200.1.20.zip")))
+        XCTAssertTrue(UpdateDownloadPolicy.permits(URL(string: "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.22/Tokrate%200.1.22.zip")))
         for rejected in [
-            "http://github.com/mattivilola/tokrate-clients/releases/download/v0.1.20/Tokrate.zip",
+            "http://github.com/mattivilola/tokrate-clients/releases/download/v0.1.22/Tokrate.zip",
             "https://github.com/mattivilola/other-repo/releases/download/v1/Tokrate.zip",
             "https://github.com/someone-else/tokrate-clients/releases/download/v1/Tokrate.zip",
             "https://github.com/mattivilola/tokrate-clients/releases/latest",

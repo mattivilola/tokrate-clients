@@ -359,8 +359,8 @@ mod tests {
     #[test]
     fn updates_download_only_from_the_projects_github_release_assets() {
         for trusted in [
-            "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.20/Tokrate_0.1.20_x64-setup.exe",
-            "https://github.com/mattivilola/tokrate-clients/releases/download/desktop-v0.1.20/a%20b.AppImage?x=1",
+            "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.22/Tokrate_0.1.22_x64-setup.exe",
+            "https://github.com/mattivilola/tokrate-clients/releases/download/v0.1.22-desktop-alpha.1/Tokrate_0.1.22_amd64.AppImage?x=1",
             "https://GITHUB.com:443/mattivilola/tokrate-clients/releases/download/v1/a",
         ] {
             assert!(download_url_is_trusted(&url(trusted)), "{trusted}");
