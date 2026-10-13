@@ -45,7 +45,9 @@ struct HistoryView: View {
                     ClientProviderFilterView(client: $store.clientFilter, provider: $store.providerFilter, clients: store.availableClients, providers: store.availableProviders)
                         .fixedSize()
                 }
-                if let line = store.providerErrorLine { ProviderErrorLineView(line: line) }
+                if store.providerErrorLine != nil || store.communityErrorLine != nil {
+                    ProviderErrorLinesView(local: store.providerErrorLine, community: store.communityErrorLine)
+                }
                 if snapshot.selection.isAllModels {
                     CohortComparisonView(snapshot: snapshot, range: $range, compact: false) { cohort in
                         store.dashboardSelection = .cohort(cohort)

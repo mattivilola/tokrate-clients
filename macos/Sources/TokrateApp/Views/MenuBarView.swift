@@ -171,7 +171,9 @@ private struct MenuBarDashboardView: View {
     private func content(snapshot: DashboardSnapshot, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             if store.sharingPreferences.isConsentDisclosureVisible { consentBanner }
-            if let line = store.providerErrorLine { ProviderErrorLineView(line: line) }
+            if store.providerErrorLine != nil || store.communityErrorLine != nil {
+                ProviderErrorLinesView(local: store.providerErrorLine, community: store.communityErrorLine)
+            }
             if snapshot.selection.isAllModels {
                 CohortComparisonView(snapshot: snapshot, range: $range, compact: true) { cohort in
                     store.dashboardSelection = .cohort(cohort)

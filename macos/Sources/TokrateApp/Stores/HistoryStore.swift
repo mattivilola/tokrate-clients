@@ -116,8 +116,14 @@ final class HistoryStore {
     /// advances and it disappears 24 hours after the latest failure; while monitoring is paused it
     /// keeps its last state. In-memory only.
     private(set) var providerErrorLine: String?
+    /// The passive line under the local one about what other contributors report (contract "Community
+    /// error alerts (0.1.23)"): an active alert, the note that one cleared, or, while sharing is off and
+    /// the local line is shown, the hint to turn sharing on. Refreshed whenever the board changes and
+    /// with every poll. In-memory only.
+    private(set) var communityErrorLine: CommunityErrorAlerts.Line?
     @ObservationIgnored private var liveResponses = LiveResponseBuffer()
     @ObservationIgnored private var providerErrors = LocalProviderErrors()
+    @ObservationIgnored private var communityErrors = CommunityErrorAlerts()
     /// The session files already read to their end, as the monitors last reported them. The next launch
     /// skips what it still matches (see `SourceFileCheckpoint`).
     @ObservationIgnored private(set) var checkpoints = SourceCheckpoints()
@@ -237,6 +243,7 @@ final class HistoryStore {
             if restored.hasScopedAccess { securityScopedFolders[kind] = restored.url }
         }
         updateSourceStatus(claude: nil, grok: nil)
+        observeSharing()
     }
 
     func startAutomatically() {
@@ -609,6 +616,47 @@ final class HistoryStore {
         providerErrors.prune(now: now)
         let line = providerErrors.line(now: now) { RelativeTime.string(from: $0, now: now) }
         if line != providerErrorLine { providerErrorLine = line }
+        refreshCommunityErrorLine(now: now)
+    }
+
+    /// Follows the community board and the sharing switch: the line is rebuilt whenever either changes
+    /// (the board arrives every 30 seconds while sharing is on), not only at the next poll.
+    private func observeSharing() {
+        withObservationTracking {
+            _ = sharing.board
+            _ = sharing.isEnabled
+        } onChange: { [weak self] in
+            // Fires before the change lands: look at the new values on the next main-actor turn.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.refreshCommunityErrorLine()
+                self.observeSharing()
+            }
+        }
+    }
+
+    /// Rebuilds the community line from the board's error alerts, the models used in the last 7 days and
+    /// the local failures. With sharing off no board is fetched: nothing is shown and what was shown is
+    /// forgotten; a board that could not be fetched shows nothing but does not count as a recovery.
+    private func refreshCommunityErrorLine(now: Date = .now) {
+        let line: CommunityErrorAlerts.Line?
+        if !sharing.isEnabled {
+            communityErrors.reset()
+            line = providerErrorLine == nil ? nil : CommunityErrorAlerts.Line(kind: .sharingHint, text: CommunityErrorAlerts.sharingHint)
+        } else if let board = sharing.board {
+            // The models are only collected when there is something to match them against.
+            let cutoff = now.addingTimeInterval(-CommunityErrorAlerts.usedModelWindow)
+            let usedModels: Set<String> = board.errorAlerts.isEmpty
+                ? []
+                : Set(history.records.lazy.filter { $0.completedAt > cutoff }.compactMap(\.model))
+            line = communityErrors.line(
+                alerts: board.errorAlerts, usedModels: usedModels, localGroups: providerErrors.groups(now: now),
+                isSharing: true, now: now
+            ) { RelativeTime.string(from: $0, now: now) }
+        } else {
+            line = nil
+        }
+        if line != communityErrorLine { communityErrorLine = line }
     }
 
     private func saveHistory(now: Date = .now) {

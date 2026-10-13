@@ -3361,6 +3361,28 @@ mod tests {
         }
     }
     #[test]
+    fn community_error_alerts_reach_the_snapshot_only_while_sharing_is_on() {
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        runtime.board = Board::parse(
+            br#"{"schemaVersion":1,"cohorts":[],"errors":{"alerts":[
+                {"model":"claude-opus-5-5","provider":"anthropic","clients":["claude-code"],
+                 "failingContributors":3,"overloaded":4,"serverError":1,
+                 "firstFailureAt":"2026-10-13T11:10:00Z","lastFailureAt":"2026-10-13T11:50:00Z"},
+                {"model":5}]}}"#,
+        );
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        let alerts = snapshot["board"]["errors"]["alerts"].as_array().unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["model"], "claude-opus-5-5");
+        assert_eq!(alerts[0]["failingContributors"], 3);
+        // Stopping sharing drops the board, and with it every alert.
+        runtime.stop_sharing();
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        assert!(snapshot["board"].is_null());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn provider_errors_wait_for_the_next_poll_while_monitoring_is_paused() {
         let now = Utc::now();
         let dir = temporary();

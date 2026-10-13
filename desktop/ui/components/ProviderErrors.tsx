@@ -1,19 +1,63 @@
-import { CircleAlert } from "lucide-react";
-import { providerErrorLine } from "../model/provider-errors";
+import { CircleAlert, CircleCheck, Info } from "lucide-react";
+import {
+  communityErrorLine,
+  providerErrorLine,
+  SHARING_HINT,
+} from "../model/provider-errors";
 import { useStore } from "../store/store";
 import { useAppStore } from "./primitives";
 
-/** Passive line about the user's own provider-side failures; hidden without one in 24 hours. */
+/**
+ * Passive lines about provider-side failures: the user's own of the last 24 hours, and under them
+ * what other contributors report (or, with sharing off, a hint to turn sharing on). Hidden when
+ * there is nothing to say.
+ */
 export function ProviderErrors() {
   const store = useAppStore();
-  const groups = useStore(store, (s) => s.snapshot.providerErrors);
+  const snapshot = useStore(store, (s) => s.snapshot);
+  const recovery = useStore(store, (s) => s.errorRecovery);
   const now = useStore(store, (s) => s.now);
-  const line = providerErrorLine(groups, now);
-  if (!line) return null;
+  const { sharing } = snapshot.settings;
+  const local = providerErrorLine(snapshot.providerErrors, now);
+  const community = communityErrorLine(
+    {
+      alerts: snapshot.board?.errors?.alerts,
+      sharing,
+      records: snapshot.records,
+      groups: snapshot.providerErrors,
+      now,
+    },
+    recovery,
+  );
+  const hint = local && !sharing ? SHARING_HINT : null;
+  if (!local && !community && !hint) return null;
   return (
-    <p className="provider-errors" role="note">
-      <CircleAlert size={16} aria-hidden="true" />
-      <span>{line}</span>
-    </p>
+    <div className="provider-errors-group">
+      {local && (
+        <p className="provider-errors" role="note">
+          <CircleAlert size={16} aria-hidden="true" />
+          <span>{local}</span>
+        </p>
+      )}
+      {community && (
+        <p
+          className={`provider-errors${community.kind === "recovery" ? " provider-errors-quiet" : ""}`}
+          role="note"
+        >
+          {community.kind === "recovery" ? (
+            <CircleCheck size={16} aria-hidden="true" />
+          ) : (
+            <CircleAlert size={16} aria-hidden="true" />
+          )}
+          <span>{community.text}</span>
+        </p>
+      )}
+      {hint && (
+        <p className="provider-errors provider-errors-quiet" role="note">
+          <Info size={16} aria-hidden="true" />
+          <span>{hint}</span>
+        </p>
+      )}
+    </div>
   );
 }

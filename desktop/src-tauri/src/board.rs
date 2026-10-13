@@ -2,7 +2,9 @@
 //! structure and only that structure is forwarded: a field of the wrong type, a missing id, an
 //! oversized string or a list past its cap rejects the whole board, so nothing the UI dereferences
 //! can be malformed and nothing unlisted reaches the webview.
-use serde::{Deserialize, Serialize};
+use chrono::DateTime;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 /// The board schema the app understands.
 const SCHEMA_VERSION: u64 = 1;
@@ -10,6 +12,11 @@ const MAX_COHORTS: usize = 10_000;
 const MAX_ALERTS: usize = 1_000;
 /// Longest string kept: a cohort id (a JSON-encoded tuple of identifiers) is the longest.
 const MAX_TEXT_BYTES: usize = 2_048;
+/// Error alerts kept (contract "Community error alerts (0.1.23)"); the server's order is kept.
+const MAX_ERROR_ALERTS: usize = 20;
+/// Longest model id, provider or client id of an error alert (the upload rules' bound).
+const MAX_ID_BYTES: usize = 80;
+const MAX_ALERT_CLIENTS: usize = 16;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +34,69 @@ pub struct Board {
     cohorts: Vec<Cohort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     alerts: Option<Vec<Alert>>,
+    /// Provider error alerts. Decoded leniently, unlike the rest of the board: see `lenient_errors`.
+    #[serde(
+        default,
+        deserialize_with = "lenient_errors",
+        skip_serializing_if = "Option::is_none"
+    )]
+    errors: Option<BoardErrors>,
+}
+
+/// `errors` of the board: only the alerts, never empty (no alerts is no `errors`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+struct BoardErrors {
+    alerts: Vec<ErrorAlert>,
+}
+
+/// A (model, provider) pair with provider failures from enough contributors in the last hour.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ErrorAlert {
+    model: String,
+    provider: String,
+    clients: Vec<String>,
+    failing_contributors: u64,
+    overloaded: u64,
+    server_error: u64,
+    first_failure_at: String,
+    last_failure_at: String,
+}
+
+impl ErrorAlert {
+    /// An alert the UI can word: named, from at least one contributor, with at least one counted
+    /// failure and readable times.
+    fn is_sound(&self) -> bool {
+        let id = |text: &str, max: usize| !text.is_empty() && text.len() <= max;
+        id(&self.model, MAX_ID_BYTES)
+            && id(&self.provider, MAX_ID_BYTES)
+            && self.clients.len() <= MAX_ALERT_CLIENTS
+            && self.clients.iter().all(|client| id(client, MAX_ID_BYTES))
+            && self.failing_contributors >= 1
+            && self.overloaded.saturating_add(self.server_error) >= 1
+            && [&self.first_failure_at, &self.last_failure_at]
+                .into_iter()
+                .all(|at| DateTime::parse_from_rfc3339(at).is_ok())
+    }
+}
+
+/// `errors.alerts` of the board: a missing or misshapen `errors` or `alerts` is no alerts, an
+/// entry that does not fit is skipped on its own and at most `MAX_ERROR_ALERTS` are kept, so
+/// nothing here can fail the decode of the board (an older server has no `errors`).
+fn lenient_errors<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BoardErrors>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let alerts: Vec<ErrorAlert> = value
+        .get("alerts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| serde_json::from_value::<ErrorAlert>(entry.clone()).ok())
+        .filter(ErrorAlert::is_sound)
+        .take(MAX_ERROR_ALERTS)
+        .collect();
+    Ok((!alerts.is_empty()).then_some(BoardErrors { alerts }))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -258,5 +328,119 @@ mod tests {
         assert!(parse(json!({"schemaVersion": 1, "cohorts": cohorts})).is_none());
         let alerts: Vec<Value> = (0..=MAX_ALERTS).map(|_| json!({})).collect();
         assert!(parse(json!({"schemaVersion": 1, "cohorts": [], "alerts": alerts})).is_none());
+    }
+
+    fn alert(model: &str) -> Value {
+        json!({
+            "model": model, "provider": "anthropic", "clients": ["claude-code"],
+            "failingContributors": 3, "overloaded": 4, "serverError": 0,
+            "firstFailureAt": "2026-10-13T11:10:00Z", "lastFailureAt": "2026-10-13T11:50:00Z"
+        })
+    }
+    fn alerts_of(errors: Value) -> Vec<String> {
+        let board = parse(json!({"schemaVersion": 1, "cohorts": [], "errors": errors})).unwrap();
+        board
+            .errors
+            .map(|errors| errors.alerts.into_iter().map(|a| a.model).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn error_alerts_are_decoded_and_forwarded_with_the_listed_fields_only() {
+        let mut entry = alert("claude-opus-5-5");
+        entry["internal"] = json!("dropped");
+        let board = parse(json!({
+            "schemaVersion": 1, "cohorts": [], "errors": {"alerts": [entry], "extra": 1}
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&board).unwrap(),
+            json!({"cohorts": [], "errors": {"alerts": [alert("claude-opus-5-5")]}})
+        );
+    }
+
+    #[test]
+    fn a_board_without_error_alerts_decodes_as_none() {
+        for board in [
+            json!({"schemaVersion": 1, "cohorts": []}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": null}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": {}}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": {"alerts": []}}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": {"alerts": null}}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": {"alerts": {"model": "m"}}}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": "broken"}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": [1, 2]}),
+            json!({"schemaVersion": 1, "cohorts": [], "errors": 7}),
+        ] {
+            let decoded = parse(board.clone()).unwrap_or_else(|| panic!("{board}"));
+            assert!(decoded.errors.is_none(), "{board}");
+            assert!(serde_json::to_value(&decoded)
+                .unwrap()
+                .get("errors")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn a_malformed_error_alert_is_skipped_on_its_own() {
+        let mut broken = vec![json!(null), json!("text"), json!(7), json!({})];
+        for (field, value) in [
+            ("model", json!(5)),
+            ("model", json!("")),
+            ("model", json!("x".repeat(MAX_ID_BYTES + 1))),
+            ("provider", json!(null)),
+            ("provider", json!("")),
+            ("clients", json!("claude-code")),
+            ("clients", json!([1])),
+            ("clients", json!(["x".repeat(MAX_ID_BYTES + 1)])),
+            ("clients", json!(vec!["claude-code"; MAX_ALERT_CLIENTS + 1])),
+            ("failingContributors", json!(0)),
+            ("failingContributors", json!(-1)),
+            ("failingContributors", json!(2.5)),
+            ("failingContributors", json!("3")),
+            ("overloaded", json!(-1)),
+            ("serverError", json!("1")),
+            ("firstFailureAt", json!("yesterday")),
+            ("lastFailureAt", json!(12)),
+        ] {
+            let mut entry = alert("broken");
+            entry[field] = value;
+            broken.push(entry);
+        }
+        let mut no_failures = alert("broken");
+        no_failures["overloaded"] = json!(0);
+        no_failures["serverError"] = json!(0);
+        broken.push(no_failures);
+        let mut missing = alert("broken");
+        missing.as_object_mut().unwrap().remove("clients");
+        broken.push(missing);
+        let mut entries = vec![alert("first")];
+        entries.extend(broken);
+        entries.push(alert("last"));
+        assert_eq!(alerts_of(json!({"alerts": entries})), ["first", "last"]);
+        // Only broken entries is no alerts, and the rest of the board is untouched.
+        let board = parse(json!({
+            "schemaVersion": 1, "window": "24h", "cohorts": [{"id": "a"}],
+            "errors": {"alerts": [json!(null)]}
+        }))
+        .unwrap();
+        assert!(board.errors.is_none());
+        assert_eq!(board.window.as_deref(), Some("24h"));
+        assert_eq!(board.cohorts.len(), 1);
+    }
+
+    #[test]
+    fn at_most_twenty_error_alerts_are_kept_in_the_servers_order() {
+        let entries: Vec<Value> = (0..30).map(|i| alert(&format!("model-{i}"))).collect();
+        let kept = alerts_of(json!({"alerts": entries}));
+        assert_eq!(kept.len(), MAX_ERROR_ALERTS);
+        assert_eq!(kept[0], "model-0");
+        assert_eq!(kept[19], "model-19");
+        // A skipped entry does not use up a place.
+        let mut entries = vec![json!(null)];
+        entries.extend((0..21).map(|i| alert(&format!("model-{i}"))));
+        let kept = alerts_of(json!({"alerts": entries}));
+        assert_eq!(kept.len(), MAX_ERROR_ALERTS);
+        assert_eq!(kept[19], "model-19");
     }
 }

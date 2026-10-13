@@ -324,3 +324,47 @@ struct ProviderErrorLineView: View {
         .help("Failures at the provider counted from the coding tools' own records. It stays for 24 hours after the latest one and is not shared or saved.")
     }
 }
+
+/// What the community says about provider errors (contract "Community error alerts (0.1.23)"), under the
+/// user's own line. An active alert is styled like that line; the note that one cleared and the hint to
+/// turn sharing on are muted. Presentation-only: the store supplies the finished sentence.
+struct CommunityErrorLineView: View {
+    let line: CommunityErrorAlerts.Line
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: symbol)
+                .accessibilityHidden(true)
+            Text(line.text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(line.kind == .alert ? DashboardStyle.Typography.footnoteEmphasis : DashboardStyle.Typography.footnote)
+        .foregroundStyle(line.kind == .alert ? DashboardStyle.warn : DashboardStyle.muted)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line.text)
+        .help("Provider errors that other Tokrate contributors reported in the last hour, from the community board. It is not shared or saved.")
+    }
+
+    private var symbol: String {
+        switch line.kind {
+        case .alert: "person.2.fill"
+        case .recovery: "checkmark.circle"
+        case .sharingHint: "person.2"
+        }
+    }
+}
+
+/// The local provider-error line with the community line beneath it, close together; either may be
+/// alone. Callers show it only when at least one is present.
+struct ProviderErrorLinesView: View {
+    let local: String?
+    let community: CommunityErrorAlerts.Line?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let local { ProviderErrorLineView(line: local) }
+            if let community { CommunityErrorLineView(line: community) }
+        }
+    }
+}

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { AsyncGate } from "../async-gate";
+import { advanceRecovery, NO_RECOVERY } from "../model/provider-errors";
 import type {
   AppState,
   Bridge,
@@ -94,6 +95,7 @@ export class AppStore {
         progress: { downloaded: 0, total: 0 },
       },
       sentExample: { text: null, failed: false },
+      errorRecovery: NO_RECOVERY,
       ui: {
         view: options.initialView ?? "home",
         toolFilter: "all",
@@ -115,7 +117,19 @@ export class AppStore {
   };
   getState = () => this.state;
   private set(next: Partial<AppState>) {
-    this.state = { ...this.state, ...next };
+    const state = { ...this.state, ...next };
+    // The recovery of community error alerts follows every new snapshot and clock reading.
+    if (next.snapshot || next.now !== undefined) {
+      const { snapshot } = state;
+      state.errorRecovery = advanceRecovery(state.errorRecovery, snapshot.board, {
+        alerts: snapshot.board?.errors?.alerts,
+        sharing: snapshot.settings.sharing,
+        records: snapshot.records,
+        groups: snapshot.providerErrors,
+        now: Date.now(),
+      });
+    }
+    this.state = state;
     this.listeners.forEach((l) => l());
   }
   private setUi(next: Partial<UiState>) {

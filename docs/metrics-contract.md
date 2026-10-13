@@ -673,3 +673,17 @@ No upload field changes. Both clients show the user's own provider-side failures
   - serverError: "{model} returned {n} server error(s) in the last 24 hours, most recently {relative time}. That’s a failure at the provider, not your connection."
   - When other groups also had failures, the line ends with " Also: {model} ({n})" for at most two more groups, most recent first.
 - The line disappears 24 hours after the latest failure, and when monitoring is paused it keeps its last state.
+
+## Community error alerts (0.1.23)
+
+No upload field changes and no new network request. While sharing is on, the clients already fetch the community board every 30 seconds; from this version they also read its error alerts and show them next to the local provider-error line. With sharing off nothing is fetched, as before.
+
+- **Source.** `errors.alerts` of `GET /board` (the same list in every window): `{ model, provider, clients, failingContributors, overloaded, serverError, firstFailureAt, lastFailureAt }`, the (model, provider) pairs with provider failures from enough contributors in the last hour (one in early-data mode, three otherwise). A board without `errors` or `alerts` (an older server) or with malformed entries decodes as no alerts; a malformed alert never fails the board decode. At most 20 alerts are read.
+- **Relevance.** An alert concerns the user when its model is one the user used in the last 7 days (a turn of that exact model id in local history) or one with a local provider failure in the last 24 hours. Other alerts are not shown.
+- **The community line.** For the most relevant alert (local failure in the last hour first, then the server's order), one passive line under the local line (Mac: same place; desktop: same place at the top of the dashboard), not an OS notification:
+  - When the user had a provider failure on that model in the last hour: "It’s not just you: {others} other contributor(s) hit provider errors on {model} in the last hour." where others = failingContributors − 1 when sharing is on (the user's own counts may be among them), shown only when others ≥ 1; otherwise the alert is only the user's own report and is skipped (the next relevant alert is used, if any).
+  - Otherwise: "Tokrate contributors are reporting provider errors on {model}: {counts} from {k} contributor(s) in the last hour, latest {relative time}." where {counts} is "{n} overloaded / at capacity", "{m} server error(s)" or both joined with " and ".
+  - When more relevant alerts exist, the line ends with " Also: {model}" for at most two more, joined with ", ".
+- **Recovery.** When a model whose alert was shown in this run is no longer in the alerts, the client shows "{model}: contributors no longer report provider errors (cleared {relative time})." for 30 minutes, in place of the community line when no alert is shown. In memory only.
+- **Sharing off.** When the local line is shown and sharing is off, a muted hint follows it: "Turn on sharing to see whether other contributors hit the same errors."
+- Model ids are shown as the tools report them. Nothing about alerts is persisted, exported or uploaded.

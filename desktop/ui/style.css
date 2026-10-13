@@ -528,6 +528,11 @@ time,
 .delta-down {
   color: var(--warn);
 }
+.provider-errors-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .provider-errors {
   display: flex;
   align-items: flex-start;
@@ -538,6 +543,9 @@ time,
 .provider-errors svg {
   flex-shrink: 0;
   color: var(--warn);
+}
+.provider-errors-quiet svg {
+  color: var(--muted);
 }
 .definition {
   display: flex;

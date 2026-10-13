@@ -253,4 +253,41 @@ describe("AppStore", () => {
     store.clearSettingsAnchor();
     expect(store.getState().ui.settingsAnchor).toBeNull();
   });
+
+  it("follows community error alerts and forgets them when sharing stops", async () => {
+    const alertFor = (model: string) => ({
+      model,
+      provider: "anthropic",
+      clients: ["claude-code"],
+      failingContributors: 3,
+      overloaded: 2,
+      serverError: 0,
+      firstFailureAt: new Date().toISOString(),
+      lastFailureAt: new Date().toISOString(),
+    });
+    const settings = { ...snapshot().settings, sharing: true };
+    const record = {
+      id: "r1",
+      completedAt: new Date().toISOString(),
+      model: "m-a",
+      outputTokens: 1,
+      durationSeconds: 1,
+      codexTTFTSeconds: null,
+      turnThroughputTPS: 1,
+    };
+    let revision = 1;
+    const set = (over: Partial<Snapshot>) => (current = snapshot({ settings, records: [record], revision: ++revision, ...over }));
+    set({ board: { cohorts: [], errors: { alerts: [alertFor("m-a")] } } });
+    const store = new AppStore(bridge());
+    await store.refresh();
+    expect(store.getState().errorRecovery).toEqual({ shown: ["m-a"], cleared: [] });
+    set({ board: { cohorts: [] } });
+    await store.refresh();
+    const { cleared } = store.getState().errorRecovery;
+    expect(cleared.map((entry) => entry.model)).toEqual(["m-a"]);
+    // Sharing off forgets it, whatever the board says.
+    set({ settings: { ...settings, sharing: false }, board: null });
+    await store.refresh();
+    expect(store.getState().errorRecovery).toEqual({ shown: [], cleared: [] });
+  });
 });

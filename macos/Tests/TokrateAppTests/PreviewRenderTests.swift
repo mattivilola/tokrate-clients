@@ -145,6 +145,37 @@ final class PreviewRenderTests: XCTestCase {
                 .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
                 dark: dark, to: output, name: "provider-error-line-\(mode)"
             )
+            // The community line under the local one, from a board alert, plus the muted states.
+            let relative: (Date) -> String = { RelativeTime.string(from: $0, now: .now) }
+            var communityAlerts = CommunityErrorAlerts()
+            let boardAlerts = [
+                GlobalBoard.ErrorAlert(model: "gpt-5.5", provider: "openai", clients: ["codex"], failingContributors: 4, overloaded: 9, serverError: 0, lastFailureAt: .now.addingTimeInterval(-3 * 60)),
+                GlobalBoard.ErrorAlert(model: "claude-opus-5-5", provider: "anthropic", clients: ["claude-code"], failingContributors: 2, overloaded: 0, serverError: 3, lastFailureAt: .now.addingTimeInterval(-9 * 60)),
+                GlobalBoard.ErrorAlert(model: "kimi-k2.7", provider: "moonshot", clients: ["kimi-code"], failingContributors: 3, overloaded: 2, serverError: 1, lastFailureAt: .now.addingTimeInterval(-20 * 60))
+            ]
+            let used: Set<String> = ["gpt-5.5", "claude-opus-5-5", "kimi-k2.7"]
+            let notJustYou = communityAlerts.line(alerts: boardAlerts, usedModels: used, localGroups: providerErrors.groups(), isSharing: true, now: .now, relativeTime: relative)
+            var reporting = CommunityErrorAlerts()
+            let reportingLine = reporting.line(alerts: boardAlerts, usedModels: used, localGroups: [], isSharing: true, now: .now, relativeTime: relative)
+            _ = reporting.line(alerts: [], usedModels: used, localGroups: [], isSharing: true, now: .now, relativeTime: relative)
+            let recoveryLine = reporting.line(alerts: [], usedModels: used, localGroups: [], isSharing: true, now: .now.addingTimeInterval(5 * 60), relativeTime: { RelativeTime.string(from: $0, now: .now.addingTimeInterval(5 * 60)) })
+            render(
+                VStack(alignment: .leading, spacing: 14) {
+                    ProviderErrorLinesView(local: providerErrorLine, community: notJustYou)
+                    ThroughputGaugeView(reading: liveReading, compact: true, delta: SpeedDelta(latest: 112.4, median: MetricStats(values: [98, 104, 110, 108, 101])), slowerThanUsual: true)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "community-error-line-\(mode)"
+            )
+            render(
+                VStack(alignment: .leading, spacing: 18) {
+                    ProviderErrorLinesView(local: providerErrorLine, community: CommunityErrorAlerts.Line(kind: .sharingHint, text: CommunityErrorAlerts.sharingHint))
+                    ProviderErrorLinesView(local: nil, community: reportingLine)
+                    ProviderErrorLinesView(local: nil, community: recoveryLine)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "community-error-states-\(mode)"
+            )
             render(BrandPreview(), dark: dark, to: output, name: "brand-\(mode)")
             render(MenuBarPreview(dark: dark), dark: dark, to: output, name: "menubar-items-\(mode)")
         }

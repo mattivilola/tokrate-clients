@@ -55,6 +55,22 @@ export interface CommunityAlert {
   state?: string;
 }
 
+/**
+ * A (model, provider) pair with provider failures from enough contributors in the last hour
+ * (contract "Community error alerts (0.1.23)"). The native shell keeps only well-formed entries.
+ */
+export interface CommunityErrorAlert {
+  model: string;
+  provider: string;
+  clients: string[];
+  failingContributors: number;
+  overloaded: number;
+  serverError: number;
+  /** ISO times. */
+  firstFailureAt: string;
+  lastFailureAt: string;
+}
+
 /** Published community board; every field is optional so older cached responses decode. */
 export interface Board {
   window?: string;
@@ -63,6 +79,8 @@ export interface Board {
   methodology?: { publicationMode?: string };
   cohorts?: CommunityCohort[];
   alerts?: CommunityAlert[];
+  /** Provider error alerts, in the server's order; absent without any. */
+  errors?: { alerts?: CommunityErrorAlert[] };
 }
 
 /**
@@ -76,6 +94,15 @@ export interface ProviderErrorGroup {
   count: number;
   /** ISO time of the latest failure. */
   latestAt: string;
+}
+
+/**
+ * Memory only. `shown`: models whose community alert line was shown and that are still alerting.
+ * `cleared`: models whose alert was shown and then disappeared, with the time it was noticed.
+ */
+export interface ErrorRecovery {
+  shown: string[];
+  cleared: { model: string; at: number }[];
 }
 
 export interface Snapshot {
@@ -214,5 +241,7 @@ export interface AppState {
   busy: boolean;
   update: UpdateUiState;
   sentExample: SentExampleState;
+  /** Follows the snapshots (see `advanceRecovery`); empty while sharing is off. */
+  errorRecovery: ErrorRecovery;
   ui: UiState;
 }
