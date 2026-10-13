@@ -78,7 +78,7 @@ final class HistoryStore {
 
     let sharingPreferences: SharingPreferences
     /// The setting for operating-system notifications about community error alerts, and its
-    /// permission flow (contract "Error notifications (0.1.24)").
+    /// permission flow (contract "Error notifications (0.1.23)").
     let errorNotifications: ErrorNotificationPreferences
     var sharing: SharingSession { sharingPreferences.session }
     private(set) var history: MetricHistory

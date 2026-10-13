@@ -688,7 +688,7 @@ No upload field changes and no new network request. While sharing is on, the cli
 - **Sharing off.** When the local line is shown and sharing is off, a muted hint follows it: "Turn on sharing to see whether other contributors hit the same errors."
 - Model ids are shown as the tools report them. Nothing about alerts is persisted, exported or uploaded.
 
-## Error notifications (0.1.24)
+## Error notifications (0.1.23)
 
 No upload field changes and no new network request. The companions can turn the community error alerts of "Community error alerts (0.1.23)" into operating-system notifications.
 

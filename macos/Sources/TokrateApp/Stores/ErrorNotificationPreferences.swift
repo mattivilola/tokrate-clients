@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// The "Notify me when contributors report provider errors on models I use" setting (contract "Error
-/// notifications (0.1.24)"): off by default, saved with the other preferences, and switched on only
+/// notifications (0.1.23)"): off by default, saved with the other preferences, and switched on only
 /// once the operating system has allowed notifications.
 @MainActor @Observable
 final class ErrorNotificationPreferences {

@@ -12,7 +12,7 @@ export interface Settings {
   showToolChip: boolean;
   /**
    * Post an operating-system notification when contributors report provider errors on a model the
-   * user uses (contract "Error notifications (0.1.24)"). Needs sharing, because the alerts come
+   * user uses (contract "Error notifications (0.1.23)"). Needs sharing, because the alerts come
    * from the community board.
    */
   errorNotifications: boolean;

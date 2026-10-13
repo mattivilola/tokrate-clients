@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import TokrateCore
 
-/// Contract "Error notifications (0.1.24)": episodes, the recovery window, the hourly limit, the
+/// Contract "Error notifications (0.1.23)": episodes, the recovery window, the hourly limit, the
 /// baseline, the clearing, and the exact texts.
 final class ErrorNotificationPlannerTests: XCTestCase {
     private let t0 = Date(timeIntervalSince1970: 1_800_000_000)

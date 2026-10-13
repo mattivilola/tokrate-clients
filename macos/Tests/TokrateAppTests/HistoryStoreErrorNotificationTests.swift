@@ -2,7 +2,7 @@ import XCTest
 import TokrateCore
 @testable import TokrateApp
 
-/// Error notifications (contract "Error notifications (0.1.24)") reach the store from the board the
+/// Error notifications (contract "Error notifications (0.1.23)") reach the store from the board the
 /// sharing session fetches, and leave it through the notifier. A mock transport serves the board and a
 /// mock notifier records what is posted; synthetic folders keep the user's real history out of it.
 @MainActor

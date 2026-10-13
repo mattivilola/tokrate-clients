@@ -25,7 +25,7 @@ public struct ErrorNotification: Sendable, Equatable {
     public var identifier: String { "provider-errors.\(kind.rawValue).\(model)" }
 }
 
-/// Decides which community error alerts become notifications (contract "Error notifications (0.1.24)").
+/// Decides which community error alerts become notifications (contract "Error notifications (0.1.23)").
 ///
 /// Pure apart from its episode memory, which lives in this value (in memory only, never persisted): the
 /// caller feeds it the relevant alerts every time the board or the clock moves and posts what it

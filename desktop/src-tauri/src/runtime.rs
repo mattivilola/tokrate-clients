@@ -90,7 +90,7 @@ pub struct Settings {
     pub show_provider_badge: bool,
     pub show_tool_chip: bool,
     /// Post an operating-system notification when contributors report provider errors on a model
-    /// the user uses (contract "Error notifications (0.1.24)"). Needs sharing: the alerts come from
+    /// the user uses (contract "Error notifications (0.1.23)"). Needs sharing: the alerts come from
     /// the community board.
     pub error_notifications: bool,
     pub days: u8,

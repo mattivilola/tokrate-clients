@@ -1,4 +1,4 @@
-//! Tests for the error-notification planner (contract "Error notifications (0.1.24)").
+//! Tests for the error-notification planner (contract "Error notifications (0.1.23)").
 
 use crate::{
     ErrorNotification, ErrorNotificationKind as Kind, ErrorNotificationPlanner, RelevantErrorAlert,

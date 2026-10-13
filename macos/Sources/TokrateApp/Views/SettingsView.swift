@@ -143,7 +143,7 @@ struct SettingsSharingPage: View {
 }
 
 /// The opt-in for operating-system notifications about community error alerts (contract "Error
-/// notifications (0.1.24)"), next to the sharing settings it depends on.
+/// notifications (0.1.23)"), next to the sharing settings it depends on.
 struct ErrorNotificationsSettingsGroup: View {
     let notifications: ErrorNotificationPreferences
     let isSharingOn: Bool

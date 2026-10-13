@@ -1,5 +1,5 @@
 //! When a community error alert becomes an operating-system notification (contract "Error
-//! notifications (0.1.24)"). Pure: the host feeds it the relevant alerts of every new board and
+//! notifications (0.1.23)"). Pure: the host feeds it the relevant alerts of every new board and
 //! posts what it returns.
 
 use crate::error_alerts::RelevantErrorAlert;
