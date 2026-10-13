@@ -65,6 +65,19 @@ export interface Board {
   alerts?: CommunityAlert[];
 }
 
+/**
+ * Provider-side failures of one model of one coding tool in the last 24 hours (local only, no
+ * error text). The native shell sends the groups most recent first.
+ */
+export interface ProviderErrorGroup {
+  client: string;
+  model: string;
+  kind: "overloaded" | "serverError";
+  count: number;
+  /** ISO time of the latest failure. */
+  latestAt: string;
+}
+
 export interface Snapshot {
   settings: Settings;
   consentPromptRequired: boolean;
@@ -81,6 +94,8 @@ export interface Snapshot {
   live?: LiveResponse[];
   /** The model an Auto selection follows while live responses exist; null otherwise. */
   active?: { model: string | null; provider: string | null } | null;
+  /** The user's own provider-side failures of the last 24 hours, most recent first (local only). */
+  providerErrors?: ProviderErrorGroup[];
 }
 
 export type SettingsPatch = Partial<

@@ -660,3 +660,16 @@ Only the `apiErrorStatus`, error enum, error code and status fields and the fixe
 
 - **Consent notice version 5.** `SharingPreferences.currentNoticeVersion` is 5 (desktop: `SHARING_NOTICE_VERSION = "2026-10-09-v5"`). Re-consent behaves as for versions 2 to 4: a saved OFF stays OFF. The notice adds: "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages." The consent example payload includes one request-count entry.
 - `appVersion` is `0.1.22` (both clients).
+
+## Local provider errors (0.1.23)
+
+No upload field changes. Both clients show the user's own provider-side failures, so a "model at capacity" error is recognised as the provider's, not the user's connection.
+
+- **Source.** The request outcomes of "Request outcomes (0.1.22)" with kind `overloaded` or `serverError`, exactly as classified there. They are collected whether or not sharing is on (sharing still receives only what its consent and future-only rules allow). Only outcomes the monitors produce while Tokrate is running count; nothing is backfilled after a restart.
+- **Memory only.** The clients keep, per (client, model, kind), the times of the failures in the last 24 hours, so the count falls as failures age out, bounded (at most 200 groups with the oldest latest failure dropped first, 1,000 times per group); an outcome stamped in the future counts as now. Nothing is persisted, exported or uploaded, and no error text exists to show. On the desktop only this summary crosses into the webview snapshot.
+- **The line.** When at least one failure happened in the last 24 hours, the dashboard shows one passive line for the group with the most recent failure: on the Mac next to the existing slower-than-usual notice, on the desktop at the top of the dashboard (it has no such notice). It is not an OS notification. With the model id as the tool reports it:
+  - overloaded, Codex: "You hit “model at capacity” {n} time(s) on {model} in the last 24 hours, most recently {relative time}. That’s the provider at capacity, not your connection."
+  - overloaded, other tools: the same with “overloaded” in place of “model at capacity”.
+  - serverError: "{model} returned {n} server error(s) in the last 24 hours, most recently {relative time}. That’s a failure at the provider, not your connection."
+  - When other groups also had failures, the line ends with " Also: {model} ({n})" for at most two more groups, most recent first.
+- The line disappears 24 hours after the latest failure, and when monitoring is paused it keeps its last state.

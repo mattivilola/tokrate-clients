@@ -127,9 +127,33 @@ final class PreviewRenderTests: XCTestCase {
                 .padding(24).background(DashboardStyle.surface),
                 dark: dark, to: output, name: "gauge-states-\(mode)"
             )
+            // The passive provider-error line, built from real outcomes, beside the gauge.
+            let failedAt = Date.now.addingTimeInterval(-12 * 60)
+            var providerErrors = LocalProviderErrors()
+            providerErrors.add([
+                Self.failure(client: "codex", model: "gpt-5.5", kind: .overloaded, at: failedAt, key: "a"),
+                Self.failure(client: "codex", model: "gpt-5.5", kind: .overloaded, at: failedAt.addingTimeInterval(-60), key: "b"),
+                Self.failure(client: "claude-code", model: "claude-opus-5-5", kind: .serverError, at: failedAt.addingTimeInterval(-3_600), key: "c"),
+                Self.failure(client: "kimi-code", model: "kimi-k2.7", kind: .overloaded, at: failedAt.addingTimeInterval(-7_200), key: "d")
+            ])
+            let providerErrorLine = providerErrors.line { RelativeTime.string(from: $0, now: .now) } ?? ""
+            render(
+                VStack(alignment: .leading, spacing: 14) {
+                    ProviderErrorLineView(line: providerErrorLine)
+                    ThroughputGaugeView(reading: liveReading, compact: true, delta: SpeedDelta(latest: 112.4, median: MetricStats(values: [98, 104, 110, 108, 101])), slowerThanUsual: true)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "provider-error-line-\(mode)"
+            )
             render(BrandPreview(), dark: dark, to: output, name: "brand-\(mode)")
             render(MenuBarPreview(dark: dark), dark: dark, to: output, name: "menubar-items-\(mode)")
         }
+    }
+
+    private static func failure(client: String, model: String, kind: RequestOutcome.Kind, at date: Date, key: String) -> RequestOutcome {
+        let parser = ["codex": "codex-rollout-v2", "claude-code": "claude-transcript-v4", "kimi-code": "kimi-wire-v1"][client]!
+        let provider = ["codex": "openai", "claude-code": "anthropic", "kimi-code": "moonshot"][client]!
+        return RequestOutcome(dedupeKey: key, occurredAt: date, client: client, clientVersion: "1.0.0", parserVersion: parser, model: model, provider: provider, kind: kind)!
     }
 
     // MARK: Rendering

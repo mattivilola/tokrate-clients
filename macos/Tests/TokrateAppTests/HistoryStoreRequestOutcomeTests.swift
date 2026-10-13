@@ -31,18 +31,7 @@ final class HistoryStoreRequestOutcomeTests: XCTestCase {
         let session = SharingSession(identity: StubIdentity(), transport: transport, jitter: { 0 })
         let preferences = SharingPreferences(session: session, store: StubPreferenceStore())
         preferences.consentToShare(startPolling: false)
-        let store = HistoryStore(
-            persistenceURL: historyURL,
-            codexFolder: root.appendingPathComponent("codex", isDirectory: true),
-            claudeProjectsFolder: root.appendingPathComponent("claude", isDirectory: true),
-            grokSessionsFolder: root.appendingPathComponent("grok", isDirectory: true),
-            antigravityDataFolder: root.appendingPathComponent("gemini", isDirectory: true),
-            openCodeDataFolder: root.appendingPathComponent("opencode", isDirectory: true),
-            kimiCodeFolder: root.appendingPathComponent("kimi-code", isDirectory: true),
-            kimiDesktopFolder: root.appendingPathComponent("kimi-desktop", isDirectory: true),
-            sharingPreferences: preferences,
-            defaults: defaults
-        )
+        let store = makeStore(preferences: preferences)
         store.startMonitoring()
         // Only requests that finish after launch are counted: let the responses fall after it.
         try await Task.sleep(for: .milliseconds(500))
@@ -63,15 +52,73 @@ final class HistoryStoreRequestOutcomeTests: XCTestCase {
         XCTAssertEqual(entries.first?["overloaded"] as? Int, 1)
         XCTAssertEqual(entries.first?["serverError"] as? Int, 0)
 
-        store.prepareForTermination()
+        // The local summary is fed as well, and only by the failure.
+        XCTAssertEqual(store.providerErrorLine?.hasPrefix("You hit “overloaded” 1 time on claude-opus-5-5 in the last 24 hours, most recently "), true)
+
+        try assertNothingReachesTheHistory(of: store)
+    }
+
+    func testProviderErrorLineIsFedWithSharingOffAndNothingIsUploadedOrSaved() async throws {
+        try FileManager.default.createDirectory(at: claudeFolder, withIntermediateDirectories: true)
+        let transport = RecordingTransport()
+        let session = SharingSession(identity: StubIdentity(), transport: transport, jitter: { 0 })
+        let preferences = SharingPreferences(session: session, store: StubPreferenceStore())
+        XCTAssertFalse(session.isEnabled)
+        let store = makeStore(preferences: preferences)
+        XCTAssertNil(store.providerErrorLine)
+        store.startMonitoring()
+        try await Task.sleep(for: .milliseconds(500))
+        try writeTranscript()
+        try await waitUntil { store.providerErrorLine != nil }
+
+        XCTAssertEqual(
+            store.providerErrorLine,
+            "You hit “overloaded” 1 time on claude-opus-5-5 in the last 24 hours, most recently just now. That’s the provider at capacity, not your connection."
+        )
+        await session.refresh(now: .now.addingTimeInterval(1_000))
+        let bodies = await transport.uploadBodies()
+        XCTAssertTrue(bodies.isEmpty)
+        try assertNothingReachesTheHistory(of: store)
+    }
+
+    func testProviderErrorLineKeepsItsLastStateWhilePaused() async throws {
+        try FileManager.default.createDirectory(at: claudeFolder, withIntermediateDirectories: true)
+        let session = SharingSession(identity: StubIdentity(), transport: RecordingTransport(), jitter: { 0 })
+        let store = makeStore(preferences: SharingPreferences(session: session, store: StubPreferenceStore()))
+        store.startMonitoring()
+        try await Task.sleep(for: .milliseconds(500))
+        try writeTranscript()
+        try await waitUntil { store.providerErrorLine != nil }
+        let line = store.providerErrorLine
         store.stopMonitoring()
-        let history = try String(contentsOf: historyURL, encoding: .utf8)
-        for word in ["overloaded", "serverError", "succeeded", "outcome", "requestCount", "dedupe"] {
-            XCTAssertFalse(history.contains(word), "\(word) must not reach the history file")
-        }
+        XCTAssertEqual(store.providerErrorLine, line)
     }
 
     // MARK: Fixtures
+
+    private func makeStore(preferences: SharingPreferences) -> HistoryStore {
+        HistoryStore(
+            persistenceURL: historyURL,
+            codexFolder: root.appendingPathComponent("codex", isDirectory: true),
+            claudeProjectsFolder: root.appendingPathComponent("claude", isDirectory: true),
+            grokSessionsFolder: root.appendingPathComponent("grok", isDirectory: true),
+            antigravityDataFolder: root.appendingPathComponent("gemini", isDirectory: true),
+            openCodeDataFolder: root.appendingPathComponent("opencode", isDirectory: true),
+            kimiCodeFolder: root.appendingPathComponent("kimi-code", isDirectory: true),
+            kimiDesktopFolder: root.appendingPathComponent("kimi-desktop", isDirectory: true),
+            sharingPreferences: preferences,
+            defaults: defaults
+        )
+    }
+
+    private func assertNothingReachesTheHistory(of store: HistoryStore) throws {
+        store.prepareForTermination()
+        store.stopMonitoring()
+        let history = try String(contentsOf: historyURL, encoding: .utf8)
+        for word in ["overloaded", "serverError", "succeeded", "outcome", "requestCount", "dedupe", "capacity", "server error", "providerError", "at the provider"] {
+            XCTAssertFalse(history.contains(word), "\(word) must not reach the history file")
+        }
+    }
 
     /// A complete turn whose response succeeded, followed by an overloaded failure, all stamped just now.
     private func writeTranscript() throws {

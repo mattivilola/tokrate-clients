@@ -111,7 +111,13 @@ final class HistoryStore {
     private(set) var liveSpeed: LiveSpeed?
     /// What the menu-bar item shows.
     private(set) var menuBarReadout = MenuBarReadout.unavailable
+    /// The passive line about the provider-side failures of the last 24 hours (contract "Local provider
+    /// errors (0.1.23)"); nil when there are none. Refreshed with every poll, so its relative time
+    /// advances and it disappears 24 hours after the latest failure; while monitoring is paused it
+    /// keeps its last state. In-memory only.
+    private(set) var providerErrorLine: String?
     @ObservationIgnored private var liveResponses = LiveResponseBuffer()
+    @ObservationIgnored private var providerErrors = LocalProviderErrors()
     /// The session files already read to their end, as the monitors last reported them. The next launch
     /// skips what it still matches (see `SourceFileCheckpoint`).
     @ObservationIgnored private(set) var checkpoints = SourceCheckpoints()
@@ -315,7 +321,8 @@ final class HistoryStore {
                 self?.syncWatchers()
                 var newRecords: [TurnMetric] = []
                 var newResponses: [LiveResponse] = []
-                // Request outcomes go to the sharing session only: never into the history or the UI.
+                // Request outcomes go to the sharing session and to the in-memory provider-error summary:
+                // never into the history file.
                 var newOutcomes: [RequestOutcome] = []
                 var failures: [String] = []
                 if FileManager.default.fileExists(atPath: codexFolder.path) {
@@ -385,6 +392,8 @@ final class HistoryStore {
                 let known = Dictionary(self.history.records.map { ($0.id, $0.isDelegationFinal) }, uniquingKeysWith: { first, _ in first })
                 self.sharing.enqueue(newRecords.filter { $0.isDelegationFinal && known[$0.id] != true })
                 self.sharing.enqueueOutcomes(newOutcomes)
+                // Whether or not sharing is on: the line is the user's own.
+                self.providerErrors.add(newOutcomes)
                 // Expired records leave the file within the seven days promised, also while no record arrives.
                 let expiredRecords = self.history.prune()
                 for record in newRecords { self.history.upsert(record) }
@@ -591,6 +600,15 @@ final class HistoryStore {
         if active != activeModel { activeModel = active }
         if speed != liveSpeed { liveSpeed = speed }
         if readout != menuBarReadout { menuBarReadout = readout }
+        refreshProviderErrorLine(now: now)
+    }
+
+    /// Re-renders the provider-error line for `now`; paused monitoring keeps the last line.
+    private func refreshProviderErrorLine(now: Date) {
+        guard isMonitoring else { return }
+        providerErrors.prune(now: now)
+        let line = providerErrors.line(now: now) { RelativeTime.string(from: $0, now: now) }
+        if line != providerErrorLine { providerErrorLine = line }
     }
 
     private func saveHistory(now: Date = .now) {

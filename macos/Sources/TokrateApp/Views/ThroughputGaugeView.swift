@@ -302,3 +302,25 @@ struct ThroughputGaugeView: View {
         delta.isFaster ? DashboardStyle.good : delta.isSlower ? DashboardStyle.warn : DashboardStyle.muted
     }
 }
+
+/// The passive line about the user's own provider-side failures of the last 24 hours (contract "Local
+/// provider errors (0.1.23)"), styled like the slower-than-usual notice. Not a notification, and it
+/// carries no error text. Presentation-only: the store supplies the finished sentence.
+struct ProviderErrorLineView: View {
+    let line: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .accessibilityHidden(true)
+            Text(line)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(DashboardStyle.Typography.footnoteEmphasis)
+        .foregroundStyle(DashboardStyle.warn)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line)
+        .help("Failures at the provider counted from the coding tools' own records. It stays for 24 hours after the latest one and is not shared or saved.")
+    }
+}

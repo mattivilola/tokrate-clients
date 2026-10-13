@@ -528,6 +528,17 @@ time,
 .delta-down {
   color: var(--warn);
 }
+.provider-errors {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.provider-errors svg {
+  flex-shrink: 0;
+  color: var(--warn);
+}
 .definition {
   display: flex;
   flex-wrap: wrap;

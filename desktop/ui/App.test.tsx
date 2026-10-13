@@ -6,7 +6,7 @@ import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { createPreviewBridge } from "./store/preview";
 import { AppStore } from "./store/store";
-import type { Bridge } from "./store/types";
+import type { Bridge, ProviderErrorGroup } from "./store/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -149,5 +149,44 @@ describe("ErrorBoundary", () => {
     broken = false;
     act(() => host.querySelector("button")!.click());
     expect(host.textContent).toContain("fine");
+  });
+});
+
+describe("provider errors line", () => {
+  const storeWithErrors = (providerErrors: ProviderErrorGroup[] | undefined) => {
+    const preview = createPreviewBridge({ scenario: "sharing", view: "home" });
+    const bridge: Bridge = {
+      ...preview,
+      snapshot: async (since) => ({ ...(await preview.snapshot(since)), providerErrors }),
+    };
+    return new AppStore(bridge, {});
+  };
+  const failure = (over: Partial<ProviderErrorGroup>): ProviderErrorGroup => ({
+    client: "codex",
+    model: "gpt-5.5",
+    kind: "overloaded",
+    count: 2,
+    latestAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    ...over,
+  });
+
+  it("shows the passive line on the dashboard", async () => {
+    await show(storeWithErrors([failure({}), failure({ model: "gpt-5.4-mini", count: 1 })]));
+    const line = host.querySelector(".provider-errors");
+    expect(line?.textContent).toContain(
+      "You hit “model at capacity” 2 times on gpt-5.5 in the last 24 hours, most recently 5 min ago.",
+    );
+    expect(line?.textContent).toContain("Also: gpt-5.4-mini (1)");
+  });
+
+  it("is hidden without a failure in the last 24 hours", async () => {
+    await show(storeWithErrors([]));
+    expect(host.querySelector(".provider-errors")).toBeNull();
+    act(() => root.unmount());
+    root = createRoot(host);
+    await show(
+      storeWithErrors([failure({ latestAt: new Date(Date.now() - 25 * 3_600_000).toISOString() })]),
+    );
+    expect(host.querySelector(".provider-errors")).toBeNull();
   });
 });

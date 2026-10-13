@@ -18,9 +18,9 @@ use std::{
 use tauri::Manager;
 use tokrate_core::{
     signed_request, tray_reading, AntigravityMonitor, AutoSelector, History, LiveResponses,
-    ModelKey, OpenCodeMonitor, ProviderBadge, ResponseMetric, SelectionMode, SharingQueue,
-    SourceChange, SourceCheckpoints, SourceMonitor, TrayReadingKind, TurnMetric, UploadBatch,
-    APP_VERSION,
+    LocalProviderErrors, ModelKey, OpenCodeMonitor, ProviderBadge, ProviderErrorGroup,
+    ResponseMetric, SelectionMode, SharingQueue, SourceChange, SourceCheckpoints, SourceMonitor,
+    TrayReadingKind, TurnMetric, UploadBatch, APP_VERSION,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
@@ -180,6 +180,9 @@ pub struct Snapshot {
     live: Vec<ResponseMetric>,
     /// The model an Auto selection currently follows; `None` for pinned selections.
     active: Option<ModelKey>,
+    /// The provider-side failures of the last 24 hours, most recent first. Local only, never
+    /// persisted; it carries no error text.
+    provider_errors: Vec<ProviderErrorGroup>,
     status: String,
     monitor_status: String,
     pending: usize,
@@ -205,6 +208,8 @@ pub struct Runtime {
     live: LiveResponses,
     selector: AutoSelector,
     active: Option<ModelKey>,
+    /// Memory only: fed by every request outcome whether or not sharing is on.
+    provider_errors: LocalProviderErrors,
     monitor: SourceMonitor,
     dir: PathBuf,
     status: String,
@@ -319,6 +324,7 @@ impl Runtime {
             live: LiveResponses::new(Utc::now()),
             selector: AutoSelector::new(),
             active: None,
+            provider_errors: LocalProviderErrors::new(),
             dir,
             status: status.into(),
             monitor_status: "Starting monitoring…".into(),
@@ -403,6 +409,7 @@ impl Runtime {
             },
             live: self.live.responses(),
             active: self.active.clone(),
+            provider_errors: self.provider_errors.summary(Utc::now()),
             status: self.status.clone(),
             monitor_status: self.monitor_status.clone(),
             pending: self.queue.len(),
@@ -701,9 +708,11 @@ impl Runtime {
         if self.settings.monitoring {
             match self.monitor.poll(now) {
                 Ok(found) => {
-                    // Request outcomes go to sharing and nowhere else: not into history, the
-                    // snapshot or any export. Without sharing they are dropped.
+                    // Request outcomes feed the local provider-error summary (the only part that
+                    // reaches the snapshot) and, while sharing is on, the sharing queue. They go
+                    // into no history and no export.
                     let outcomes = self.monitor.take_request_outcomes();
+                    self.provider_errors.ingest(&outcomes, now);
                     if self.sharing_active {
                         self.queue.enqueue_outcomes(&outcomes, now);
                     }
@@ -3313,6 +3322,58 @@ mod tests {
             runtime.poll_monitor_at(now);
         }
         assert!(due_request_counts(&mut runtime, now).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn provider_errors_are_summarised_with_sharing_off_and_on_and_never_reach_the_history() {
+        let now = Utc::now();
+        for sharing in [false, true] {
+            let dir = temporary();
+            let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+            write_claude_outcomes(&dir, now);
+            runtime.sharing_active = sharing;
+            if sharing {
+                runtime.queue.enable(now - chrono::Duration::minutes(10));
+            }
+            for _ in 0..4 {
+                runtime.poll_monitor_at(now);
+            }
+            // The one 529 is counted once, not the success before it.
+            let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+            let groups = snapshot["providerErrors"].as_array().unwrap();
+            assert_eq!(groups.len(), 1, "sharing {sharing}");
+            assert_eq!(groups[0]["client"], "claude-code");
+            assert_eq!(groups[0]["model"], "claude-opus-5-5");
+            assert_eq!(groups[0]["kind"], "overloaded");
+            assert_eq!(groups[0]["count"], 1);
+            assert_eq!(groups[0]["latestAt"].as_str().unwrap().len(), 20);
+            assert_eq!(groups[0].as_object().unwrap().len(), 5);
+            // Nothing else of the outcomes is in the snapshot, the history or its file.
+            assert!(snapshot["records"].as_array().unwrap().is_empty());
+            assert!(runtime.history.records().is_empty());
+            runtime.save_on_exit();
+            let saved = std::fs::read_to_string(dir.join("history.json")).unwrap_or_default();
+            assert!(!saved.contains("overloaded") && !saved.contains("providerErrors"));
+            // Stopping sharing leaves the local summary alone.
+            runtime.stop_sharing();
+            assert_eq!(runtime.snapshot(None).provider_errors.len(), 1);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[test]
+    fn provider_errors_wait_for_the_next_poll_while_monitoring_is_paused() {
+        let now = Utc::now();
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        write_claude_outcomes(&dir, now);
+        runtime.settings.monitoring = false;
+        runtime.poll_monitor_at(now);
+        assert!(runtime.snapshot(None).provider_errors.is_empty());
+        runtime.settings.monitoring = true;
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        assert_eq!(runtime.snapshot(None).provider_errors.len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

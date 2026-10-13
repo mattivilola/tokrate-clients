@@ -12,6 +12,7 @@ import { Hero } from "./components/Hero";
 import { HistoryView } from "./components/History";
 import { CompareAll, YourModels } from "./components/Models";
 import { Onboarding } from "./components/Onboarding";
+import { ProviderErrors } from "./components/ProviderErrors";
 import { StoreContext, useAppStore } from "./components/primitives";
 import { SettingsView } from "./components/Settings";
 import { Trend } from "./components/Trend";
@@ -78,6 +79,7 @@ function Home() {
       <Header dashboard={dashboard} />
       <Notices />
       <main className="scroll home-scroll">
+        <ProviderErrors />
         <ErrorBoundary fallback={<DataUnavailable />} resetKey={revision}>
           {dashboard.isAll ? (
             <CompareAll dashboard={dashboard} board={board} />
