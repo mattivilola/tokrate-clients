@@ -85,7 +85,7 @@ final class RequestCountSharingTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), ["countId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "succeeded", "overloaded", "serverError"])
         XCTAssertEqual(object["countId"] as? String, "00000000-0000-4000-8000-000000000001")
         XCTAssertEqual(object["observedAt"] as? String, ISO8601DateFormatter().string(from: bucket), "floored to its five-minute period")
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.22")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.23")
         XCTAssertEqual(object["metricVersion"] as? String, "request-outcome-v1")
         XCTAssertEqual(object["succeeded"] as? Int, 41)
         XCTAssertEqual(object["overloaded"] as? Int, 3)

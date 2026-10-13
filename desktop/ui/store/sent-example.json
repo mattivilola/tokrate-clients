@@ -1,7 +1,7 @@
 {
   "requestCounts": [
     {
-      "appVersion": "0.1.22",
+      "appVersion": "0.1.23",
       "client": "codex",
       "clientVersion": "1.2.3",
       "countId": "00000000-0000-4000-8000-000000000001",
@@ -17,7 +17,7 @@
   ],
   "samples": [
     {
-      "appVersion": "0.1.22",
+      "appVersion": "0.1.23",
       "cacheReadInputTokens": 36000,
       "cacheWriteInputTokens": null,
       "client": "codex",

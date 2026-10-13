@@ -950,7 +950,7 @@ fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
     );
     assert_eq!(entry.client, "codex");
     assert_eq!(entry.client_version, "1.2.3");
-    assert_eq!(entry.app_version, "0.1.22");
+    assert_eq!(entry.app_version, "0.1.23");
     assert_eq!(entry.parser_version, "codex-rollout-v2");
     assert_eq!(entry.metric_version, "request-outcome-v1");
     assert_eq!(entry.model, "gpt-5");
@@ -1492,7 +1492,7 @@ fn a_request_with_only_counts_is_a_signed_version_2_envelope_with_both_lists() {
     assert_eq!(body["requestCounts"].as_array().unwrap().len(), 1);
     // Keys are sorted, like the samples' keys.
     let text = String::from_utf8(request.body.clone()).unwrap();
-    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.22\",\"client\":\"codex\""));
+    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.23\",\"client\":\"codex\""));
     assert!(text.contains("\"overloaded\":9999,\"parserVersion\""));
     assert!(text.contains("\"serverError\":9999,\"succeeded\":9999}"));
     assert!(text.ends_with("\"sentAt\":\"2026-10-09T12:05:00Z\"}"));
