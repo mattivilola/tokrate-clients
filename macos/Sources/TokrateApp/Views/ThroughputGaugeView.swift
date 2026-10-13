@@ -356,15 +356,52 @@ struct CommunityErrorLineView: View {
 }
 
 /// The local provider-error line with the community line beneath it, close together; either may be
-/// alone. Callers show it only when at least one is present.
+/// alone. Callers show it only when at least one is present. With `notifications`, an active alert
+/// (not the cleared note or the sharing hint) offers a "Notify me" button while the setting is off.
 struct ProviderErrorLinesView: View {
     let local: String?
     let community: CommunityErrorAlerts.Line?
+    var notifications: ErrorNotificationPreferences?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let local { ProviderErrorLineView(line: local) }
-            if let community { CommunityErrorLineView(line: community) }
+            if let community {
+                if let notifications, community.kind == .alert, !notifications.isEnabled {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        CommunityErrorLineView(line: community)
+                        Button("Notify me") { Task { await notifications.setEnabled(true) } }
+                            .buttonStyle(.plain).font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.accent)
+                            .fixedSize()
+                            .disabled(notifications.isRequesting)
+                            .help("Notify me when contributors report provider errors on models I use")
+                    }
+                    if notifications.isPermissionDenied { NotificationsDeniedNote(prominentButton: false) }
+                } else {
+                    CommunityErrorLineView(line: community)
+                }
+            }
+        }
+    }
+}
+
+/// Says the system has notifications turned off for Tokrate and opens the pane where they are turned
+/// back on. Shown by the Notifications setting and by the "Notify me" button when permission is denied.
+struct NotificationsDeniedNote: View {
+    let prominentButton: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Notifications are turned off for Tokrate in System Settings.", systemImage: "bell.slash")
+                .font(DashboardStyle.Typography.footnote).foregroundStyle(DashboardStyle.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            if prominentButton {
+                Button("Open Notifications Settings") { NotificationSettingsLink.open() }
+                    .buttonStyle(SecondaryButtonStyle())
+            } else {
+                Button("Open Notifications Settings") { NotificationSettingsLink.open() }
+                    .buttonStyle(.plain).font(DashboardStyle.Typography.footnoteEmphasis).foregroundStyle(DashboardStyle.accent)
+            }
         }
     }
 }

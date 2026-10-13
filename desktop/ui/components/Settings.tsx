@@ -215,6 +215,18 @@ export function SettingsView() {
               Retry sharing
             </button>
           </div>
+          <SwitchRow
+            id="error-notifications"
+            label="Notify me when contributors report provider errors on models I use"
+            hint={
+              settings.sharing
+                ? "A system notification when contributors report errors on a model you used in the last 7 days, and another when they stop (at most 3 per hour). Nothing extra is sent: the alerts come from the community board."
+                : "Turn on sharing to use this: the alerts come from the community board, which Tokrate fetches only while sharing is on."
+            }
+            checked={settings.errorNotifications}
+            onChange={(errorNotifications) => void store.patch({ errorNotifications })}
+            disabled={!settings.sharing}
+          />
           <p className="fine">
             Contribution is off until you choose. No prompts, responses, code or local file
             paths are uploaded. {REGION_NOTICE} {DELEGATED_NOTICE} {SURFACE_NOTICE} {PROMPT_CACHE_NOTICE} {REQUEST_COUNT_NOTICE} You can withdraw at any time: turning sharing off stops future

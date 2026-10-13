@@ -33,6 +33,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     showSpeed: true,
     showProviderBadge: true,
     showToolChip: true,
+    errorNotifications: false,
     selection: "auto",
     days: 1,
     root: "",
@@ -122,10 +123,8 @@ export class AppStore {
     if (next.snapshot || next.now !== undefined) {
       const { snapshot } = state;
       state.errorRecovery = advanceRecovery(state.errorRecovery, snapshot.board, {
-        alerts: snapshot.board?.errors?.alerts,
+        relevant: snapshot.relevantErrorAlerts,
         sharing: snapshot.settings.sharing,
-        records: snapshot.records,
-        groups: snapshot.providerErrors,
         now: Date.now(),
       });
     }

@@ -547,6 +547,11 @@ time,
 .provider-errors-quiet svg {
   color: var(--muted);
 }
+.provider-errors .text-button {
+  flex-shrink: 0;
+  margin: -4px -6px -4px auto;
+  font-size: 12px;
+}
 .definition {
   display: flex;
   flex-wrap: wrap;

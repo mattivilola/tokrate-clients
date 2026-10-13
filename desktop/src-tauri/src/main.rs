@@ -2,6 +2,7 @@
 mod badge;
 mod board;
 mod flyout;
+mod notifier;
 mod runtime;
 mod schedule;
 #[cfg(test)]
@@ -280,6 +281,9 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             flyout::show(app, None)
         }))
+        // Notifications are posted from Rust only: the capability grants the webview no
+        // permission of this plugin, so its commands are not callable from the page.
+        .plugin(tauri_plugin_notification::init())
         .manage(FlyoutState::default());
     let builder = if updater_state::updater_plugin_enabled(smoke) {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
@@ -310,13 +314,14 @@ fn main() {
         ])
         .setup(move |app| {
             let dir = app.path().app_local_data_dir()?;
-            let runtime = if smoke {
+            let mut runtime = if smoke {
                 let dir =
                     std::env::var_os("TOKRATE_SMOKE_DIR").ok_or("Smoke directory required")?;
                 Runtime::load_smoke(dir.into())?
             } else {
                 Runtime::load(dir)?
             };
+            runtime.set_notifier(notifier::install(app.handle()));
             app.manage(Arc::new(Mutex::new(runtime)));
             let update_dir = if smoke {
                 std::env::var_os("TOKRATE_SMOKE_DIR")

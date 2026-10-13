@@ -5,6 +5,8 @@ mod antigravity_db;
 mod antigravity_turns;
 mod claude_parser;
 mod delegation;
+mod error_alerts;
+mod error_notifications;
 mod grok;
 mod history;
 mod kimi;
@@ -27,6 +29,10 @@ mod sqlite_read;
 #[cfg(test)]
 mod antigravity_tests;
 #[cfg(test)]
+mod error_alerts_tests;
+#[cfg(test)]
+mod error_notifications_tests;
+#[cfg(test)]
 mod kimi_tests;
 #[cfg(test)]
 mod opencode_tests;
@@ -38,6 +44,13 @@ mod provider_errors_tests;
 mod tests;
 
 pub use antigravity::AntigravityMonitor;
+pub use error_alerts::{
+    relevant_error_alerts, CommunityErrorAlert, RelevantErrorAlert, MAX_ERROR_ALERTS,
+};
+pub use error_notifications::{
+    ErrorNotification, ErrorNotificationKind, ErrorNotificationPlanner, MAX_NOTIFICATIONS_PER_HOUR,
+    RECOVERY_WINDOW_MINUTES,
+};
 pub use grok::GrokMonitor;
 pub use history::History;
 pub use live::{

@@ -46,7 +46,7 @@ struct HistoryView: View {
                         .fixedSize()
                 }
                 if store.providerErrorLine != nil || store.communityErrorLine != nil {
-                    ProviderErrorLinesView(local: store.providerErrorLine, community: store.communityErrorLine)
+                    ProviderErrorLinesView(local: store.providerErrorLine, community: store.communityErrorLine, notifications: store.errorNotifications)
                 }
                 if snapshot.selection.isAllModels {
                     CohortComparisonView(snapshot: snapshot, range: $range, compact: false) { cohort in

@@ -9,24 +9,18 @@ import { useAppStore } from "./primitives";
 
 /**
  * Passive lines about provider-side failures: the user's own of the last 24 hours, and under them
- * what other contributors report (or, with sharing off, a hint to turn sharing on). Hidden when
- * there is nothing to say.
+ * what other contributors report (or, with sharing off, a hint to turn sharing on), with a way to
+ * be notified while that setting is off. Hidden when there is nothing to say.
  */
 export function ProviderErrors() {
   const store = useAppStore();
   const snapshot = useStore(store, (s) => s.snapshot);
   const recovery = useStore(store, (s) => s.errorRecovery);
   const now = useStore(store, (s) => s.now);
-  const { sharing } = snapshot.settings;
+  const { sharing, errorNotifications } = snapshot.settings;
   const local = providerErrorLine(snapshot.providerErrors, now);
   const community = communityErrorLine(
-    {
-      alerts: snapshot.board?.errors?.alerts,
-      sharing,
-      records: snapshot.records,
-      groups: snapshot.providerErrors,
-      now,
-    },
+    { relevant: snapshot.relevantErrorAlerts, sharing, now },
     recovery,
   );
   const hint = local && !sharing ? SHARING_HINT : null;
@@ -50,6 +44,15 @@ export function ProviderErrors() {
             <CircleAlert size={16} aria-hidden="true" />
           )}
           <span>{community.text}</span>
+          {community.kind === "alert" && !errorNotifications && (
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => void store.patch({ errorNotifications: true })}
+            >
+              Notify me
+            </button>
+          )}
         </p>
       )}
       {hint && (

@@ -77,6 +77,9 @@ final class HistoryStore {
     }
 
     let sharingPreferences: SharingPreferences
+    /// The setting for operating-system notifications about community error alerts, and its
+    /// permission flow (contract "Error notifications (0.1.24)").
+    let errorNotifications: ErrorNotificationPreferences
     var sharing: SharingSession { sharingPreferences.session }
     private(set) var history: MetricHistory
     private(set) var isMonitoring = false
@@ -124,6 +127,8 @@ final class HistoryStore {
     @ObservationIgnored private var liveResponses = LiveResponseBuffer()
     @ObservationIgnored private var providerErrors = LocalProviderErrors()
     @ObservationIgnored private var communityErrors = CommunityErrorAlerts()
+    /// Which relevant alerts have been notified; in memory only.
+    @ObservationIgnored private var notificationPlanner = ErrorNotificationPlanner()
     /// The session files already read to their end, as the monitors last reported them. The next launch
     /// skips what it still matches (see `SourceFileCheckpoint`).
     @ObservationIgnored private(set) var checkpoints = SourceCheckpoints()
@@ -199,6 +204,7 @@ final class HistoryStore {
         kimiCodeFolder: URL? = nil,
         kimiDesktopFolder: URL? = nil,
         sharingPreferences: SharingPreferences? = nil,
+        errorNotifier: (any ErrorNotifying)? = nil,
         defaults: UserDefaults = .standard,
         initialRecords: [TurnMetric]? = nil,
         pausedRetentionInterval: TimeInterval = 3_600
@@ -207,6 +213,7 @@ final class HistoryStore {
         self.pausedRetentionInterval = pausedRetentionInterval
         self.sharingPreferences = sharingPreferences
             ?? SharingPreferences(session: SharingSession(identity: KeychainIdentity()))
+        errorNotifications = ErrorNotificationPreferences(notifier: errorNotifier ?? SystemErrorNotifier(), defaults: defaults)
         dashboardSelection = DashboardSelection.restored(from: defaults.string(forKey: Self.selectionDefaultsKey))
         clientFilter = defaults.string(forKey: Self.clientFilterDefaultsKey)
         providerFilter = defaults.string(forKey: Self.providerFilterDefaultsKey)
@@ -250,6 +257,10 @@ final class HistoryStore {
         let launchedAt = Date.now
         sharingPreferences.activate(now: launchedAt)
         startMonitoring()
+        // The system may have turned notifications off since the setting was switched on.
+        if errorNotifications.isEnabled {
+            Task { await errorNotifications.refreshPermission() }
+        }
     }
 
     /// The folder a tool is read from: the user's choice, else the default or environment folder.
@@ -619,12 +630,14 @@ final class HistoryStore {
         refreshCommunityErrorLine(now: now)
     }
 
-    /// Follows the community board and the sharing switch: the line is rebuilt whenever either changes
-    /// (the board arrives every 30 seconds while sharing is on), not only at the next poll.
+    /// Follows the community board, the sharing switch and the notification setting: the line is
+    /// rebuilt, and notifications are planned, whenever any of them changes (the board arrives every
+    /// 30 seconds while sharing is on), not only at the next poll.
     private func observeSharing() {
         withObservationTracking {
             _ = sharing.board
             _ = sharing.isEnabled
+            _ = errorNotifications.isEnabled
         } onChange: { [weak self] in
             // Fires before the change lands: look at the new values on the next main-actor turn.
             Task { @MainActor [weak self] in
@@ -636,10 +649,12 @@ final class HistoryStore {
     }
 
     /// Rebuilds the community line from the board's error alerts, the models used in the last 7 days and
-    /// the local failures. With sharing off no board is fetched: nothing is shown and what was shown is
-    /// forgotten; a board that could not be fetched shows nothing but does not count as a recovery.
+    /// the local failures, and plans the notifications for the same relevant alerts. With sharing off no
+    /// board is fetched: nothing is shown and what was shown is forgotten; a board that could not be
+    /// fetched shows nothing but does not count as a recovery.
     private func refreshCommunityErrorLine(now: Date = .now) {
         let line: CommunityErrorAlerts.Line?
+        var relevant: [CommunityErrorAlerts.RelevantAlert]?
         if !sharing.isEnabled {
             communityErrors.reset()
             line = providerErrorLine == nil ? nil : CommunityErrorAlerts.Line(kind: .sharingHint, text: CommunityErrorAlerts.sharingHint)
@@ -649,14 +664,31 @@ final class HistoryStore {
             let usedModels: Set<String> = board.errorAlerts.isEmpty
                 ? []
                 : Set(history.records.lazy.filter { $0.completedAt > cutoff }.compactMap(\.model))
-            line = communityErrors.line(
-                alerts: board.errorAlerts, usedModels: usedModels, localGroups: providerErrors.groups(now: now),
+            let selected = CommunityErrorAlerts.relevantAlerts(
+                board.errorAlerts, usedModels: usedModels, localGroups: providerErrors.groups(now: now),
                 isSharing: true, now: now
-            ) { RelativeTime.string(from: $0, now: now) }
+            )
+            relevant = selected
+            line = communityErrors.line(alerts: board.errorAlerts, relevant: selected, now: now) {
+                RelativeTime.string(from: $0, now: now)
+            }
         } else {
             line = nil
         }
         if line != communityErrorLine { communityErrorLine = line }
+        postNotifications(relevant: relevant, now: now)
+    }
+
+    /// Posts what the planner decides for the current relevant alerts (nil: there is no board).
+    private func postNotifications(relevant: [CommunityErrorAlerts.RelevantAlert]?, now: Date) {
+        let notifications = notificationPlanner.plan(
+            relevant: relevant, isSharing: sharing.isEnabled, isEnabled: errorNotifications.isEnabled, now: now
+        )
+        guard !notifications.isEmpty else { return }
+        let notifier = errorNotifications.notifier
+        Task {
+            for notification in notifications { await notifier.post(notification) }
+        }
     }
 
     private func saveHistory(now: Date = .now) {

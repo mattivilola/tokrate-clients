@@ -6,7 +6,13 @@ import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { createPreviewBridge } from "./store/preview";
 import { AppStore } from "./store/store";
-import type { Bridge, CommunityErrorAlert, ProviderErrorGroup, Snapshot } from "./store/types";
+import type {
+  Bridge,
+  CommunityErrorAlert,
+  ProviderErrorGroup,
+  RelevantErrorAlert,
+  Snapshot,
+} from "./store/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -195,11 +201,16 @@ describe("community error alerts", () => {
   /** The preview with `over` laid on every snapshot; `current` can change between polls. */
   function storeWith(current: () => Partial<Snapshot>, scenario: "sharing" | "default" = "sharing") {
     const preview = createPreviewBridge({ scenario, view: "home" });
+    const updates: unknown[] = [];
     const bridge: Bridge = {
       ...preview,
       snapshot: async (since) => ({ ...(await preview.snapshot(since)), ...current() }),
+      updateSettings: async (patch) => {
+        updates.push(patch);
+        return preview.updateSettings(patch);
+      },
     };
-    return { preview, store: new AppStore(bridge, {}) };
+    return { preview, updates, store: new AppStore(bridge, {}) };
   }
   const alertFor = (model: string, over: Partial<CommunityErrorAlert> = {}): CommunityErrorAlert => ({
     model,
@@ -212,6 +223,17 @@ describe("community error alerts", () => {
     lastFailureAt: new Date(Date.now() - 3 * 60_000).toISOString(),
     ...over,
   });
+  /** What the native shell selects for the user from an alert. */
+  const relevantFor = (model: string, over: Partial<RelevantErrorAlert> = {}): RelevantErrorAlert => ({
+    model,
+    failingContributors: 4,
+    overloaded: 6,
+    serverError: 0,
+    lastFailureAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+    notJustYou: false,
+    others: 3,
+    ...over,
+  });
   const failure = (over: Partial<ProviderErrorGroup>): ProviderErrorGroup => ({
     client: "claude-code",
     model: "gpt-5.5",
@@ -220,19 +242,18 @@ describe("community error alerts", () => {
     latestAt: new Date(Date.now() - 5 * 60_000).toISOString(),
     ...over,
   });
-  const notes = () => [...host.querySelectorAll(".provider-errors")].map((n) => n.textContent ?? "");
-  /** A model the preview history holds, so alerts about it concern the user. */
-  async function usedModel(): Promise<string> {
-    const preview = createPreviewBridge({ scenario: "sharing", view: "home" });
-    const model = (await preview.snapshot(null)).records.find((r) => r.model)?.model;
-    if (!model) throw new Error("preview history has no model");
-    return model;
-  }
+  const notes = () =>
+    [...host.querySelectorAll(".provider-errors")].map((n) => n.querySelector("span")?.textContent ?? "");
+  const notifyButton = () =>
+    [...host.querySelectorAll<HTMLButtonElement>(".provider-errors button")].find(
+      (b) => b.textContent === "Notify me",
+    );
+  const model = "claude-opus-5-5";
 
-  it("shows the reporting line for a model used in the last 7 days, without a local line", async () => {
-    const model = await usedModel();
+  it("shows the reporting line for a relevant alert, without a local line", async () => {
     const { store } = storeWith(() => ({
       board: { cohorts: [], errors: { alerts: [alertFor(model)] } },
+      relevantErrorAlerts: [relevantFor(model)],
       providerErrors: [],
     }));
     await show(store);
@@ -242,10 +263,10 @@ describe("community error alerts", () => {
     expect(host.textContent).not.toContain("Turn on sharing");
   });
 
-  it("shows it under the local line, and not just you when the user failed in the last hour", async () => {
-    const model = await usedModel();
+  it("shows it under the local line, and not just you for a failure of the user's own", async () => {
     const { store } = storeWith(() => ({
-      board: { cohorts: [], errors: { alerts: [alertFor(model), alertFor("unused-model")] } },
+      board: { cohorts: [], errors: { alerts: [alertFor(model)] } },
+      relevantErrorAlerts: [relevantFor(model, { notJustYou: true })],
       providerErrors: [failure({ model })],
     }));
     await show(store);
@@ -257,9 +278,10 @@ describe("community error alerts", () => {
     );
   });
 
-  it("leaves out alerts about models the user does not use", async () => {
+  it("leaves out alerts the native shell did not select", async () => {
     const { store } = storeWith(() => ({
       board: { cohorts: [], errors: { alerts: [alertFor("unused-model")] } },
+      relevantErrorAlerts: [],
       providerErrors: [],
     }));
     await show(store);
@@ -267,10 +289,10 @@ describe("community error alerts", () => {
   });
 
   it("shows the sharing hint after the local line while sharing is off, and no alert", async () => {
-    const model = await usedModel();
     const { store } = storeWith(
       () => ({
         board: { cohorts: [], errors: { alerts: [alertFor(model)] } },
+        relevantErrorAlerts: [relevantFor(model)],
         providerErrors: [failure({ model })],
       }),
       "default",
@@ -282,6 +304,7 @@ describe("community error alerts", () => {
     expect(lines[0]).toContain("in the last 24 hours");
     expect(lines[1]).toBe("Turn on sharing to see whether other contributors hit the same errors.");
     expect(host.textContent).not.toContain("Tokrate contributors are reporting");
+    expect(notifyButton()).toBeUndefined();
   });
 
   it("has no hint without a local line", async () => {
@@ -291,10 +314,10 @@ describe("community error alerts", () => {
   });
 
   it("says contributors no longer report errors after the alert clears", async () => {
-    const model = await usedModel();
     let alerts: CommunityErrorAlert[] = [alertFor(model)];
     const { store } = storeWith(() => ({
       board: { cohorts: [], errors: { alerts } },
+      relevantErrorAlerts: alerts.map((a) => relevantFor(a.model)),
       providerErrors: [],
     }));
     await show(store);
@@ -306,5 +329,69 @@ describe("community error alerts", () => {
     });
     expect(notes()).toEqual([`${model}: contributors no longer report provider errors (cleared just now).`]);
     expect(host.querySelector(".provider-errors-quiet")).not.toBeNull();
+    expect(notifyButton()).toBeUndefined();
+  });
+
+  describe("the Notify me button", () => {
+    const withAlert = () =>
+      storeWith(() => ({
+        board: { cohorts: [], errors: { alerts: [alertFor(model)] } },
+        relevantErrorAlerts: [relevantFor(model)],
+        providerErrors: [],
+      }));
+
+    it("turns the notification setting on through the settings command", async () => {
+      const { store, updates } = withAlert();
+      await show(store);
+      expect(store.getState().snapshot.settings.errorNotifications).toBe(false);
+      await act(async () => notifyButton()!.click());
+      expect(updates).toEqual([{ errorNotifications: true }]);
+      expect(store.getState().snapshot.settings.errorNotifications).toBe(true);
+      // The setting is on, so the button goes away.
+      expect(notifyButton()).toBeUndefined();
+      expect(notes()[0]).toContain("Tokrate contributors are reporting");
+    });
+
+    it("is not offered once the setting is on, however it was turned on", async () => {
+      const { store } = withAlert();
+      await show(store);
+      expect(notifyButton()).toBeDefined();
+      await act(async () => store.patch({ errorNotifications: true }));
+      expect(notes()[0]).toContain("Tokrate contributors are reporting");
+      expect(notifyButton()).toBeUndefined();
+    });
+  });
+});
+
+describe("the error notifications setting", () => {
+  const label = "Notify me when contributors report provider errors on models I use";
+  const toggle = () =>
+    host.querySelector<HTMLButtonElement>(`button[role="switch"][aria-label="${label}"]`);
+  async function settingsFor(scenario: "sharing" | "default") {
+    const store = new AppStore(createPreviewBridge({ scenario, view: "home" }), {});
+    await show(store);
+    await act(async () => store.openSettings());
+    return store;
+  }
+
+  it("is a switch in the sharing section that turns the setting on and off", async () => {
+    const store = await settingsFor("sharing");
+    expect(toggle()?.closest("#settings-sharing")).not.toBeNull();
+    expect(toggle()?.getAttribute("aria-checked")).toBe("false");
+    expect(toggle()?.disabled).toBe(false);
+    await act(async () => toggle()!.click());
+    expect(store.getState().snapshot.settings.errorNotifications).toBe(true);
+    expect(toggle()?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => toggle()!.click());
+    expect(store.getState().snapshot.settings.errorNotifications).toBe(false);
+  });
+
+  it("is disabled with a note while sharing is off", async () => {
+    const store = await settingsFor("default");
+    expect(toggle()?.disabled).toBe(true);
+    const hint = host.querySelector(`#${toggle()!.getAttribute("aria-describedby")}`);
+    expect(hint?.textContent).toContain("Turn on sharing");
+    await act(async () => toggle()!.click());
+    expect(store.getState().snapshot.settings.errorNotifications).toBe(false);
   });
 });

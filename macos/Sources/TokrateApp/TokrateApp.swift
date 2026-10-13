@@ -2,13 +2,25 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let historyStore = HistoryStore()
+    let historyStore: HistoryStore
     let updates = AppUpdates()
+    private let notifier = SystemErrorNotifier()
     private var onboardingWindow: NSWindow?
+    /// Opens the full history window; supplied by the menu-bar label (see `HistoryWindowOpener`),
+    /// the one always-live SwiftUI view that has the `openWindow` action.
+    private var openHistoryWindow: (() -> Void)?
+
+    override init() {
+        historyStore = HistoryStore(errorNotifier: notifier)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep the menu-bar utility quiet except when consent needs a visible first-run surface.
         NSApp.setActivationPolicy(.accessory)
+        // Before anything else: a click on a notification can be what launched the app.
+        notifier.onActivate = { [weak self] in self?.showDashboard() }
+        notifier.activate()
         historyStore.startAutomatically()
         presentOnboardingIfNeeded()
     }
@@ -23,6 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard historyStore.sharingPreferences.isConsentDisclosureVisible else { return false }
         presentOnboarding()
         return true
+    }
+
+    func registerHistoryWindowOpener(_ open: @escaping () -> Void) {
+        openHistoryWindow = open
+    }
+
+    /// What clicking a notification opens: the full history, like "Full history…" in the menu, or the
+    /// first-run choice while that is still pending.
+    private func showDashboard() {
+        guard !showInitialConsentDashboard() else { return }
+        openHistoryWindow?()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func presentOnboardingIfNeeded() {
@@ -75,6 +99,7 @@ struct TokrateApp: App {
             )
         } label: {
             MenuBarLabel(readout: historyStore.menuBarReadout, showsSpeed: showMenuBarSpeed, showsBadge: showProviderBadge, showsToolChip: showToolChip)
+                .modifier(HistoryWindowOpener { appDelegate.registerHistoryWindowOpener($0) })
         }
         .menuBarExtraStyle(.window)
 
@@ -94,5 +119,17 @@ struct TokrateApp: App {
         Settings {
             SettingsView(store: historyStore, updates: appDelegate.updates)
         }
+    }
+}
+
+/// Hands the app delegate an action that opens the history window. The menu-bar label is created at
+/// launch, unlike the popover and the windows, so it is where the `openWindow` action can be captured
+/// for a notification click that arrives while no window exists.
+private struct HistoryWindowOpener: ViewModifier {
+    let register: (@escaping () -> Void) -> Void
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.onAppear { register { openWindow(id: "history") } }
     }
 }

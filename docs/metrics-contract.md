@@ -687,3 +687,16 @@ No upload field changes and no new network request. While sharing is on, the cli
 - **Recovery.** When a model whose alert was shown in this run is no longer in the alerts, the client shows "{model}: contributors no longer report provider errors (cleared {relative time})." for 30 minutes, in place of the community line when no alert is shown. In memory only.
 - **Sharing off.** When the local line is shown and sharing is off, a muted hint follows it: "Turn on sharing to see whether other contributors hit the same errors."
 - Model ids are shown as the tools report them. Nothing about alerts is persisted, exported or uploaded.
+
+## Error notifications (0.1.24)
+
+No upload field changes and no new network request. The companions can turn the community error alerts of "Community error alerts (0.1.23)" into operating-system notifications.
+
+- **Opt-in.** A setting "Notify me when contributors report provider errors on models I use", off by default and saved with the other preferences. It can be switched on in Settings or with a "Notify me" button shown next to an active community alert line while the setting is off. Switching it on asks the operating system for permission where the platform requires it (macOS); when permission is denied the setting stays off and Settings says that notifications are turned off for Tokrate in the system settings. Switching it off is immediate. Notifications need sharing on, because alerts come from the community board.
+- **What notifies.** The relevant alerts exactly as the community line selects them (models used in the last 7 days or with a local provider failure in the last 24 hours, the user's-own-report skip applied). Per model, one notification when its alert first appears (an episode), and one when that episode clears, only if its start was notified. An episode ends when the model has been absent from the alerts for 30 minutes (the recovery window); a reappearance within it continues the same episode without a new notification. At most 3 notifications per hour in total; a suppressed start also suppresses its recovery notification. Alerts present when the setting is switched on, or at the first board after launch or after sharing turns on, are treated as already notified (no burst of old alerts).
+- **Text.** Model ids as the tools report them.
+  - Start, after a local failure on that model in the last hour: title "Provider errors on {model}", body "It’s not just you: {others} other contributor(s) hit provider errors on this model in the last hour."
+  - Start, otherwise: title "Provider errors on {model}", body "{k} Tokrate contributor(s) reported {counts} in the last hour." with {counts} as in the community line.
+  - Recovery: title "{model} looks healthy again", body "Contributors no longer report provider errors on this model."
+- **Activation.** Clicking a notification opens the companion's dashboard. Notifications carry no other action and nothing is persisted about them beyond the setting.
+- On the desktop the notifications are sent by the native runtime from its own board data, never by the webview, and the community line uses the same relevant-alert list the runtime computes.

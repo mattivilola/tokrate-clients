@@ -360,6 +360,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     showSpeed: true,
     showProviderBadge: true,
     showToolChip: true,
+    errorNotifications: false,
     selection: params.view === "compare" ? "all" : "auto",
     days: 1,
     root: "",

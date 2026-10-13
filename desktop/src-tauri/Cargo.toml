@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "=2.13.1"
+tauri-plugin-notification = "=2.6.0"
 notify = "=8.2.0"
 tokrate-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }

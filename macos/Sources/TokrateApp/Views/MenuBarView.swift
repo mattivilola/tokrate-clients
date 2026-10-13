@@ -172,7 +172,7 @@ private struct MenuBarDashboardView: View {
         VStack(alignment: .leading, spacing: 14) {
             if store.sharingPreferences.isConsentDisclosureVisible { consentBanner }
             if store.providerErrorLine != nil || store.communityErrorLine != nil {
-                ProviderErrorLinesView(local: store.providerErrorLine, community: store.communityErrorLine)
+                ProviderErrorLinesView(local: store.providerErrorLine, community: store.communityErrorLine, notifications: store.errorNotifications)
             }
             if snapshot.selection.isAllModels {
                 CohortComparisonView(snapshot: snapshot, range: $range, compact: true) { cohort in

@@ -5,6 +5,7 @@
 use chrono::DateTime;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use tokrate_core::{CommunityErrorAlert, MAX_ERROR_ALERTS};
 
 /// The board schema the app understands.
 const SCHEMA_VERSION: u64 = 1;
@@ -12,8 +13,6 @@ const MAX_COHORTS: usize = 10_000;
 const MAX_ALERTS: usize = 1_000;
 /// Longest string kept: a cohort id (a JSON-encoded tuple of identifiers) is the longest.
 const MAX_TEXT_BYTES: usize = 2_048;
-/// Error alerts kept (contract "Community error alerts (0.1.23)"); the server's order is kept.
-const MAX_ERROR_ALERTS: usize = 20;
 /// Longest model id, provider or client id of an error alert (the upload rules' bound).
 const MAX_ID_BYTES: usize = 80;
 const MAX_ALERT_CLIENTS: usize = 16;
@@ -64,6 +63,20 @@ struct ErrorAlert {
 }
 
 impl ErrorAlert {
+    /// The part of the alert the selection of relevant alerts reads. `None` for an alert without a
+    /// readable time, which `is_sound` has already left out.
+    fn selectable(&self) -> Option<CommunityErrorAlert> {
+        Some(CommunityErrorAlert {
+            model: self.model.clone(),
+            failing_contributors: self.failing_contributors,
+            overloaded: self.overloaded,
+            server_error: self.server_error,
+            last_failure_at: DateTime::parse_from_rfc3339(&self.last_failure_at)
+                .ok()?
+                .with_timezone(&chrono::Utc),
+        })
+    }
+
     /// An alert the UI can word: named, from at least one contributor, with at least one counted
     /// failure and readable times.
     fn is_sound(&self) -> bool {
@@ -171,6 +184,16 @@ impl Board {
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let board: Board = serde_json::from_slice(bytes).ok()?;
         board.is_sound().then_some(board)
+    }
+
+    /// The provider error alerts in the server's order, for the selection of those that concern the
+    /// user.
+    pub fn error_alerts(&self) -> Vec<CommunityErrorAlert> {
+        self.errors
+            .iter()
+            .flat_map(|errors| &errors.alerts)
+            .filter_map(ErrorAlert::selectable)
+            .collect()
     }
 
     fn alerts(&self) -> &[Alert] {
@@ -357,6 +380,38 @@ mod tests {
             serde_json::to_value(&board).unwrap(),
             json!({"cohorts": [], "errors": {"alerts": [alert("claude-opus-5-5")]}})
         );
+    }
+
+    #[test]
+    fn the_selection_reads_the_alerts_in_the_servers_order() {
+        let board = parse(json!({
+            "schemaVersion": 1, "cohorts": [],
+            "errors": {"alerts": [alert("first"), json!(null), alert("second")]}
+        }))
+        .unwrap();
+        let alerts = board.error_alerts();
+        assert_eq!(
+            alerts.iter().map(|a| a.model.as_str()).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(
+            (
+                alerts[0].failing_contributors,
+                alerts[0].overloaded,
+                alerts[0].server_error
+            ),
+            (3, 4, 0)
+        );
+        assert_eq!(
+            alerts[0].last_failure_at,
+            "2026-10-13T11:50:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap()
+        );
+        assert!(parse(json!({"schemaVersion": 1, "cohorts": []}))
+            .unwrap()
+            .error_alerts()
+            .is_empty());
     }
 
     #[test]

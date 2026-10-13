@@ -10,6 +10,12 @@ export interface Settings {
   showProviderBadge: boolean;
   /** Two-letter coding-tool chip before the speed in the tray text (the tooltip always names the tool). */
   showToolChip: boolean;
+  /**
+   * Post an operating-system notification when contributors report provider errors on a model the
+   * user uses (contract "Error notifications (0.1.24)"). Needs sharing, because the alerts come
+   * from the community board.
+   */
+  errorNotifications: boolean;
   /** `auto`, `auto:<tool>`, `all`, `model:[model,provider]` or a pinned nine-part cohort. */
   selection: string;
   days: number;
@@ -71,6 +77,23 @@ export interface CommunityErrorAlert {
   lastFailureAt: string;
 }
 
+/**
+ * A community error alert that concerns the user (contract "Community error alerts (0.1.23)"),
+ * selected by the native shell: the same list the notifications use.
+ */
+export interface RelevantErrorAlert {
+  model: string;
+  failingContributors: number;
+  overloaded: number;
+  serverError: number;
+  /** ISO time. */
+  lastFailureAt: string;
+  /** The user failed on this model in the last hour: the alert reads "It's not just you". */
+  notJustYou: boolean;
+  /** The other contributors besides the user. */
+  others: number;
+}
+
 /** Published community board; every field is optional so older cached responses decode. */
 export interface Board {
   window?: string;
@@ -123,6 +146,8 @@ export interface Snapshot {
   active?: { model: string | null; provider: string | null } | null;
   /** The user's own provider-side failures of the last 24 hours, most recent first (local only). */
   providerErrors?: ProviderErrorGroup[];
+  /** The community error alerts that concern the user, most relevant first; empty while sharing is off. */
+  relevantErrorAlerts?: RelevantErrorAlert[];
 }
 
 export type SettingsPatch = Partial<
@@ -133,6 +158,7 @@ export type SettingsPatch = Partial<
     | "showSpeed"
     | "showProviderBadge"
     | "showToolChip"
+    | "errorNotifications"
     | "selection"
     | "days"
   >

@@ -34,7 +34,10 @@ final class CommunityErrorAlertsTests: XCTestCase {
         groups: [LocalProviderErrors.Group] = [], sharing: Bool = true, at date: Date? = nil
     ) -> CommunityErrorAlerts.Line? {
         let at = date ?? now
-        return state.line(alerts: alerts, usedModels: used ?? self.used, localGroups: groups, isSharing: sharing, now: at) {
+        let relevant = CommunityErrorAlerts.relevantAlerts(
+            alerts, usedModels: used ?? self.used, localGroups: groups, isSharing: sharing, now: at
+        )
+        return state.line(alerts: alerts, relevant: relevant, now: at) {
             "REL(\(Int(at.timeIntervalSince($0))))"
         }
     }

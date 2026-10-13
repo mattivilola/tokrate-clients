@@ -1,9 +1,9 @@
-import { DAY, relativeTime, type Metric } from "../metrics";
+import { DAY, relativeTime } from "../metrics";
 import type {
   Board,
-  CommunityErrorAlert,
   ErrorRecovery,
   ProviderErrorGroup,
+  RelevantErrorAlert,
 } from "../store/types";
 
 /** Other groups named after the main one, "Also: {model} ({n})". */
@@ -38,23 +38,18 @@ export function providerErrorLine(
   return also.length ? `${line} Also: ${also.join(", ")}` : line;
 }
 
-const HOUR = 3_600_000;
-/** An alert concerns the user when they used its model within this long. */
-const USED_WITHIN = 7 * DAY;
-/** At most this many alerts are read from the board. */
-const MAX_ALERTS = 20;
 /** How long the "no longer report" line stays. */
 export const RECOVERY_MS = 30 * 60_000;
 
 export const NO_RECOVERY: ErrorRecovery = { shown: [], cleared: [] };
 
 export interface CommunityErrorInput {
-  /** The board's `errors.alerts`; ignored while sharing is off. */
-  alerts: readonly CommunityErrorAlert[] | undefined;
+  /**
+   * The community alerts that concern the user, most relevant first, as the native shell selects
+   * them (also for the notifications); ignored while sharing is off.
+   */
+  relevant: readonly RelevantErrorAlert[] | undefined;
   sharing: boolean;
-  /** Local history: a turn of the exact model id marks the model as used. */
-  records: readonly Pick<Metric, "model" | "completedAt">[];
-  groups: readonly ProviderErrorGroup[] | undefined;
   now: number;
 }
 
@@ -68,30 +63,10 @@ export interface CommunityErrorLine {
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const contributors = (n: number) => count(n, "contributor", "contributors");
 
-/** Alerts come from a server: anything that does not fit the shape is left out. */
-function wellFormed(alert: unknown): alert is CommunityErrorAlert {
-  if (typeof alert !== "object" || alert === null) return false;
-  const a = alert as Record<string, unknown>;
-  const whole = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0;
-  return (
-    typeof a.model === "string" &&
-    a.model !== "" &&
-    whole(a.failingContributors) &&
-    whole(a.overloaded) &&
-    whole(a.serverError) &&
-    typeof a.lastFailureAt === "string"
-  );
-}
-
-/** Other contributors besides the user, whose own counts may be among the alert's. */
-const othersOf = (alert: CommunityErrorAlert) => alert.failingContributors - 1;
-
 /** The alert's form for the user, after the contract's "The community line". */
-function alertText(alert: CommunityErrorAlert, failedLastHour: boolean, now: number): string {
-  if (failedLastHour) {
-    const others = othersOf(alert);
-    return `It’s not just you: ${others} other ${others === 1 ? "contributor" : "contributors"} hit provider errors on ${alert.model} in the last hour.`;
-  }
+function alertText(alert: RelevantErrorAlert, now: number): string {
+  if (alert.notJustYou)
+    return `It’s not just you: ${alert.others} other ${alert.others === 1 ? "contributor" : "contributors"} hit provider errors on ${alert.model} in the last hour.`;
   const counts = [
     alert.overloaded > 0 ? `${alert.overloaded} overloaded / at capacity` : null,
     alert.serverError > 0 ? count(alert.serverError, "server error", "server errors") : null,
@@ -103,48 +78,20 @@ function alertText(alert: CommunityErrorAlert, failedLastHour: boolean, now: num
 
 /**
  * The community alert line (contract "Community error alerts (0.1.23)"), or null when sharing is
- * off or no alert concerns the user. An alert concerns the user when they used its model in the
- * last 7 days or had a provider failure on it in the last 24 hours; a failure in the last hour
- * puts an alert first, otherwise the server's order stands. An alert whose only contributor is
- * the user (failure in the last hour, no other contributor) is skipped.
+ * off or no alert concerns the user. It words the most relevant alert and names up to two more
+ * models; which alerts concern the user is decided by the native shell.
  */
 export function communityAlertLine({
-  alerts,
+  relevant,
   sharing,
-  records,
-  groups,
   now,
 }: CommunityErrorInput): CommunityErrorLine | null {
-  if (!sharing || !Array.isArray(alerts) || alerts.length === 0) return null;
-  const used = new Set<string>();
-  for (const record of records) {
-    const at = Date.parse(record.completedAt);
-    if (record.model && now - at <= USED_WITHIN) used.add(record.model);
-  }
-  const failed24h = new Set<string>();
-  const failedHour = new Set<string>();
-  for (const group of groups ?? []) {
-    const age = now - Date.parse(group.latestAt);
-    if (age <= DAY) failed24h.add(group.model);
-    if (age <= HOUR) failedHour.add(group.model);
-  }
-  const relevant = alerts
-    .slice(0, MAX_ALERTS)
-    .filter(wellFormed)
-    .filter((alert) => used.has(alert.model) || failed24h.has(alert.model))
-    // With a failure of the user's in the last hour and nobody else counted, the alert is only
-    // their own report: it is skipped, not worded as a report of contributors.
-    .filter((alert) => !failedHour.has(alert.model) || othersOf(alert) >= 1);
-  const ordered = [
-    ...relevant.filter((alert) => failedHour.has(alert.model)),
-    ...relevant.filter((alert) => !failedHour.has(alert.model)),
-  ];
-  const main = ordered[0];
+  const main = sharing ? relevant?.[0] : undefined;
   if (!main) return null;
-  const also = [...new Set(ordered.slice(1).map((alert) => alert.model))]
+  const also = [...new Set((relevant ?? []).slice(1).map((alert) => alert.model))]
     .filter((model) => model !== main.model)
     .slice(0, MAX_ALSO);
-  const line = alertText(main, failedHour.has(main.model), now);
+  const line = alertText(main, now);
   return {
     kind: "alert",
     text: also.length ? `${line} Also: ${also.join(", ")}` : line,
@@ -190,7 +137,7 @@ export function advanceRecovery(
   if (!input.sharing)
     return previous.shown.length || previous.cleared.length ? NO_RECOVERY : previous;
   if (!board) return previous;
-  const present = new Set((board.errors?.alerts ?? []).filter(wellFormed).map((a) => a.model));
+  const present = new Set((board.errors?.alerts ?? []).map((a) => a.model));
   const gone = previous.shown.filter((model) => !present.has(model));
   const cleared = [
     ...previous.cleared.filter(

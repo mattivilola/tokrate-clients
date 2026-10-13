@@ -154,11 +154,14 @@ final class PreviewRenderTests: XCTestCase {
                 GlobalBoard.ErrorAlert(model: "kimi-k2.7", provider: "moonshot", clients: ["kimi-code"], failingContributors: 3, overloaded: 2, serverError: 1, lastFailureAt: .now.addingTimeInterval(-20 * 60))
             ]
             let used: Set<String> = ["gpt-5.5", "claude-opus-5-5", "kimi-k2.7"]
-            let notJustYou = communityAlerts.line(alerts: boardAlerts, usedModels: used, localGroups: providerErrors.groups(), isSharing: true, now: .now, relativeTime: relative)
+            func relevant(_ localGroups: [LocalProviderErrors.Group]) -> [CommunityErrorAlerts.RelevantAlert] {
+                CommunityErrorAlerts.relevantAlerts(boardAlerts, usedModels: used, localGroups: localGroups, isSharing: true, now: .now)
+            }
+            let notJustYou = communityAlerts.line(alerts: boardAlerts, relevant: relevant(providerErrors.groups()), now: .now, relativeTime: relative)
             var reporting = CommunityErrorAlerts()
-            let reportingLine = reporting.line(alerts: boardAlerts, usedModels: used, localGroups: [], isSharing: true, now: .now, relativeTime: relative)
-            _ = reporting.line(alerts: [], usedModels: used, localGroups: [], isSharing: true, now: .now, relativeTime: relative)
-            let recoveryLine = reporting.line(alerts: [], usedModels: used, localGroups: [], isSharing: true, now: .now.addingTimeInterval(5 * 60), relativeTime: { RelativeTime.string(from: $0, now: .now.addingTimeInterval(5 * 60)) })
+            let reportingLine = reporting.line(alerts: boardAlerts, relevant: relevant([]), now: .now, relativeTime: relative)
+            _ = reporting.line(alerts: [], relevant: [], now: .now, relativeTime: relative)
+            let recoveryLine = reporting.line(alerts: [], relevant: [], now: .now.addingTimeInterval(5 * 60), relativeTime: { RelativeTime.string(from: $0, now: .now.addingTimeInterval(5 * 60)) })
             render(
                 VStack(alignment: .leading, spacing: 14) {
                     ProviderErrorLinesView(local: providerErrorLine, community: notJustYou)
@@ -175,6 +178,38 @@ final class PreviewRenderTests: XCTestCase {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
                 dark: dark, to: output, name: "community-error-states-\(mode)"
+            )
+            // The notification setting in the Sharing tab: off, on, refused by the system, and sharing off.
+            let notifyOff = try await makeFixture(work: work, sharing: .contributing, records: PreviewData.records(), monitoring: false)
+            render(SettingsSharingPage(store: notifyOff.store, updates: notifyOff.updates).frame(width: 560, height: 1000).tint(DashboardStyle.accent), dark: dark, to: output, name: "settings-notifications-off-\(mode)", fixedSize: CGSize(width: 560, height: 1000))
+            let notifyOn = try await makeFixture(work: work, sharing: .contributing, records: PreviewData.records(), monitoring: false)
+            await notifyOn.store.errorNotifications.setEnabled(true)
+            render(SettingsSharingPage(store: notifyOn.store, updates: notifyOn.updates).frame(width: 560, height: 1000).tint(DashboardStyle.accent), dark: dark, to: output, name: "settings-notifications-on-\(mode)", fixedSize: CGSize(width: 560, height: 1000))
+            let notifyDenied = try await makeFixture(
+                work: work, sharing: .contributing, records: PreviewData.records(), monitoring: false,
+                notifier: MockErrorNotifier(permission: .notDetermined, afterRequest: .denied)
+            )
+            await notifyDenied.store.errorNotifications.setEnabled(true)
+            render(SettingsSharingPage(store: notifyDenied.store, updates: notifyDenied.updates).frame(width: 560, height: 1000).tint(DashboardStyle.accent), dark: dark, to: output, name: "settings-notifications-denied-\(mode)", fixedSize: CGSize(width: 560, height: 1000))
+            let notifySharingOff = try await makeFixture(work: work, sharing: .localOnly, records: PreviewData.records(), monitoring: false)
+            render(SettingsSharingPage(store: notifySharingOff.store, updates: notifySharingOff.updates).frame(width: 560, height: 1000).tint(DashboardStyle.accent), dark: dark, to: output, name: "settings-notifications-sharing-off-\(mode)", fixedSize: CGSize(width: 560, height: 1000))
+            // "Notify me" beside an active community alert while the setting is off; none beside the
+            // cleared note, and none once the setting is on; the refusal shows under the button.
+            let deniedLine = try await makeFixture(
+                work: work, sharing: .contributing, records: PreviewData.records(), monitoring: false,
+                notifier: MockErrorNotifier(permission: .notDetermined, afterRequest: .denied)
+            )
+            await deniedLine.store.errorNotifications.setEnabled(true)
+            render(
+                VStack(alignment: .leading, spacing: 18) {
+                    ProviderErrorLinesView(local: providerErrorLine, community: notJustYou, notifications: notifyOff.store.errorNotifications)
+                    ProviderErrorLinesView(local: nil, community: reportingLine, notifications: notifyOff.store.errorNotifications)
+                    ProviderErrorLinesView(local: nil, community: reportingLine, notifications: deniedLine.store.errorNotifications)
+                    ProviderErrorLinesView(local: nil, community: recoveryLine, notifications: notifyOff.store.errorNotifications)
+                    ProviderErrorLinesView(local: nil, community: reportingLine, notifications: notifyOn.store.errorNotifications)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "notify-me-button-\(mode)"
             )
             render(BrandPreview(), dark: dark, to: output, name: "brand-\(mode)")
             render(MenuBarPreview(dark: dark), dark: dark, to: output, name: "menubar-items-\(mode)")
@@ -227,7 +262,10 @@ final class PreviewRenderTests: XCTestCase {
         let updates: AppUpdates
     }
 
-    private func makeFixture(work: URL, sharing: SharingChoice, records: [TurnMetric], monitoring: Bool = true, live: Bool = true) async throws -> Fixture {
+    private func makeFixture(
+        work: URL, sharing: SharingChoice, records: [TurnMetric], monitoring: Bool = true, live: Bool = true,
+        notifier: MockErrorNotifier = MockErrorNotifier()
+    ) async throws -> Fixture {
         let root = work.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let codex = root.appendingPathComponent("codex", isDirectory: true)
         let claude = root.appendingPathComponent("claude", isDirectory: true)
@@ -261,6 +299,7 @@ final class PreviewRenderTests: XCTestCase {
             kimiCodeFolder: grok.deletingLastPathComponent().appendingPathComponent("kimi-code", isDirectory: true),
             kimiDesktopFolder: grok.deletingLastPathComponent().appendingPathComponent("kimi-desktop", isDirectory: true),
             sharingPreferences: preferences,
+            errorNotifier: notifier,
             defaults: defaults,
             initialRecords: records
         )

@@ -2,6 +2,7 @@ use crate::{
     badge,
     board::Board,
     flyout,
+    notifier::{Delivery, Notifier},
     schedule::{self, PollSignal, Woken},
     watcher::{WatchTarget, Watchers},
     Shared,
@@ -17,10 +18,11 @@ use std::{
 };
 use tauri::Manager;
 use tokrate_core::{
-    signed_request, tray_reading, AntigravityMonitor, AutoSelector, History, LiveResponses,
-    LocalProviderErrors, ModelKey, OpenCodeMonitor, ProviderBadge, ProviderErrorGroup,
-    ResponseMetric, SelectionMode, SharingQueue, SourceChange, SourceCheckpoints, SourceMonitor,
-    TrayReadingKind, TurnMetric, UploadBatch, APP_VERSION,
+    relevant_error_alerts, signed_request, tray_reading, AntigravityMonitor, AutoSelector,
+    ErrorNotificationPlanner, History, LiveResponses, LocalProviderErrors, ModelKey,
+    OpenCodeMonitor, ProviderBadge, ProviderErrorGroup, RelevantErrorAlert, ResponseMetric,
+    SelectionMode, SharingQueue, SourceChange, SourceCheckpoints, SourceMonitor, TrayReadingKind,
+    TurnMetric, UploadBatch, APP_VERSION,
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
@@ -87,6 +89,10 @@ pub struct Settings {
     pub selection: String,
     pub show_provider_badge: bool,
     pub show_tool_chip: bool,
+    /// Post an operating-system notification when contributors report provider errors on a model
+    /// the user uses (contract "Error notifications (0.1.24)"). Needs sharing: the alerts come from
+    /// the community board.
+    pub error_notifications: bool,
     pub days: u8,
     pub root: String,
     pub claude_root: String,
@@ -130,6 +136,7 @@ impl Default for Settings {
             selection: "auto".into(),
             show_provider_badge: true,
             show_tool_chip: true,
+            error_notifications: false,
             days: 1,
             root: codex_home.join("sessions").to_string_lossy().into(),
             claude_root: claude_home.join("projects").to_string_lossy().into(),
@@ -159,6 +166,7 @@ pub struct SettingsPatch {
     pub selection: Option<String>,
     pub show_provider_badge: Option<bool>,
     pub show_tool_chip: Option<bool>,
+    pub error_notifications: Option<bool>,
     pub days: Option<u8>,
 }
 /// Detected state of one coding-tool log folder, for the Sources settings and first-run welcome.
@@ -183,6 +191,9 @@ pub struct Snapshot {
     /// The provider-side failures of the last 24 hours, most recent first. Local only, never
     /// persisted; it carries no error text.
     provider_errors: Vec<ProviderErrorGroup>,
+    /// The community's provider error alerts that concern the user, most relevant first (empty
+    /// while sharing is off): the one selection behind the dashboard line and the notifications.
+    relevant_error_alerts: Vec<RelevantErrorAlert>,
     status: String,
     monitor_status: String,
     pending: usize,
@@ -210,6 +221,10 @@ pub struct Runtime {
     active: Option<ModelKey>,
     /// Memory only: fed by every request outcome whether or not sharing is on.
     provider_errors: LocalProviderErrors,
+    /// Memory only: which community error alerts have been notified.
+    error_planner: ErrorNotificationPlanner,
+    /// Posts the operating-system notifications; none until the host sets one.
+    notifier: Option<Arc<dyn Notifier>>,
     monitor: SourceMonitor,
     dir: PathBuf,
     status: String,
@@ -325,6 +340,8 @@ impl Runtime {
             selector: AutoSelector::new(),
             active: None,
             provider_errors: LocalProviderErrors::new(),
+            error_planner: ErrorNotificationPlanner::new(),
+            notifier: None,
             dir,
             status: status.into(),
             monitor_status: "Starting monitoring…".into(),
@@ -399,6 +416,8 @@ impl Runtime {
     }
     pub fn snapshot(&self, since: Option<u64>) -> Snapshot {
         let changed = since != Some(self.revision);
+        let now = Utc::now();
+        let provider_errors = self.provider_errors.summary(now);
         Snapshot {
             settings: self.settings.clone(),
             consent_prompt_required: self.consent_prompt_required,
@@ -409,7 +428,8 @@ impl Runtime {
             },
             live: self.live.responses(),
             active: self.active.clone(),
-            provider_errors: self.provider_errors.summary(Utc::now()),
+            relevant_error_alerts: self.relevant_error_alerts(&provider_errors, now),
+            provider_errors,
             status: self.status.clone(),
             monitor_status: self.monitor_status.clone(),
             pending: self.queue.len(),
@@ -463,6 +483,51 @@ impl Runtime {
     }
     pub fn signal(&self) -> Arc<PollSignal> {
         self.signal.clone()
+    }
+    pub fn set_notifier(&mut self, notifier: Arc<dyn Notifier>) {
+        self.notifier = Some(notifier);
+    }
+    /// The community alerts that concern the user, as the dashboard and the notifications use
+    /// them. Empty without a board (sharing off, or no board fetched yet).
+    fn relevant_error_alerts(
+        &self,
+        failures: &[ProviderErrorGroup],
+        now: DateTime<Utc>,
+    ) -> Vec<RelevantErrorAlert> {
+        self.board.as_ref().map_or_else(Vec::new, |board| {
+            relevant_error_alerts(&board.error_alerts(), self.history.records(), failures, now)
+        })
+    }
+    /// Notifications need the setting and sharing, because the alerts come from the board.
+    fn error_notifications_active(&self) -> bool {
+        self.settings.error_notifications && self.settings.sharing_authorized()
+    }
+    /// Takes in the board of a fetch (`None`: it failed) and returns the notifications it causes
+    /// for the caller to post. A failed fetch teaches the planner nothing.
+    fn accept_board(&mut self, board: Option<Board>, now: DateTime<Utc>) -> Option<Delivery> {
+        self.board = board;
+        if self.board.is_none() || !self.error_notifications_active() {
+            return None;
+        }
+        let relevant = self.relevant_error_alerts(&self.provider_errors.summary(now), now);
+        let notifications = self.error_planner.plan(&relevant, now);
+        let notifier = self.notifier.clone()?;
+        (!notifications.is_empty()).then(|| Delivery::new(notifier, notifications))
+    }
+    /// Forgets the board, and with it what the notifications learned from it: sharing stopped.
+    fn drop_board(&mut self) {
+        self.board = None;
+        self.error_planner.reset();
+    }
+    /// The setting changed: the alerts already on the board count as notified (the planner takes
+    /// the first board it sees as its baseline), or, with the setting off, everything is
+    /// forgotten.
+    fn restart_error_notifications(&mut self, now: DateTime<Utc>) {
+        self.error_planner.reset();
+        if self.error_notifications_active() && self.board.is_some() {
+            let relevant = self.relevant_error_alerts(&self.provider_errors.summary(now), now);
+            let _baseline = self.error_planner.plan(&relevant, now);
+        }
     }
     fn save_settings(&self, settings: &Settings) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(settings).map_err(|_| "Settings invalid")?;
@@ -519,6 +584,9 @@ impl Runtime {
         if let Some(v) = p.show_tool_chip {
             next.show_tool_chip = v
         }
+        if let Some(v) = p.error_notifications {
+            next.error_notifications = v
+        }
         if let Some(v) = p.days {
             if ![1, 7].contains(&v) {
                 return Err("Unsupported range".into());
@@ -529,7 +597,11 @@ impl Runtime {
         self.settings_unsaved = saved.is_err();
         // A failed save leaves the other changes unapplied; sharing stays off if it was turned off.
         saved?;
+        let notifications_changed = next.error_notifications != self.settings.error_notifications;
         self.settings = next;
+        if notifications_changed {
+            self.restart_error_notifications(Utc::now());
+        }
         // The tray, the monitoring state or the selection may have changed.
         self.signal.request();
         Ok(())
@@ -599,7 +671,7 @@ impl Runtime {
             task.abort();
         }
         self.queue.disable();
-        self.board = None;
+        self.drop_board();
         self.sharing_active = false;
         self.status = "Local only".into();
     }
@@ -656,7 +728,7 @@ impl Runtime {
             Some(426) => {
                 self.queue.disable();
                 self.sharing_active = false;
-                self.board = None;
+                self.drop_board();
                 self.status = "Update Tokrate before sharing again. Open Application updates and check for a newer version.".into();
                 return false;
             }
@@ -1206,7 +1278,7 @@ pub fn restart_sharing(app: &tauri::AppHandle) {
         task.abort();
     }
     s.queue.disable();
-    s.board = None;
+    s.drop_board();
     s.sharing_active = false;
     let Some(generation) = authorized_effect(s.settings.sharing_authorized(), || s.generation)
     else {
@@ -1307,15 +1379,20 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
                 return;
             };
             let board = board_request.await;
-            {
+            let delivery = {
                 let mut s = shared.lock().unwrap();
                 if !s.valid(generation) {
                     return;
                 }
-                s.board = board.ok();
+                let delivery = s.accept_board(board.ok(), Utc::now());
                 if s.board.is_none() {
                     s.status = "Community unavailable. Local monitoring continues.".into()
                 }
+                delivery
+            };
+            // Outside the lock: a notification service may take a moment.
+            if let Some(delivery) = delivery {
+                delivery.post();
             }
             last_board = Some(Utc::now());
         }
@@ -3504,6 +3581,287 @@ mod tests {
         assert!(runtime.queue.is_empty());
         assert!(batch(&mut runtime).is_empty());
         assert!(runtime.status.starts_with("Update Tokrate"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// Records what would have been posted to the operating system.
+    #[derive(Default)]
+    struct Posted(Mutex<Vec<tokrate_core::ErrorNotification>>);
+    impl Notifier for Posted {
+        fn post(&self, notification: &tokrate_core::ErrorNotification) {
+            self.0.lock().unwrap().push(notification.clone());
+        }
+    }
+    impl Posted {
+        fn titles(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|n| n.title.clone())
+                .collect()
+        }
+    }
+    /// A board with one alert per `(model, contributors)`, last failure three minutes before `now`.
+    fn board_with_alerts(alerts: &[(&str, u64)], now: DateTime<Utc>) -> Option<Board> {
+        let at = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+        let alerts: Vec<serde_json::Value> = alerts
+            .iter()
+            .map(|(model, contributors)| {
+                serde_json::json!({
+                    "model": model, "provider": "anthropic", "clients": ["claude-code"],
+                    "failingContributors": contributors, "overloaded": 4, "serverError": 0,
+                    "firstFailureAt": at(40), "lastFailureAt": at(3)
+                })
+            })
+            .collect();
+        let board =
+            serde_json::json!({"schemaVersion": 1, "cohorts": [], "errors": {"alerts": alerts}});
+        Board::parse(board.to_string().as_bytes())
+    }
+    /// A sharing runtime with a mock notifier, the notification setting on and a turn of
+    /// `claude-opus-5-5` in its history; the empty board it has counts as the baseline.
+    fn notifying_runtime(dir: &PathBuf, now: DateTime<Utc>) -> (Runtime, std::sync::Arc<Posted>) {
+        let (mut runtime, _stopped) = sharing_runtime(dir);
+        let posted = std::sync::Arc::new(Posted::default());
+        runtime.set_notifier(posted.clone());
+        runtime
+            .history
+            .merge(&[turn("used", "claude-code", "claude-opus-5-5", now)], now);
+        let patch =
+            serde_json::from_value(serde_json::json!({"errorNotifications": true})).unwrap();
+        runtime.update(patch).unwrap();
+        (runtime, posted)
+    }
+    fn deliver(runtime: &mut Runtime, board: Option<Board>, now: DateTime<Utc>) {
+        if let Some(delivery) = runtime.accept_board(board, now) {
+            delivery.post();
+        }
+    }
+    #[test]
+    fn error_notifications_are_off_by_default_load_from_old_files_and_are_saved() {
+        assert!(!Settings::default().error_notifications);
+        let dir = temporary();
+        let mut settings = saved_settings(false, None);
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("errorNotifications");
+        write_settings(&dir, settings);
+        let mut runtime = Runtime::load(dir.clone()).unwrap();
+        assert!(!runtime.settings.error_notifications);
+        let patch =
+            serde_json::from_value(serde_json::json!({"errorNotifications": true})).unwrap();
+        runtime.update(patch).unwrap();
+        assert!(runtime.settings.error_notifications);
+        assert_eq!(
+            serde_json::to_value(runtime.snapshot(None)).unwrap()["settings"]["errorNotifications"],
+            true
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["errorNotifications"], true);
+        assert!(
+            Runtime::load(dir.clone())
+                .unwrap()
+                .settings
+                .error_notifications
+        );
+        let patch =
+            serde_json::from_value(serde_json::json!({"errorNotifications": false})).unwrap();
+        runtime.update(patch).unwrap();
+        assert!(
+            !Runtime::load(dir.clone())
+                .unwrap()
+                .settings
+                .error_notifications
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_new_alert_posts_one_notification_and_the_end_of_its_episode_one_more() {
+        let now = Utc::now();
+        let dir = temporary();
+        let (mut runtime, posted) = notifying_runtime(&dir, now);
+        let minutes = |m: i64| now + chrono::Duration::minutes(m);
+        deliver(
+            &mut runtime,
+            board_with_alerts(&[("claude-opus-5-5", 4)], minutes(1)),
+            minutes(1),
+        );
+        assert_eq!(posted.titles(), ["Provider errors on claude-opus-5-5"]);
+        assert_eq!(
+            posted.0.lock().unwrap()[0].body,
+            "4 Tokrate contributors reported 4 overloaded / at capacity in the last hour."
+        );
+        // The same alert on the next boards posts nothing.
+        deliver(
+            &mut runtime,
+            board_with_alerts(&[("claude-opus-5-5", 4)], minutes(2)),
+            minutes(2),
+        );
+        assert_eq!(posted.titles().len(), 1);
+        // An alert about a model the user does not use never notifies.
+        deliver(
+            &mut runtime,
+            board_with_alerts(&[("claude-opus-5-5", 4), ("unused-model", 4)], minutes(3)),
+            minutes(3),
+        );
+        assert_eq!(posted.titles().len(), 1);
+        // 30 minutes without the alert end the episode.
+        deliver(&mut runtime, board_with_alerts(&[], minutes(5)), minutes(5));
+        deliver(
+            &mut runtime,
+            board_with_alerts(&[], minutes(34)),
+            minutes(34),
+        );
+        assert_eq!(posted.titles().len(), 1);
+        deliver(
+            &mut runtime,
+            board_with_alerts(&[], minutes(35)),
+            minutes(35),
+        );
+        assert_eq!(
+            posted.titles(),
+            [
+                "Provider errors on claude-opus-5-5",
+                "claude-opus-5-5 looks healthy again"
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn an_alert_after_a_failure_of_the_users_own_says_it_is_not_just_them() {
+        let now = Utc::now();
+        let dir = temporary();
+        let (mut runtime, posted) = notifying_runtime(&dir, now);
+        runtime.provider_errors.ingest(
+            &[tokrate_core::RequestOutcome::new(
+                "own".into(),
+                now - chrono::Duration::minutes(5),
+                "claude-code",
+                None,
+                "claude-transcript-v4",
+                Some("claude-opus-5-5"),
+                Some("anthropic"),
+                tokrate_core::RequestOutcomeKind::Overloaded,
+            )
+            .unwrap()],
+            now,
+        );
+        deliver(
+            &mut runtime,
+            board_with_alerts(&[("claude-opus-5-5", 3)], now),
+            now,
+        );
+        assert_eq!(
+            posted.0.lock().unwrap()[0].body,
+            "It’s not just you: 2 other contributors hit provider errors on this model in the last hour."
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn nothing_is_posted_with_the_setting_off_sharing_off_or_a_failed_fetch() {
+        let now = Utc::now();
+        let alerts = [("claude-opus-5-5", 4)];
+        // Setting off.
+        let dir = temporary();
+        let (mut runtime, posted) = notifying_runtime(&dir, now);
+        let patch =
+            serde_json::from_value(serde_json::json!({"errorNotifications": false})).unwrap();
+        runtime.update(patch).unwrap();
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert!(posted.titles().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+        // Sharing off: no board is kept and nothing is planned, even with the setting on.
+        let dir = temporary();
+        let (mut runtime, posted) = notifying_runtime(&dir, now);
+        runtime.withdraw_sharing(SharingConsentAction::Withdrawn);
+        assert!(runtime.settings.error_notifications);
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert!(posted.titles().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+        // A failed fetch posts nothing and teaches the planner nothing: the alert that was there
+        // before it is not announced when the board comes back.
+        let dir = temporary();
+        let (mut runtime, posted) = notifying_runtime(&dir, now);
+        deliver(&mut runtime, None, now);
+        assert!(runtime.board.is_none());
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert_eq!(posted.titles().len(), 1);
+        deliver(&mut runtime, None, now);
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert_eq!(posted.titles().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn alerts_present_when_the_setting_turns_on_or_sharing_starts_are_not_announced() {
+        let now = Utc::now();
+        let alerts = [("claude-opus-5-5", 4)];
+        // The setting is turned on while the board already shows the alert.
+        let dir = temporary();
+        let (mut runtime, _stopped) = sharing_runtime(&dir);
+        let posted = std::sync::Arc::new(Posted::default());
+        runtime.set_notifier(posted.clone());
+        runtime
+            .history
+            .merge(&[turn("used", "claude-code", "claude-opus-5-5", now)], now);
+        runtime.board = board_with_alerts(&alerts, now);
+        let patch =
+            serde_json::from_value(serde_json::json!({"errorNotifications": true})).unwrap();
+        runtime.update(patch).unwrap();
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert!(posted.titles().is_empty());
+        // Turning the setting off and on again takes the alerts then present as the baseline.
+        let off = serde_json::from_value(serde_json::json!({"errorNotifications": false})).unwrap();
+        runtime.update(off).unwrap();
+        let on = serde_json::from_value(serde_json::json!({"errorNotifications": true})).unwrap();
+        runtime.update(on).unwrap();
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert!(posted.titles().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_first_board_after_sharing_restarts_is_the_baseline() {
+        let now = Utc::now();
+        let alerts = [("claude-opus-5-5", 4)];
+        let dir = temporary();
+        let (mut runtime, posted) = notifying_runtime(&dir, now);
+        deliver(&mut runtime, board_with_alerts(&[], now), now);
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert_eq!(posted.titles().len(), 1);
+        // Sharing stops and starts again (accepting the notice authorizes it, a new task follows).
+        runtime.stop_sharing();
+        runtime
+            .record_sharing_consent(true, SHARING_NOTICE_VERSION)
+            .unwrap();
+        deliver(&mut runtime, board_with_alerts(&alerts, now), now);
+        assert_eq!(
+            posted.titles().len(),
+            1,
+            "the board after restart is a baseline"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_snapshot_lists_the_alerts_that_concern_the_user_while_sharing() {
+        let now = Utc::now();
+        let dir = temporary();
+        let (mut runtime, _posted) = notifying_runtime(&dir, now);
+        runtime.board = board_with_alerts(&[("unused-model", 5), ("claude-opus-5-5", 4)], now);
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        let relevant = snapshot["relevantErrorAlerts"].as_array().unwrap();
+        assert_eq!(relevant.len(), 1);
+        assert_eq!(relevant[0]["model"], "claude-opus-5-5");
+        assert_eq!(relevant[0]["failingContributors"], 4);
+        assert_eq!(relevant[0]["others"], 3);
+        assert_eq!(relevant[0]["notJustYou"], false);
+        // The board is gone with sharing, and the list with it.
+        runtime.stop_sharing();
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        assert!(snapshot["relevantErrorAlerts"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

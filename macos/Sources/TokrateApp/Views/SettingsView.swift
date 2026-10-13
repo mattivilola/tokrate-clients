@@ -135,6 +135,40 @@ struct SettingsSharingPage: View {
                 framed: true,
                 checkForUpdates: { updates.checkForUpdates() }
             )
+            ErrorNotificationsSettingsGroup(
+                notifications: store.errorNotifications, isSharingOn: store.sharingPreferences.isSharingRequested
+            )
+        }
+    }
+}
+
+/// The opt-in for operating-system notifications about community error alerts (contract "Error
+/// notifications (0.1.24)"), next to the sharing settings it depends on.
+struct ErrorNotificationsSettingsGroup: View {
+    let notifications: ErrorNotificationPreferences
+    let isSharingOn: Bool
+
+    var body: some View {
+        SettingsGroup(
+            title: "Notifications",
+            footer: isSharingOn
+                ? "One notification when contributors start reporting provider errors on a model you use, and one when they stop. At most three an hour. Alerts already showing when you turn this on don't notify."
+                : "Turn on sharing to get these notifications. The alerts come from the community board, which Tokrate only reads while sharing is on."
+        ) {
+            Toggle("Notify me when contributors report provider errors on models I use", isOn: Binding(
+                get: { notifications.isEnabled },
+                set: { enabled in Task { await notifications.setEnabled(enabled) } }
+            ))
+            .toggleStyle(.switch)
+            .disabled(!isSharingOn || notifications.isRequesting)
+            if notifications.isPermissionDenied && !notifications.isEnabled {
+                NotificationsDeniedNote(prominentButton: true)
+            }
+        }
+        .task { await notifications.refreshPermission() }
+        // Back from System Settings, where the user may have allowed notifications.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await notifications.refreshPermission() }
         }
     }
 }

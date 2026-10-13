@@ -10,6 +10,7 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
     showSpeed: true,
     showProviderBadge: true,
     showToolChip: true,
+    errorNotifications: false,
     selection: "auto",
     days: 1,
     root: "",
@@ -265,23 +266,23 @@ describe("AppStore", () => {
       firstFailureAt: new Date().toISOString(),
       lastFailureAt: new Date().toISOString(),
     });
-    const settings = { ...snapshot().settings, sharing: true };
-    const record = {
-      id: "r1",
-      completedAt: new Date().toISOString(),
+    const relevant = {
       model: "m-a",
-      outputTokens: 1,
-      durationSeconds: 1,
-      codexTTFTSeconds: null,
-      turnThroughputTPS: 1,
+      failingContributors: 3,
+      overloaded: 2,
+      serverError: 0,
+      lastFailureAt: new Date().toISOString(),
+      notJustYou: false,
+      others: 2,
     };
+    const settings = { ...snapshot().settings, sharing: true };
     let revision = 1;
-    const set = (over: Partial<Snapshot>) => (current = snapshot({ settings, records: [record], revision: ++revision, ...over }));
-    set({ board: { cohorts: [], errors: { alerts: [alertFor("m-a")] } } });
+    const set = (over: Partial<Snapshot>) => (current = snapshot({ settings, revision: ++revision, ...over }));
+    set({ board: { cohorts: [], errors: { alerts: [alertFor("m-a")] } }, relevantErrorAlerts: [relevant] });
     const store = new AppStore(bridge());
     await store.refresh();
     expect(store.getState().errorRecovery).toEqual({ shown: ["m-a"], cleared: [] });
-    set({ board: { cohorts: [] } });
+    set({ board: { cohorts: [] }, relevantErrorAlerts: [] });
     await store.refresh();
     const { cleared } = store.getState().errorRecovery;
     expect(cleared.map((entry) => entry.model)).toEqual(["m-a"]);
