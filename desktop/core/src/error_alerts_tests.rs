@@ -16,6 +16,7 @@ fn alert(model: &str, contributors: u64) -> CommunityErrorAlert {
         failing_contributors: contributors,
         overloaded: 4,
         server_error: 1,
+        throttled: 0,
         last_failure_at: now() - Duration::minutes(3),
     }
 }
@@ -45,6 +46,7 @@ fn failure(model: &str, age: Duration) -> ProviderErrorGroup {
         kind: ProviderErrorKind::Overloaded,
         count: 1,
         latest_at: now() - age,
+        plan_used_percent: None,
     }
 }
 
@@ -178,6 +180,34 @@ fn a_future_failure_or_turn_counts_as_recent() {
 }
 
 #[test]
+fn a_throttle_only_alert_is_selected_like_any_other_and_keeps_its_count() {
+    let mut throttle_only = alert("m", 3);
+    throttle_only.overloaded = 0;
+    throttle_only.server_error = 0;
+    throttle_only.throttled = 6;
+    let history = [turn(Some("m"), Duration::hours(1))];
+    let selected = relevant_error_alerts(&[throttle_only.clone()], &history, &[], now());
+    assert_eq!(models(&selected), ["m"]);
+    assert_eq!(
+        (
+            selected[0].overloaded,
+            selected[0].server_error,
+            selected[0].throttled
+        ),
+        (0, 0, 6)
+    );
+    // The user's own throttle on that model in the last hour makes it "not just you" as well.
+    let own = [ProviderErrorGroup {
+        kind: ProviderErrorKind::Throttled,
+        plan_used_percent: Some(40),
+        ..failure("m", Duration::minutes(10))
+    }];
+    let selected = relevant_error_alerts(&[throttle_only], &[], &own, now());
+    assert!(selected[0].not_just_you);
+    assert_eq!(selected[0].others, 2);
+}
+
+#[test]
 fn the_selection_serializes_for_the_webview() {
     let alerts = [alert("m", 3)];
     let history = [turn(Some("m"), Duration::hours(1))];
@@ -189,6 +219,7 @@ fn the_selection_serializes_for_the_webview() {
             "failingContributors": 3,
             "overloaded": 4,
             "serverError": 1,
+            "throttled": 0,
             "lastFailureAt": "2026-10-13T11:57:00Z",
             "notJustYou": false,
             "others": 2

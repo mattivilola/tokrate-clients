@@ -56,6 +56,15 @@ public struct CodexEventParser: Sendable {
     /// Whether this rollout records why a turn failed (`cli_version` 0.145.0 or later): without that,
     /// its successes would be counted against failures nobody can see.
     private var recordsFailureCauses = false
+    /// The plan usage of the latest `token_count` event that reported one, for telling a provider
+    /// throttle from the user's own limit (contract "Provider throttling (0.1.24)"). In memory only.
+    private var planUsage: PlanUsageSnapshot?
+
+    /// When the plan usage was last reported and the highest used percentage of the windows it listed.
+    private struct PlanUsageSnapshot {
+        let reportedAt: Date
+        let highestUsedPercent: Double
+    }
 
     /// An agent session that is not delegated work has nothing to read at all.
     var isSkippedSession: Bool { isAgentSession && delegatedRootKey == nil }
@@ -84,6 +93,7 @@ public struct CodexEventParser: Sendable {
         completedResponses.removeAll(keepingCapacity: true)
         requestOutcomes.removeAll(keepingCapacity: true)
         recordsFailureCauses = false
+        planUsage = nil
     }
 
     /// Qualifying responses completed since the last call.
@@ -167,6 +177,11 @@ public struct CodexEventParser: Sendable {
                 state.cachedInputTokens = nonnegativeInteger(usage["cached_input_tokens"])
             }
             turns[turnID] = state
+            return nil
+        }
+
+        if eventType == "event_msg", payload["type"] as? String == "token_count" {
+            recordPlanUsage(payload["rate_limits"], at: parseDate(event["timestamp"]))
             return nil
         }
 
@@ -368,13 +383,69 @@ public struct CodexEventParser: Sendable {
     /// A turn that ended with a terminal provider-side error is one failed request. Only the error's
     /// enum (and the status of the variants that carry one) is read, never its message.
     private mutating func recordTurnFailure(_ payload: [String: Any], turnID: String, state: TurnState, at completedAt: Date?) {
-        guard let completedAt, let model = outcomeModel(of: state), let error = payload["error"] as? [String: Any],
-              let kind = Self.failureKind(error["codex_error_info"]) else { return }
+        guard let completedAt, let model = outcomeModel(of: state), let error = payload["error"] as? [String: Any] else { return }
+        let info = error["codex_error_info"]
+        var kind = Self.failureKind(info)
+        var planUsagePercent: Int?
+        if kind == nil, Self.isThrottleSignal(info), let usage = planUsage,
+           completedAt.timeIntervalSince(usage.reportedAt) <= Self.maximumPlanUsageAge,
+           usage.highestUsedPercent < Self.throttleQuotaCeiling {
+            kind = .throttled
+            planUsagePercent = Int(usage.highestUsedPercent.rounded(.down))
+        }
+        guard let kind else { return }
         append(RequestOutcome(
             dedupeKey: RequestOutcome.key(TurnMetric.codexClient, sessionIdentity ?? sourceIdentity, turnID, "failure"),
             occurredAt: completedAt, client: TurnMetric.codexClient, clientVersion: clientVersion,
-            parserVersion: TurnMetric.codexParserVersion, model: model, provider: provider, kind: kind
+            parserVersion: TurnMetric.codexParserVersion, model: model, provider: provider, kind: kind,
+            planUsagePercent: planUsagePercent
         ))
+    }
+
+    /// A plan usage snapshot older than this (relative to the failure) says nothing about the failure.
+    private static let maximumPlanUsageAge: TimeInterval = 3_600
+    /// A throttle counts only while every reported window is below this used percentage; at or above it
+    /// the plan is (nearly) exhausted and the rejection is the user's own limit.
+    private static let throttleQuotaCeiling = 95.0
+
+    /// Remembers the `rate_limits` of a `token_count` event: the highest `used_percent` over the windows
+    /// it reports (`primary`, and `secondary` when present). An event whose `rate_limits` is null, absent
+    /// or lists no window leaves the previous snapshot in place; one that lists a window whose
+    /// `used_percent` cannot be read voids it, because the plan usage is then unknown until a readable
+    /// snapshot arrives.
+    private mutating func recordPlanUsage(_ rateLimits: Any?, at date: Date?) {
+        guard let limits = rateLimits as? [String: Any] else { return }
+        var percentages: [Double] = []
+        var isReadable = true
+        for name in ["primary", "secondary"] {
+            guard let window = limits[name], !(window is NSNull) else { continue }
+            if let used = (window as? [String: Any])?["used_percent"] as? NSNumber,
+               CFGetTypeID(used) != CFBooleanGetTypeID(), used.doubleValue.isFinite, used.doubleValue >= 0 {
+                percentages.append(used.doubleValue)
+            } else {
+                isReadable = false
+            }
+        }
+        guard isReadable else {
+            planUsage = nil
+            return
+        }
+        guard let date, let highest = percentages.max() else { return }
+        planUsage = PlanUsageSnapshot(reportedAt: date, highestUsedPercent: highest)
+    }
+
+    /// Whether a `codex_error_info` is the provider rejecting requests as too many (HTTP 429 after
+    /// Codex's own retries, or an explicit `rate_limit_exceeded`). Whether it was the provider's doing or
+    /// the user's plan is decided by the plan usage. `usage_limit_exceeded` is never one.
+    static func isThrottleSignal(_ info: Any?) -> Bool {
+        if let name = info as? String { return name == "rate_limit_exceeded" }
+        guard let variants = info as? [String: Any] else { return false }
+        // Like other variants that may carry fields, `rate_limit_exceeded` can also be a single-key object.
+        if variants["rate_limit_exceeded"] != nil { return true }
+        guard let fields = variants["response_too_many_failed_attempts"] as? [String: Any],
+              let status = fields["http_status_code"] as? NSNumber, CFGetTypeID(status) != CFBooleanGetTypeID()
+        else { return false }
+        return status.intValue == 429 && status.doubleValue == Double(status.intValue)
     }
 
     private mutating func append(_ outcome: RequestOutcome?) {
@@ -384,7 +455,8 @@ public struct CodexEventParser: Sendable {
     private static let statusVariants = ["response_too_many_failed_attempts", "http_connection_failed", "response_stream_connection_failed"]
 
     /// The provider-side class of a `codex_error_info` value (contract "Per-tool mapping"); nil for every
-    /// other error, including a connection failure that carries no status and every 429.
+    /// other error, including a connection failure that carries no status and every 429 (a throttle is
+    /// decided with the plan usage: see `isThrottleSignal`).
     static func failureKind(_ info: Any?) -> RequestOutcome.Kind? {
         if let name = info as? String {
             return switch name {

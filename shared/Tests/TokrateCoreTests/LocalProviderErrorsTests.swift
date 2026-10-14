@@ -8,13 +8,13 @@ final class LocalProviderErrorsTests: XCTestCase {
 
     private func outcome(
         _ key: String, client: String = "claude-code", model: String = "claude-opus-5-5",
-        kind: RequestOutcome.Kind = .overloaded, ago: TimeInterval = 60
+        kind: RequestOutcome.Kind = .overloaded, ago: TimeInterval = 60, percent: Int? = nil
     ) -> RequestOutcome {
         let parsers = ["claude-code": "claude-transcript-v4", "codex": "codex-rollout-v2", "opencode": "opencode-db-v1", "kimi-code": "kimi-wire-v1"]
         let providers = ["claude-code": "anthropic", "codex": "openai", "opencode": "anthropic", "kimi-code": "moonshot"]
         return RequestOutcome(
             dedupeKey: key, occurredAt: now.addingTimeInterval(-ago), client: client, clientVersion: "1.0.0",
-            parserVersion: parsers[client]!, model: model, provider: providers[client]!, kind: kind
+            parserVersion: parsers[client]!, model: model, provider: providers[client]!, kind: kind, planUsagePercent: percent
         )!
     }
 
@@ -44,6 +44,51 @@ final class LocalProviderErrorsTests: XCTestCase {
         XCTAssertEqual(line(errors), "claude-opus-5-5 returned 1 server error in the last 24 hours, most recently REL(60). That’s a failure at the provider, not your connection.")
         errors.add([outcome("b", kind: .serverError, ago: 30)], now: now)
         XCTAssertEqual(line(errors), "claude-opus-5-5 returned 2 server errors in the last 24 hours, most recently REL(30). That’s a failure at the provider, not your connection.")
+    }
+
+    func testThrottledTemplateWithAndWithoutThePlanPercentage() {
+        var errors = LocalProviderErrors()
+        errors.add([outcome("a", client: "codex", model: "gpt-5.5", kind: .throttled, percent: 41)], now: now)
+        XCTAssertEqual(line(errors), "You were rate limited 1 time on gpt-5.5 in the last 24 hours while your plan still had quota left (41% used). That’s the provider throttling, not your plan limit.")
+        var plain = LocalProviderErrors()
+        plain.add([outcome("a", model: "m1", kind: .throttled)], now: now)
+        XCTAssertEqual(line(plain), "You were rate limited 1 time on m1 in the last 24 hours while your plan still had quota left. That’s the provider throttling, not your plan limit.")
+    }
+
+    func testThrottledPluralUsesThePercentageOfTheLatestFailure() {
+        var errors = LocalProviderErrors()
+        errors.add([
+            outcome("a", client: "codex", model: "gpt-5.5", kind: .throttled, ago: 300, percent: 12),
+            outcome("c", client: "codex", model: "gpt-5.5", kind: .throttled, ago: 30, percent: 58),
+            outcome("b", client: "codex", model: "gpt-5.5", kind: .throttled, ago: 120, percent: 33)
+        ], now: now)
+        XCTAssertEqual(line(errors), "You were rate limited 3 times on gpt-5.5 in the last 24 hours while your plan still had quota left (58% used). That’s the provider throttling, not your plan limit.")
+        // A later failure without a percentage replaces the figure rather than showing a stale one.
+        errors.add([outcome("d", client: "codex", model: "gpt-5.5", kind: .throttled, ago: 10)], now: now)
+        XCTAssertEqual(line(errors)?.contains("used)"), false)
+    }
+
+    func testThrottledGroupsOrderAndAppearInAlsoLikeOtherKinds() {
+        var errors = LocalProviderErrors()
+        errors.add([
+            outcome("a", model: "main", kind: .serverError, ago: 10),
+            outcome("b", model: "slow", kind: .throttled, ago: 100),
+            outcome("c", model: "slow", kind: .throttled, ago: 110),
+            outcome("d", model: "slow", kind: .overloaded, ago: 200)
+        ], now: now)
+        XCTAssertEqual(errors.groups(now: now).map(\.kind), [.serverError, .throttled, .overloaded])
+        XCTAssertEqual(line(errors)?.hasSuffix(" Also: slow (2), slow (1)"), true)
+        var onlyThrottled = LocalProviderErrors()
+        onlyThrottled.add([outcome("a", kind: .throttled, ago: 10), outcome("b", model: "other", ago: 50)], now: now)
+        XCTAssertEqual(line(onlyThrottled)?.hasPrefix("You were rate limited 1 time on claude-opus-5-5"), true)
+        XCTAssertEqual(line(onlyThrottled)?.hasSuffix(" Also: other (1)"), true)
+    }
+
+    func testAnOutcomeKeepsAPlanPercentageOnlyWhenThrottledAndInRange() {
+        XCTAssertEqual(outcome("a", kind: .throttled, percent: 94).planUsagePercent, 94)
+        XCTAssertNil(outcome("a", kind: .overloaded, percent: 50).planUsagePercent)
+        XCTAssertNil(outcome("a", kind: .throttled, percent: 101).planUsagePercent)
+        XCTAssertNil(outcome("a", kind: .throttled, percent: -1).planUsagePercent)
     }
 
     func testCodexServerErrorDoesNotUseTheCapacityWording() {

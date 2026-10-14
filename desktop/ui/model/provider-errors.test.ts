@@ -74,6 +74,45 @@ describe("providerErrorLine", () => {
     }
   });
 
+  it("words a throttle with the plan percentage when it is known", () => {
+    expect(
+      providerErrorLine(
+        [group({ client: "codex", kind: "throttled", count: 3, planUsedPercent: 42, agoMs: 10 * MIN })],
+        NOW,
+      ),
+    ).toBe(
+      "You were rate limited 3 times on claude-opus-5-5 in the last 24 hours while your plan still had quota left (42% used). That’s the provider throttling, not your plan limit.",
+    );
+    // 0% used is a known percentage.
+    expect(
+      providerErrorLine([group({ kind: "throttled", count: 1, planUsedPercent: 0 })], NOW),
+    ).toBe(
+      "You were rate limited 1 time on claude-opus-5-5 in the last 24 hours while your plan still had quota left (0% used). That’s the provider throttling, not your plan limit.",
+    );
+  });
+
+  it("words a throttle without the percentage when none is known", () => {
+    for (const client of ["claude-code", "codex"]) {
+      expect(providerErrorLine([group({ client, kind: "throttled", count: 2 })], NOW)).toBe(
+        "You were rate limited 2 times on claude-opus-5-5 in the last 24 hours while your plan still had quota left. That’s the provider throttling, not your plan limit.",
+      );
+    }
+  });
+
+  it("lets a throttle be an Also group and the main group when most recent", () => {
+    const line = providerErrorLine(
+      [group({ model: "a", agoMs: MIN }), group({ model: "b", kind: "throttled", count: 4, agoMs: 2 * MIN })],
+      NOW,
+    );
+    expect(line?.endsWith(" Also: b (4)")).toBe(true);
+    expect(
+      providerErrorLine(
+        [group({ model: "a", agoMs: 2 * MIN }), group({ model: "b", kind: "throttled", agoMs: MIN })],
+        NOW,
+      ),
+    ).toMatch(/^You were rate limited 2 times on b in the last 24 hours/);
+  });
+
   it("uses the singular for one failure", () => {
     expect(providerErrorLine([group({ client: "codex", count: 1 })], NOW)).toContain(
       "“model at capacity” 1 time on",
@@ -115,6 +154,7 @@ const alert = (over: Partial<RelevantErrorAlert> = {}): RelevantErrorAlert => ({
   failingContributors: 4,
   overloaded: 6,
   serverError: 0,
+  throttled: 0,
   lastFailureAt: new Date(NOW - 3 * MIN).toISOString(),
   notJustYou: false,
   others: 3,
@@ -153,6 +193,21 @@ describe("communityErrorLine reporting form", () => {
     );
     expect(line({ relevant: [alert({ overloaded: 1, serverError: 7 })] })).toContain(
       ": 1 overloaded / at capacity and 7 server errors from",
+    );
+  });
+
+  it("words throttled counts and joins three counts with commas and a final and", () => {
+    expect(line({ relevant: [alert({ overloaded: 0, throttled: 5, failingContributors: 3 })] })).toBe(
+      "Tokrate contributors are reporting provider errors on claude-opus-5-5: 5 throttled (not plan limits) from 3 contributors in the last hour, latest 3 min ago.",
+    );
+    expect(line({ relevant: [alert({ overloaded: 2, throttled: 5 })] })).toContain(
+      ": 2 overloaded / at capacity and 5 throttled (not plan limits) from 4 contributors",
+    );
+    expect(line({ relevant: [alert({ overloaded: 0, serverError: 1, throttled: 2 })] })).toContain(
+      ": 1 server error and 2 throttled (not plan limits) from",
+    );
+    expect(line({ relevant: [alert({ overloaded: 1, serverError: 2, throttled: 3 })] })).toContain(
+      ": 1 overloaded / at capacity, 2 server errors and 3 throttled (not plan limits) from 4 contributors",
     );
   });
 
@@ -281,6 +336,7 @@ describe("advanceRecovery", () => {
     failingContributors: 4,
     overloaded: 6,
     serverError: 0,
+    throttled: 0,
     firstFailureAt: new Date(NOW - 40 * MIN).toISOString(),
     lastFailureAt: new Date(NOW - 3 * MIN).toISOString(),
   });

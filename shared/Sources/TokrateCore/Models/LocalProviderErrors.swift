@@ -3,7 +3,7 @@ import Foundation
 /// The user's own provider-side failures of the last 24 hours (contract "Local provider errors (0.1.23)").
 ///
 /// It ingests the request outcomes the monitors produce, whether or not sharing is on, and keeps only
-/// the failures (`overloaded`, `serverError`) per (client, model, kind), so a "model at capacity" error
+/// the failures (`overloaded`, `serverError`, `throttled`) per (client, model, kind), so a "model at capacity" error
 /// can be recognised as the provider's and not the user's connection. Memory only: nothing here is
 /// persisted, exported or uploaded, and no error text exists to keep.
 public struct LocalProviderErrors {
@@ -26,6 +26,9 @@ public struct LocalProviderErrors {
         public let kind: RequestOutcome.Kind
         /// Failure times, oldest first; never empty.
         fileprivate(set) var failures: [Date]
+        /// The plan usage (percent, rounded down) recorded with the latest failure, for a `throttled`
+        /// group whose tool reports it. Memory only, for the line.
+        fileprivate(set) var latestPlanUsagePercent: Int?
 
         public var count: Int { failures.count }
         public var latest: Date { failures[failures.count - 1] }
@@ -56,6 +59,7 @@ public struct LocalProviderErrors {
             // Outcomes arrive nearly in order: insert after the last time that is not later.
             let index = group.failures.lastIndex { $0 <= time }.map { $0 + 1 } ?? 0
             group.failures.insert(time, at: index)
+            if index == group.failures.count - 1 { group.latestPlanUsagePercent = outcome.planUsagePercent }
             if group.failures.count > Self.maximumFailuresPerGroup { group.failures.removeFirst() }
             groups[key] = group
         }
@@ -96,6 +100,9 @@ public struct LocalProviderErrors {
         case .overloaded:
             let label = main.client == "codex" ? "model at capacity" : "overloaded"
             line = "You hit “\(label)” \(main.count) \(times) on \(main.model) in the last 24 hours, most recently \(recently). That’s the provider at capacity, not your connection."
+        case .throttled:
+            let usage = main.latestPlanUsagePercent.map { " (\($0)% used)" } ?? ""
+            line = "You were rate limited \(main.count) \(times) on \(main.model) in the last 24 hours while your plan still had quota left\(usage). That’s the provider throttling, not your plan limit."
         case .serverError, .succeeded: // a group only ever holds failures
             let errors = main.count == 1 ? "server error" : "server errors"
             line = "\(main.model) returned \(main.count) \(errors) in the last 24 hours, most recently \(recently). That’s a failure at the provider, not your connection."

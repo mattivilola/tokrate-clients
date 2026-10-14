@@ -15,6 +15,11 @@ const MAX_EMITTED_TURNS: usize = 8_192;
 const MAX_TURN_ID_BYTES: usize = 512;
 const MAX_SESSION_ID_BYTES: usize = 512;
 const MAX_PENDING_RESPONSES: usize = 1_024;
+/// A throttled failure needs a plan-usage snapshot at most this old (contract "Provider
+/// throttling (0.1.24)").
+const THROTTLE_SNAPSHOT_MAX_AGE_MINUTES: i64 = 60;
+/// ... showing every reported window below this percentage of the plan used.
+const THROTTLE_PLAN_USED_BELOW_PERCENT: f64 = 95.0;
 
 pub(crate) trait JsonlEventParser: Send {
     fn reset(&mut self, source_identity: String);
@@ -51,6 +56,14 @@ enum SessionKind {
     DelegatedChild,
     /// Any other agent session (for example guardian approval reviews): skipped entirely.
     Excluded,
+}
+
+/// The plan usage a `token_count` event reported: when, and the highest `used_percent` of its
+/// windows. Held in memory only, never stored, uploaded or exported.
+#[derive(Clone, Copy, Debug)]
+struct RateLimitSnapshot {
+    at: DateTime<Utc>,
+    highest_used_percent: f64,
 }
 
 #[derive(Default)]
@@ -109,6 +122,9 @@ pub(crate) struct CodexEventParser {
     response_start: Option<DateTime<Utc>>,
     responses: Vec<ResponseMetric>,
     outcomes: Vec<RequestOutcome>,
+    /// The latest plan-usage snapshot of this rollout, or `None` when it has none (or its last one
+    /// could not be read completely).
+    rate_limits: Option<RateLimitSnapshot>,
 }
 
 impl CodexEventParser {
@@ -131,6 +147,7 @@ impl CodexEventParser {
             response_start: None,
             responses: Vec::new(),
             outcomes: Vec::new(),
+            rate_limits: None,
         }
     }
 
@@ -217,6 +234,10 @@ impl CodexEventParser {
             return None;
         }
         let subtype = payload.get("type")?.as_str()?;
+        if subtype == "token_count" {
+            self.observe_rate_limits(payload, parse_date(event.get("timestamp")));
+            return None;
+        }
         if !matches!(subtype, "task_started" | "task_complete" | "turn_aborted") {
             return None;
         }
@@ -553,6 +574,7 @@ impl CodexEventParser {
             at,
             model,
             RequestOutcomeKind::Succeeded,
+            None,
         );
     }
 
@@ -568,10 +590,22 @@ impl CodexEventParser {
         if !self.records_outcomes() {
             return;
         }
-        let Some(kind) = payload.get("error").and_then(classify_turn_error) else {
+        let Some(error) = payload.get("error") else {
             return;
         };
         let Some(at) = event_date.or_else(|| parse_date(payload.get("completed_at"))) else {
+            return;
+        };
+        let (kind, plan_used_percent) = if let Some(kind) = classify_turn_error(error) {
+            (kind, None)
+        } else if is_rate_limit_error(error) {
+            // A rejection as too many requests is the provider's only while the user's plan still
+            // had quota left, which the latest plan-usage snapshot has to show.
+            let Some(percent) = self.quota_left_percent(at) else {
+                return;
+            };
+            (RequestOutcomeKind::Throttled, Some(percent))
+        } else {
             return;
         };
         self.push_outcome(
@@ -579,7 +613,48 @@ impl CodexEventParser {
             at,
             model,
             kind,
+            plan_used_percent,
         );
+    }
+
+    /// Remembers the plan usage a `token_count` event reports (`rate_limits.primary` and
+    /// `.secondary`). A snapshot whose present window lacks a readable `used_percent` cannot show
+    /// that quota is left, so it replaces the earlier one with nothing. Only numbers are read.
+    fn observe_rate_limits(&mut self, payload: &Map<String, Value>, at: Option<DateTime<Utc>>) {
+        let (Some(limits), Some(at)) = (payload.get("rate_limits").and_then(Value::as_object), at)
+        else {
+            return;
+        };
+        let mut highest: Option<f64> = None;
+        for window in ["primary", "secondary"] {
+            let Some(window) = limits.get(window).filter(|window| !window.is_null()) else {
+                continue;
+            };
+            let Some(used) = window
+                .get("used_percent")
+                .and_then(Value::as_f64)
+                .filter(|used| used.is_finite() && *used >= 0.0)
+            else {
+                self.rate_limits = None;
+                return;
+            };
+            highest = Some(highest.map_or(used, |known| known.max(used)));
+        }
+        if let Some(highest_used_percent) = highest {
+            self.rate_limits = Some(RateLimitSnapshot {
+                at,
+                highest_used_percent,
+            });
+        }
+    }
+
+    /// The plan usage (percent, rounded down) of the latest snapshot when it shows quota left at
+    /// `failed_at`: at most 60 minutes older than the failure, every window below 95%.
+    fn quota_left_percent(&self, failed_at: DateTime<Utc>) -> Option<u8> {
+        let snapshot = self.rate_limits?;
+        (failed_at - snapshot.at <= Duration::minutes(THROTTLE_SNAPSHOT_MAX_AGE_MINUTES)
+            && snapshot.highest_used_percent < THROTTLE_PLAN_USED_BELOW_PERCENT)
+            .then(|| snapshot.highest_used_percent.floor() as u8)
     }
 
     fn push_outcome(
@@ -588,6 +663,7 @@ impl CodexEventParser {
         occurred_at: DateTime<Utc>,
         model: Option<String>,
         kind: RequestOutcomeKind,
+        plan_used_percent: Option<u8>,
     ) {
         if let Some(outcome) = RequestOutcome::new(
             dedupe_key,
@@ -599,6 +675,7 @@ impl CodexEventParser {
             Some(&self.provider),
             kind,
         ) {
+            let outcome = outcome.with_plan_used_percent(plan_used_percent);
             push_outcomes(&mut self.outcomes, vec![outcome]);
         }
     }
@@ -798,6 +875,23 @@ fn classify_turn_error(error: &Value) -> Option<RequestOutcomeKind> {
             .and_then(RequestOutcomeKind::from_http_status)
         }
         _ => None,
+    }
+}
+
+/// Whether a `task_complete.error` is a rejection as too many requests: `rate_limit_exceeded`, or
+/// `response_too_many_failed_attempts` with HTTP status 429. Whether the provider or the user's
+/// own plan is to blame depends on the plan usage, which the caller checks.
+fn is_rate_limit_error(error: &Value) -> bool {
+    match error.get("codex_error_info") {
+        Some(Value::String(name)) => name == "rate_limit_exceeded",
+        Some(Value::Object(variants)) if variants.len() == 1 => {
+            variants.iter().next().is_some_and(|(variant, body)| {
+                variant == "rate_limit_exceeded"
+                    || variant == "response_too_many_failed_attempts"
+                        && body.get("http_status_code").and_then(Value::as_i64) == Some(429)
+            })
+        }
+        _ => false,
     }
 }
 

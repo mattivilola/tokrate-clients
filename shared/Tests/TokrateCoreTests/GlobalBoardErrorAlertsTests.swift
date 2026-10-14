@@ -25,8 +25,20 @@ final class GlobalBoardErrorAlertsTests: XCTestCase {
         XCTAssertEqual(alert.failingContributors, 3)
         XCTAssertEqual(alert.overloaded, 4)
         XCTAssertEqual(alert.serverError, 1)
+        XCTAssertEqual(alert.throttled, 0, "a server that does not send throttled reads as 0")
         XCTAssertEqual(alert.firstFailureAt, Date(timeIntervalSince1970: 1_791_885_600))
         XCTAssertEqual(alert.lastFailureAt, Date(timeIntervalSince1970: 1_791_885_600 + 750.5))
+    }
+
+    func testDecodesThrottledAndAThrottleOnlyAlert() throws {
+        let withThrottled = try XCTUnwrap(decode(board(errors: #"{"alerts":[\#(alertJSON("m", extra: #","throttled":6"#))]}"#)).errorAlerts.first)
+        XCTAssertEqual(withThrottled.throttled, 6)
+        XCTAssertEqual(withThrottled.overloaded, 4)
+        let only = #"{"model":"m","failingContributors":2,"throttled":3,"lastFailureAt":"2026-10-13T10:00:00Z"}"#
+        let alert = try XCTUnwrap(decode(board(errors: #"{"alerts":[\#(only)]}"#)).errorAlerts.first)
+        XCTAssertEqual([alert.overloaded, alert.serverError, alert.throttled], [0, 0, 3])
+        let negative = #"{"model":"m","failingContributors":2,"throttled":-4,"lastFailureAt":"2026-10-13T10:00:00Z"}"#
+        XCTAssertEqual(try decode(board(errors: #"{"alerts":[\#(negative)]}"#)).errorAlerts.first?.throttled, 0)
     }
 
     func testMissingErrorsOrAlertsDecodeAsNoAlerts() throws {

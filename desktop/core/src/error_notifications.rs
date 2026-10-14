@@ -45,11 +45,13 @@ impl ErrorNotification {
                         plural(alert.server_error, "server error", "server errors")
                     )
                 }),
+                (alert.throttled > 0)
+                    .then(|| format!("{} throttled (not plan limits)", alert.throttled)),
             ]
             .into_iter()
             .flatten()
-            .collect::<Vec<_>>()
-            .join(" and ");
+            .collect::<Vec<_>>();
+            let counts = join_counts(&counts);
             format!(
                 "{} Tokrate {} reported {counts} in the last hour.",
                 alert.failing_contributors,
@@ -71,6 +73,15 @@ impl ErrorNotification {
             title: format!("{model} looks healthy again"),
             body: "Contributors no longer report provider errors on this model.".into(),
         }
+    }
+}
+
+/// The counts of an alert joined as a sentence part: ", " between them and a final " and ".
+fn join_counts(counts: &[String]) -> String {
+    match counts {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }
 

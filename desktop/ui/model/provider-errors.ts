@@ -11,10 +11,24 @@ const MAX_ALSO = 2;
 
 const times = (count: number) => (count === 1 ? "time" : "times");
 
+/** The sentence for the main group (contract "Local provider errors" and "Provider throttling"). */
+function groupText(group: ProviderErrorGroup, ago: string): string {
+  switch (group.kind) {
+    case "overloaded":
+      return `You hit “${group.client === "codex" ? "model at capacity" : "overloaded"}” ${group.count} ${times(group.count)} on ${group.model} in the last 24 hours, most recently ${ago}. That’s the provider at capacity, not your connection.`;
+    case "throttled": {
+      const used = group.planUsedPercent === undefined ? "" : ` (${group.planUsedPercent}% used)`;
+      return `You were rate limited ${group.count} ${times(group.count)} on ${group.model} in the last 24 hours while your plan still had quota left${used}. That’s the provider throttling, not your plan limit.`;
+    }
+    case "serverError":
+      return `${group.model} returned ${group.count} server ${group.count === 1 ? "error" : "errors"} in the last 24 hours, most recently ${ago}. That’s a failure at the provider, not your connection.`;
+  }
+}
+
 /**
  * The passive line about the user's own provider-side failures (contract "Local provider errors
- * (0.1.23)"), or null when no failure happened in the last 24 hours. The main group is the one
- * with the most recent failure; models are named as the tools report them.
+ * (0.1.23)", throttling from 0.1.24), or null when no failure happened in the last 24 hours. The
+ * main group is the one with the most recent failure; models are named as the tools report them.
  */
 export function providerErrorLine(
   groups: readonly ProviderErrorGroup[] | undefined,
@@ -28,10 +42,7 @@ export function providerErrorLine(
   if (!main) return null;
   const { group, at } = main;
   const ago = relativeTime(at, now);
-  const line =
-    group.kind === "overloaded"
-      ? `You hit “${group.client === "codex" ? "model at capacity" : "overloaded"}” ${group.count} ${times(group.count)} on ${group.model} in the last 24 hours, most recently ${ago}. That’s the provider at capacity, not your connection.`
-      : `${group.model} returned ${group.count} server ${group.count === 1 ? "error" : "errors"} in the last 24 hours, most recently ${ago}. That’s a failure at the provider, not your connection.`;
+  const line = groupText(group, ago);
   const also = recent
     .slice(1, 1 + MAX_ALSO)
     .map(({ group: other }) => `${other.model} (${other.count})`);
@@ -67,12 +78,12 @@ const contributors = (n: number) => count(n, "contributor", "contributors");
 function alertText(alert: RelevantErrorAlert, now: number): string {
   if (alert.notJustYou)
     return `It’s not just you: ${alert.others} other ${alert.others === 1 ? "contributor" : "contributors"} hit provider errors on ${alert.model} in the last hour.`;
-  const counts = [
+  const parts = [
     alert.overloaded > 0 ? `${alert.overloaded} overloaded / at capacity` : null,
     alert.serverError > 0 ? count(alert.serverError, "server error", "server errors") : null,
-  ]
-    .filter((part) => part !== null)
-    .join(" and ");
+    alert.throttled > 0 ? `${alert.throttled} throttled (not plan limits)` : null,
+  ].filter((part) => part !== null);
+  const counts = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
   return `Tokrate contributors are reporting provider errors on ${alert.model}: ${counts} from ${contributors(alert.failingContributors)} in the last hour, latest ${relativeTime(Date.parse(alert.lastFailureAt), now)}.`;
 }
 

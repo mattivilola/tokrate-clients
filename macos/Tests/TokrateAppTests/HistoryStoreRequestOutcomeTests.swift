@@ -115,7 +115,7 @@ final class HistoryStoreRequestOutcomeTests: XCTestCase {
         store.prepareForTermination()
         store.stopMonitoring()
         let history = try String(contentsOf: historyURL, encoding: .utf8)
-        for word in ["overloaded", "serverError", "succeeded", "outcome", "requestCount", "dedupe", "capacity", "server error", "providerError", "at the provider"] {
+        for word in ["overloaded", "serverError", "succeeded", "outcome", "requestCount", "dedupe", "capacity", "server error", "providerError", "at the provider", "throttled", "rate limited", "used_percent", "planUsage"] {
             XCTAssertFalse(history.contains(word), "\(word) must not reach the history file")
         }
     }

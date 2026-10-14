@@ -233,8 +233,8 @@ describe("AppStore", () => {
     expect(store.getState().ui.chartMetric).toBe("response");
   });
 
-  it("uses the consent notice version 5", () => {
-    expect(SHARING_NOTICE_VERSION).toBe("2026-10-09-v5");
+  it("uses the consent notice version 6", () => {
+    expect(SHARING_NOTICE_VERSION).toBe("2026-10-14-v6");
   });
 
   it("lists Kimi Code as one source and filters by the Moonshot AI provider", async () => {
@@ -263,6 +263,7 @@ describe("AppStore", () => {
       failingContributors: 3,
       overloaded: 2,
       serverError: 0,
+      throttled: 0,
       firstFailureAt: new Date().toISOString(),
       lastFailureAt: new Date().toISOString(),
     });
@@ -271,6 +272,7 @@ describe("AppStore", () => {
       failingContributors: 3,
       overloaded: 2,
       serverError: 0,
+      throttled: 0,
       lastFailureAt: new Date().toISOString(),
       notJustYou: false,
       others: 2,

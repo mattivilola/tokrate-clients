@@ -72,6 +72,8 @@ export interface CommunityErrorAlert {
   failingContributors: number;
   overloaded: number;
   serverError: number;
+  /** Requests the provider rejected as too many while plans had quota left; 0 from older servers. */
+  throttled: number;
   /** ISO times. */
   firstFailureAt: string;
   lastFailureAt: string;
@@ -86,6 +88,7 @@ export interface RelevantErrorAlert {
   failingContributors: number;
   overloaded: number;
   serverError: number;
+  throttled: number;
   /** ISO time. */
   lastFailureAt: string;
   /** The user failed on this model in the last hour: the alert reads "It's not just you". */
@@ -113,10 +116,15 @@ export interface Board {
 export interface ProviderErrorGroup {
   client: string;
   model: string;
-  kind: "overloaded" | "serverError";
+  kind: "overloaded" | "serverError" | "throttled";
   count: number;
   /** ISO time of the latest failure. */
   latestAt: string;
+  /**
+   * Throttled only: the plan usage (percent, rounded down) the latest failure showed quota left
+   * at, when the tool reports it. Absent otherwise.
+   */
+  planUsedPercent?: number;
 }
 
 /**

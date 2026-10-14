@@ -26,7 +26,7 @@ use tokrate_core::{
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-09-v5";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-14-v6";
 /// While records keep arriving, local history is written at most this often. What is not written
 /// yet is safe: the checkpoints are saved with the records they belong to, so after a crash the
 /// files behind the unwritten records are read again.
@@ -2177,6 +2177,7 @@ mod tests {
     const OLD_NOTICE: &str = "2026-10-04-v1";
     const PREVIOUS_NOTICE: &str = "2026-10-05-v2";
     const NOTICE_V4: &str = "2026-10-06-v4";
+    const NOTICE_V5: &str = "2026-10-09-v5";
     fn saved_settings(sharing: bool, consent: Option<(&str, &str)>) -> serde_json::Value {
         let mut settings = serde_json::to_value(Settings::default()).unwrap();
         settings["sharing"] = sharing.into();
@@ -2186,9 +2187,9 @@ mod tests {
         settings
     }
     #[test]
-    fn notice_version_five_pauses_sharing_that_was_accepted_under_earlier_versions() {
-        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-09-v5");
-        for old in [OLD_NOTICE, PREVIOUS_NOTICE, NOTICE_V4] {
+    fn notice_version_six_pauses_sharing_that_was_accepted_under_earlier_versions() {
+        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-14-v6");
+        for old in [OLD_NOTICE, PREVIOUS_NOTICE, NOTICE_V4, NOTICE_V5] {
             assert_ne!(SHARING_NOTICE_VERSION, old);
             let dir = temporary();
             write_settings(&dir, saved_settings(true, Some((old, "accepted"))));
@@ -2216,6 +2217,9 @@ mod tests {
             Some((NOTICE_V4, "declined")),
             Some((NOTICE_V4, "withdrawn")),
             Some((NOTICE_V4, "accepted")),
+            Some((NOTICE_V5, "declined")),
+            Some((NOTICE_V5, "withdrawn")),
+            Some((NOTICE_V5, "accepted")),
         ] {
             write_settings(&dir, saved_settings(false, consent));
             let runtime = Runtime::load(dir.clone()).unwrap();
@@ -3311,6 +3315,21 @@ mod tests {
     /// A Claude Code transcript with one real response and, after it, one 529 overload, both a few
     /// seconds before `now`.
     fn write_claude_outcomes(dir: &std::path::Path, now: DateTime<Utc>) {
+        write_claude_failure(
+            dir,
+            now,
+            Some(529),
+            "API Error: Repeated 529 Overloaded errors.",
+        );
+    }
+    /// A Claude Code transcript with one real response and, after it, one failed request with the
+    /// given status and text, both a few seconds before `now`.
+    fn write_claude_failure(
+        dir: &std::path::Path,
+        now: DateTime<Utc>,
+        status: Option<i64>,
+        text: &str,
+    ) {
         let at = |seconds: i64| {
             (now - chrono::Duration::seconds(seconds))
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -3323,15 +3342,18 @@ mod tests {
                 "role": "assistant", "stop_reason": "end_turn",
                 "content": [{"type": "text", "text": "ok"}], "usage": {"output_tokens": 5}}
         });
-        let overload = serde_json::json!({
+        let mut overload = serde_json::json!({
             "type": "assistant", "uuid": "err-1", "timestamp": at(10), "sessionId": "s1",
             "isSidechain": false, "userType": "external", "version": "2.1.295",
-            "isApiErrorMessage": true, "error": "server_error", "apiErrorStatus": 529,
+            "isApiErrorMessage": true, "error": "server_error",
             "message": {"id": "err-1-message", "model": "<synthetic>", "role": "assistant",
                 "stop_reason": "stop_sequence",
-                "content": [{"type": "text", "text": "API Error: Repeated 529 Overloaded errors."}],
+                "content": [{"type": "text", "text": text}],
                 "usage": {"output_tokens": 0}}
         });
+        if let Some(status) = status {
+            overload["apiErrorStatus"] = status.into();
+        }
         let folder = dir.join("claude-projects/project");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(
@@ -3353,12 +3375,13 @@ mod tests {
             .upload_batch(due + chrono::Duration::seconds(61))
             .request_counts
     }
-    fn totals(entries: &[tokrate_core::SharedRequestCount]) -> (u32, u32, u32) {
-        entries.iter().fold((0, 0, 0), |sum, entry| {
+    fn totals(entries: &[tokrate_core::SharedRequestCount]) -> (u32, u32, u32, u32) {
+        entries.iter().fold((0, 0, 0, 0), |sum, entry| {
             (
                 sum.0 + entry.succeeded,
                 sum.1 + entry.overloaded,
                 sum.2 + entry.server_error,
+                sum.3 + entry.throttled,
             )
         })
     }
@@ -3374,7 +3397,7 @@ mod tests {
             runtime.poll_monitor_at(now);
         }
         let entries = due_request_counts(&mut runtime, now);
-        assert_eq!(totals(&entries), (1, 1, 0));
+        assert_eq!(totals(&entries), (1, 1, 0, 0));
         assert!(entries.iter().all(|entry| entry.client == "claude-code"
             && entry.provider == "anthropic"
             && entry.model == "claude-opus-5-5"
@@ -3436,6 +3459,36 @@ mod tests {
             assert_eq!(runtime.snapshot(None).provider_errors.len(), 1);
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+    #[test]
+    fn a_throttle_reaches_the_local_summary_and_the_counts_but_no_plan_figure() {
+        let now = Utc::now();
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        write_claude_failure(
+            &dir,
+            now,
+            Some(429),
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+        );
+        runtime.sharing_active = true;
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        let groups = snapshot["providerErrors"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["kind"], "throttled");
+        assert_eq!(groups[0]["count"], 1);
+        // Claude Code reports no plan usage, so no percentage is known.
+        assert!(groups[0].get("planUsedPercent").is_none());
+        let entries = due_request_counts(&mut runtime, now);
+        assert_eq!(totals(&entries), (1, 0, 0, 1));
+        runtime.save_on_exit();
+        let saved = std::fs::read_to_string(dir.join("history.json")).unwrap_or_default();
+        assert!(!saved.contains("throttled") && !saved.contains("providerErrors"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn community_error_alerts_reach_the_snapshot_only_while_sharing_is_on() {

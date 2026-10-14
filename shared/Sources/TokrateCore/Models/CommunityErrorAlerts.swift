@@ -100,7 +100,7 @@ public struct CommunityErrorAlerts: Sendable {
         let relevant = alerts.compactMap { alert -> RelevantAlert? in
             let others = isSharing ? alert.failingContributors - 1 : alert.failingContributors
             let ownFailure = failedLastHour.contains(alert.model)
-            guard alert.overloaded + alert.serverError > 0,
+            guard alert.overloaded + alert.serverError + alert.throttled > 0,
                   alert.failingContributors >= 1,
                   usedModels.contains(alert.model) || failedLastDay.contains(alert.model),
                   !(ownFailure && others < 1),
@@ -168,11 +168,14 @@ public struct CommunityErrorAlerts: Sendable {
         return ([String(count)] + (adjective.map { [$0] } ?? []) + [noun]).joined(separator: " ")
     }
 
-    /// "{n} overloaded / at capacity", "{m} server error(s)" or both joined with " and ".
+    /// "{n} overloaded / at capacity", "{m} server error(s)" and "{t} throttled (not plan limits)", the
+    /// present ones joined with ", " and a final " and ".
     static func counts(of alert: GlobalBoard.ErrorAlert) -> String {
         var counts: [String] = []
         if alert.overloaded > 0 { counts.append("\(alert.overloaded) overloaded / at capacity") }
         if alert.serverError > 0 { counts.append("\(alert.serverError) \(alert.serverError == 1 ? "server error" : "server errors")") }
-        return counts.joined(separator: " and ")
+        if alert.throttled > 0 { counts.append("\(alert.throttled) throttled (not plan limits)") }
+        guard let last = counts.popLast() else { return "" }
+        return counts.isEmpty ? last : counts.joined(separator: ", ") + " and " + last
     }
 }

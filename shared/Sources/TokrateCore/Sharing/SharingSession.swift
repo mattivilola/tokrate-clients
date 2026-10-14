@@ -290,7 +290,7 @@ public final class SharingSession {
             let entries = SharedRequestCount.entries(
                 observedAt: group.observedAt, client: identity.client, clientVersion: identity.clientVersion,
                 parserVersion: identity.parserVersion, model: identity.model, provider: identity.provider,
-                succeeded: group.succeeded, overloaded: group.overloaded, serverError: group.serverError
+                succeeded: group.succeeded, overloaded: group.overloaded, serverError: group.serverError, throttled: group.throttled
             )
             for entry in entries {
                 if countQueue.count >= Self.maximumQueued { countQueue.removeFirst() }

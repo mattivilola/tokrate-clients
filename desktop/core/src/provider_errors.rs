@@ -24,6 +24,7 @@ pub(crate) const MAX_SEEN_KEYS: usize = 20_000;
 pub enum ProviderErrorKind {
     Overloaded,
     ServerError,
+    Throttled,
 }
 
 impl ProviderErrorKind {
@@ -32,6 +33,7 @@ impl ProviderErrorKind {
             RequestOutcomeKind::Succeeded => None,
             RequestOutcomeKind::Overloaded => Some(Self::Overloaded),
             RequestOutcomeKind::ServerError => Some(Self::ServerError),
+            RequestOutcomeKind::Throttled => Some(Self::Throttled),
         }
     }
 }
@@ -46,6 +48,17 @@ pub struct ProviderErrorGroup {
     pub kind: ProviderErrorKind,
     pub count: usize,
     pub latest_at: DateTime<Utc>,
+    /// For a throttled group: the plan usage (percent, rounded down) the latest failure showed
+    /// quota left at, when it is known. Absent for every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_used_percent: Option<u8>,
+}
+
+/// One remembered failure: when it happened and, for a throttled one, the plan usage then.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Failure {
+    at: DateTime<Utc>,
+    plan_used_percent: Option<u8>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -58,8 +71,8 @@ pub(crate) struct GroupKey {
 /// Local, in-memory summary of the provider-side failures of the last 24 hours.
 #[derive(Debug, Default)]
 pub struct LocalProviderErrors {
-    /// Failure times per group, oldest first.
-    pub(crate) groups: HashMap<GroupKey, VecDeque<DateTime<Utc>>>,
+    /// Failures per group, oldest first.
+    pub(crate) groups: HashMap<GroupKey, VecDeque<Failure>>,
     pub(crate) seen: HashSet<String>,
     pub(crate) seen_order: VecDeque<(String, DateTime<Utc>)>,
 }
@@ -89,7 +102,10 @@ impl LocalProviderErrors {
                     model: outcome.model.clone(),
                     kind,
                 },
-                at,
+                Failure {
+                    at,
+                    plan_used_percent: outcome.plan_used_percent,
+                },
             );
         }
         self.prune(now);
@@ -100,7 +116,7 @@ impl LocalProviderErrors {
     pub fn prune(&mut self, now: DateTime<Utc>) {
         let cutoff = Self::cutoff(now);
         self.groups.retain(|_, times| {
-            while times.front().is_some_and(|at| *at < cutoff) {
+            while times.front().is_some_and(|failure| failure.at < cutoff) {
                 times.pop_front();
             }
             !times.is_empty()
@@ -121,13 +137,15 @@ impl LocalProviderErrors {
             .groups
             .iter()
             .filter_map(|(key, times)| {
-                let count = times.iter().filter(|at| **at >= cutoff).count();
+                let count = times.iter().filter(|failure| failure.at >= cutoff).count();
+                let latest = times.back().filter(|failure| failure.at >= cutoff)?;
                 Some(ProviderErrorGroup {
                     client: key.client.to_owned(),
                     model: key.model.clone(),
                     kind: key.kind,
                     count,
-                    latest_at: *times.back().filter(|at| **at >= cutoff)?,
+                    latest_at: latest.at,
+                    plan_used_percent: latest.plan_used_percent,
                 })
             })
             .collect();
@@ -145,14 +163,15 @@ impl LocalProviderErrors {
         now - Duration::hours(LOCAL_ERROR_WINDOW_HOURS)
     }
 
-    fn record(&mut self, key: GroupKey, at: DateTime<Utc>) {
+    fn record(&mut self, key: GroupKey, failure: Failure) {
+        let at = failure.at;
         if !self.groups.contains_key(&key) && self.groups.len() >= MAX_LOCAL_ERROR_GROUPS {
             // Full: the group whose latest failure is the oldest makes room, unless the new
             // failure is older still.
             let oldest = self
                 .groups
                 .iter()
-                .filter_map(|(key, times)| Some((times.back().copied()?, key.clone())))
+                .filter_map(|(key, times)| Some((times.back()?.at, key.clone())))
                 .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.model.cmp(&b.1.model)));
             match oldest {
                 Some((latest, evicted)) if latest <= at => {
@@ -162,8 +181,8 @@ impl LocalProviderErrors {
             }
         }
         let times = self.groups.entry(key).or_default();
-        let position = times.partition_point(|existing| *existing <= at);
-        times.insert(position, at);
+        let position = times.partition_point(|existing| existing.at <= at);
+        times.insert(position, failure);
         if times.len() > MAX_FAILURES_PER_GROUP {
             times.pop_front();
         }

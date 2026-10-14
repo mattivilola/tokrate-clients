@@ -19,6 +19,7 @@ import {
   REQUEST_COUNT_NOTICE,
   SENT_FIELDS,
   SURFACE_NOTICE,
+  THROTTLED_NOTICE,
 } from "../components/SharingChoice";
 import sentExample from "../store/sent-example.json?raw";
 import { EFFICIENCY_EXPLANATION, EFFICIENCY_INSUFFICIENT } from "../metrics";
@@ -569,7 +570,14 @@ describe("sharing notice", () => {
       "provider",
       "serverError",
       "succeeded",
+      "throttled",
     ]);
+  });
+  it("states the throttled count in the notice", () => {
+    expect(THROTTLED_NOTICE).toBe(
+      "From 0.1.24 the request counts also include requests the provider rejected as too many while your plan still had quota left (throttled). Your plan usage itself is never sent.",
+    );
+    expect(JSON.parse(sentExample).requestCounts[0].throttled).toBe(1);
   });
   it("states the surface category in the notice", () => {
     expect(SURFACE_NOTICE).toBe(

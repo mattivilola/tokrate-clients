@@ -530,8 +530,10 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     /// connection failures or timeouts that carry no status.
     static func failureKind(status: Int?, content: Any?) -> RequestOutcome.Kind? {
         let texts = textBlocks(of: content)
+        // Claude Code says explicitly that this 429 is not the user's limit: a provider throttle.
+        if texts.contains(where: { $0.contains("not your usage limit") }) { return .throttled }
         if status == 529
-            || texts.contains(where: { $0.hasPrefix("API Error: Repeated 529") || $0.contains("is experiencing high load") || $0.contains("not your usage limit") }) {
+            || texts.contains(where: { $0.hasPrefix("API Error: Repeated 529") || $0.contains("is experiencing high load") }) {
             return .overloaded
         }
         if status.map({ (500...599).contains($0) }) == true

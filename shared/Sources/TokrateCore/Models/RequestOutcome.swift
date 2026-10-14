@@ -2,9 +2,10 @@ import CryptoKit
 import Foundation
 
 /// One model request a coding tool finished, as far as the provider is concerned (contract "Request
-/// outcomes (0.1.22)"): it succeeded, or it failed because the provider was overloaded or had a server
-/// error. Every other failure (the user's own limits, sign-in problems, invalid requests, cancellations,
-/// local network failures) is never an outcome.
+/// outcomes (0.1.22)"): it succeeded, or it failed because the provider was overloaded, had a server
+/// error or, from 0.1.24, throttled the request while the user's plan still had quota left. Every other
+/// failure (the user's own limits, sign-in problems, invalid requests, cancellations, local network
+/// failures) is never an outcome.
 ///
 /// Outcomes live in memory only. They are produced beside the `TurnMetric`s, travel from the monitors
 /// to the sharing session and are never written to the history file, the dashboard, `tokrate inspect`
@@ -15,6 +16,9 @@ public struct RequestOutcome: Hashable, Sendable {
         case succeeded
         case overloaded
         case serverError
+        /// The provider rejected the request as "too many" although the user's own plan had quota left
+        /// (contract "Provider throttling (0.1.24)").
+        case throttled
     }
 
     /// The measurement definition of every request count.
@@ -52,6 +56,10 @@ public struct RequestOutcome: Hashable, Sendable {
     public let model: String
     public let provider: String
     public let kind: Kind
+    /// For a `throttled` outcome whose tool recorded the plan usage (Codex): the highest used percentage
+    /// of the plan's windows, rounded down. For the local provider-error line only: it is never stored
+    /// beyond memory, uploaded or exported.
+    public let planUsagePercent: Int?
 
     /// Nil unless the outcome could be uploaded as part of a request count: a supported client with its
     /// current parser version, a model as the sample rules send it (never `unknown`) and a hosted
@@ -59,7 +67,7 @@ public struct RequestOutcome: Hashable, Sendable {
     /// `unknown`.
     public init?(
         dedupeKey: String, occurredAt: Date, client: String, clientVersion: String?, parserVersion: String,
-        model: String?, provider: String?, kind: Kind
+        model: String?, provider: String?, kind: Kind, planUsagePercent: Int? = nil
     ) {
         guard !dedupeKey.isEmpty, Self.parserVersions[client] == parserVersion,
               let model, model != "unknown", model.range(of: Self.modelPattern, options: .regularExpression) != nil,
@@ -75,6 +83,7 @@ public struct RequestOutcome: Hashable, Sendable {
         self.model = model
         self.provider = provider
         self.kind = kind
+        self.planUsagePercent = kind == .throttled ? planUsagePercent.flatMap { (0...100).contains($0) ? $0 : nil } : nil
     }
 
     /// The digest of the identifiers that make one outcome unique.

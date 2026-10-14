@@ -126,7 +126,8 @@ final class ClaudeRequestOutcomeTests: XCTestCase {
             (nil, "server_error", "API Error: Repeated 529 Overloaded errors. The API is at capacity", .overloaded),
             (429, "rate_limit", "Opus is experiencing high load, please use /model to switch to Sonnet", .overloaded),
             (nil, "rate_limit", "Fable is experiencing high load, please use /model", .overloaded),
-            (429, "rate_limit", "API Error: Server is temporarily limiting requests (not your usage limit)", .overloaded),
+            (429, "rate_limit", "API Error: Server is temporarily limiting requests (not your usage limit)", .throttled),
+            (nil, "rate_limit", "API Error: Request rejected (429) · not your usage limit", .throttled),
             (nil, "server_error", "API Error: Server error mid-response. The response above may be incomplete.", .serverError),
             // The user's own limits and everything else the provider is not at fault for.
             (429, "rate_limit", "You've hit your session limit · resets 9:30pm (Europe/Paris)", nil),
@@ -371,7 +372,9 @@ final class CodexRequestOutcomeTests: XCTestCase {
         XCTAssertEqual(try failureKinds(["http_connection_failed": ["http_status_code": 403]]), [])
         XCTAssertEqual(try failureKinds(["http_connection_failed": ["http_status_code": NSNull()]]), [], "a local connection failure")
         XCTAssertEqual(try failureKinds(["http_connection_failed": [:] as [String: Any]]), [])
-        XCTAssertEqual(try failureKinds(["response_too_many_failed_attempts": ["http_status_code": 429]]), [])
+        XCTAssertEqual(try failureKinds(["response_stream_connection_failed": ["http_status_code": 429]]), [])
+        XCTAssertEqual(try failureKinds(["http_connection_failed": ["http_status_code": 429]]), [])
+        XCTAssertEqual(try failureKinds(["response_too_many_failed_attempts": ["http_status_code": 429]]), [], "a throttle needs a plan usage snapshot")
         XCTAssertEqual(try failureKinds(["response_stream_disconnected": ["http_status_code": 503]]), [])
         for name in ["usage_limit_exceeded", "rate_limit_exceeded", "session_budget_exceeded", "unauthorized", "bad_request",
                      "context_window_exceeded", "cyber_policy", "sandbox_error", "other", "http_connection_failed"] {
@@ -379,6 +382,151 @@ final class CodexRequestOutcomeTests: XCTestCase {
         }
         XCTAssertEqual(try failureKinds(nil), [])
         XCTAssertEqual(try failureKinds(NSNull()), [])
+    }
+
+    // MARK: Throttling (contract "Provider throttling (0.1.24)")
+
+    /// A `token_count` event as Codex writes it, carrying the plan usage snapshot.
+    private func tokenCount(_ seconds: Double, primary: Double? = nil, secondary: Double? = nil, extra: [String: Any] = [:]) throws -> Data {
+        var limits: [String: Any] = ["limit_id": "codex", "credits": ["has_credits": false]]
+        if let primary { limits["primary"] = ["used_percent": primary, "window_minutes": 300, "resets_at": 1_800_010_000] }
+        if let secondary { limits["secondary"] = ["used_percent": secondary, "window_minutes": 10_080, "resets_at": 1_800_100_000] }
+        limits.merge(extra) { _, new in new }
+        return try line(seconds, "event_msg", ["type": "token_count", "info": ["total_token_usage": ["output_tokens": 1]], "rate_limits": limits])
+    }
+
+    private let tooManyAttempts: [String: Any] = ["response_too_many_failed_attempts": ["http_status_code": 429]]
+
+    private func throttle(_ snapshots: [Data], failureAt: Double = 100, info: Any? = nil) throws -> [RequestOutcome] {
+        try outcomes([header(), context()] + snapshots + [complete(failureAt, error: failed(info ?? tooManyAttempts))])
+    }
+
+    func testAFreshSnapshotBelowTheCeilingMakesATooManyAttemptsFailureThrottled() throws {
+        let result = try throttle([tokenCount(60, primary: 41.9, secondary: 12.0)])
+        let outcome = try XCTUnwrap(result.first)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(outcome.kind, .throttled)
+        XCTAssertEqual(outcome.planUsagePercent, 41, "the highest window, rounded down")
+        XCTAssertEqual(outcome.model, "gpt-5.5")
+        XCTAssertEqual(outcome.provider, "openai")
+        XCTAssertEqual(outcome.occurredAt, epoch.addingTimeInterval(100))
+        XCTAssertFalse(String(describing: result).contains(privateText))
+    }
+
+    func testRateLimitExceededIsAlsoAThrottleWhenTheSnapshotAllowsIt() throws {
+        let result = try throttle([tokenCount(90, primary: 94.99)], info: "rate_limit_exceeded")
+        XCTAssertEqual(result.map(\.kind), [.throttled])
+        XCTAssertEqual(result.first?.planUsagePercent, 94)
+        XCTAssertEqual(try throttle([], info: "rate_limit_exceeded").map(\.kind), [])
+        XCTAssertEqual(try throttle([tokenCount(90, primary: 95)], info: "rate_limit_exceeded").map(\.kind), [])
+    }
+
+    func testAPrimaryWindowAloneIsEnoughAndTheLatestSnapshotWins() throws {
+        XCTAssertEqual(try throttle([tokenCount(10, primary: 30)]).first?.planUsagePercent, 30)
+        let result = try throttle([tokenCount(10, primary: 97), tokenCount(50, primary: 20), tokenCount(60, primary: 22.5)])
+        XCTAssertEqual(result.first?.planUsagePercent, 22, "an earlier exhausted snapshot is replaced by the latest one")
+        let reversed = try throttle([tokenCount(10, primary: 20), tokenCount(60, primary: 96)])
+        XCTAssertEqual(reversed.map(\.kind), [], "the latest snapshot is the exhausted one")
+    }
+
+    func testAStaleOrMissingSnapshotDropsTheFailure() throws {
+        XCTAssertEqual(try throttle([]).map(\.kind), [], "no snapshot, for example an API-key setup")
+        XCTAssertEqual(try throttle([tokenCount(100 - 3_601, primary: 10)]).map(\.kind), [], "older than 60 minutes")
+        XCTAssertEqual(try throttle([tokenCount(100 - 3_600, primary: 10)]).map(\.kind), [.throttled], "exactly 60 minutes is still fresh")
+        // A token_count without a usable snapshot does not refresh or replace one.
+        let unusable = try line(80, "event_msg", ["type": "token_count", "info": [:] as [String: Any], "rate_limits": NSNull()])
+        XCTAssertEqual(try throttle([tokenCount(100 - 3_601, primary: 10), unusable]).map(\.kind), [])
+        XCTAssertEqual(try throttle([tokenCount(10, primary: 10), unusable], failureAt: 4_000).map(\.kind), [])
+        let noWindows = try line(80, "event_msg", ["type": "token_count", "rate_limits": ["limit_id": "codex", "primary": NSNull()]])
+        XCTAssertEqual(try throttle([tokenCount(10, primary: 10), noWindows]).first?.planUsagePercent, 10, "no window listed: the snapshot stays")
+        let absent = try line(80, "event_msg", ["type": "token_count", "info": [:] as [String: Any]])
+        XCTAssertEqual(try throttle([tokenCount(10, primary: 10), absent]).first?.planUsagePercent, 10)
+    }
+
+    func testAListedWindowWithoutAReadablePercentageVoidsTheSnapshotUntilAReadableOneArrives() throws {
+        let unreadable: [[String: Any]] = [
+            ["primary": ["window_minutes": 300]],
+            ["primary": ["used_percent": "41"]],
+            ["primary": ["used_percent": NSNull()]],
+            ["primary": ["used_percent": true]],
+            ["primary": ["used_percent": -5]],
+            ["primary": "broken"],
+            ["primary": ["used_percent": 10], "secondary": ["window_minutes": 10_080]],
+            ["primary": NSNull(), "secondary": ["resets_at": 5]]
+        ]
+        for limits in unreadable {
+            let event = try line(80, "event_msg", ["type": "token_count", "rate_limits": limits])
+            XCTAssertEqual(try throttle([tokenCount(10, primary: 10), event]).map(\.kind), [], "\(limits)")
+            let recovered = try throttle([tokenCount(10, primary: 10), event, tokenCount(90, primary: 20)])
+            XCTAssertEqual(recovered.first?.planUsagePercent, 20, "a readable snapshot restores it: \(limits)")
+        }
+    }
+
+    func testRateLimitExceededAsASingleKeyObjectIsAThrottleToo() throws {
+        let object: [String: Any] = ["rate_limit_exceeded": [:] as [String: Any]]
+        let withStatus: [String: Any] = ["rate_limit_exceeded": ["http_status_code": 429]]
+        for info in [object, withStatus] {
+            XCTAssertEqual(try throttle([tokenCount(60, primary: 33.3)], info: info).first?.kind, .throttled)
+            XCTAssertEqual(try throttle([tokenCount(60, primary: 33.3)], info: info).first?.planUsagePercent, 33)
+            XCTAssertEqual(try throttle([], info: info).map(\.kind), [], "no snapshot")
+            XCTAssertEqual(try throttle([tokenCount(60, primary: 96)], info: info).map(\.kind), [], "exhausted plan")
+        }
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 10)], info: ["usage_limit_exceeded": [:] as [String: Any]]).map(\.kind), [])
+    }
+
+    func testAnExhaustedWindowOnEitherSideDropsTheFailure() throws {
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 95)]).map(\.kind), [])
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 10, secondary: 95)]).map(\.kind), [])
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 99.5, secondary: 10)]).map(\.kind), [])
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 100)]).map(\.kind), [])
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 94.9, secondary: 94.9)]).map(\.kind), [.throttled])
+    }
+
+    func testUsageLimitExceededIsNeverCountedWhateverTheSnapshot() throws {
+        XCTAssertEqual(try throttle([tokenCount(60, primary: 1)], info: "usage_limit_exceeded").map(\.kind), [])
+    }
+
+    func testOnlyATooManyAttemptsFailureWithStatus429CanBeThrottled() throws {
+        let snapshot = try tokenCount(60, primary: 10)
+        for info: Any in [
+            ["response_too_many_failed_attempts": ["http_status_code": 403]],
+            ["response_too_many_failed_attempts": ["http_status_code": NSNull()]],
+            ["response_too_many_failed_attempts": [:] as [String: Any]],
+            ["http_connection_failed": ["http_status_code": 429]],
+            "other", "unauthorized"
+        ] {
+            XCTAssertEqual(try throttle([snapshot], info: info).map(\.kind), [], "\(info)")
+        }
+        // The server-side classes keep their kind regardless of the snapshot.
+        XCTAssertEqual(try throttle([snapshot], info: "server_overloaded").map(\.kind), [.overloaded])
+        XCTAssertEqual(try throttle([snapshot], info: ["response_too_many_failed_attempts": ["http_status_code": 503]]).map(\.kind), [.serverError])
+        XCTAssertNil(try throttle([snapshot], info: "server_overloaded").first?.planUsagePercent)
+    }
+
+    func testThrottlingStillNeedsTheOutcomeRules() throws {
+        let snapshot = try tokenCount(60, primary: 10)
+        let old = try outcomes([header(version: "0.144.9"), context(), snapshot, complete(100, error: failed(tooManyAttempts))])
+        XCTAssertTrue(old.isEmpty, "cli_version before 0.145.0")
+        let other = try outcomes([header(provider: "ollama"), context(), snapshot, complete(100, error: failed(tooManyAttempts))])
+        XCTAssertTrue(other.isEmpty, "provider other than openai")
+        let ambiguous = try outcomes([header(), context(model: "gpt-5.5"), context(model: "gpt-5.4"), snapshot, complete(100, error: failed(tooManyAttempts))])
+        XCTAssertTrue(ambiguous.isEmpty)
+    }
+
+    func testTheSnapshotBelongsToTheRolloutAndIsForgottenOnReset() throws {
+        var parser = CodexEventParser(sourceIdentity: "/tmp/rollout.jsonl")
+        for data in try [header(), context(), tokenCount(60, primary: 10)] { _ = parser.consume(line: data) }
+        parser.reset(sourceIdentity: "/tmp/rollout.jsonl")
+        for data in try [header(), context(), complete(100, error: failed(tooManyAttempts))] { _ = parser.consume(line: data) }
+        XCTAssertTrue(parser.drainRequestOutcomes().isEmpty)
+        let fresh = try outcomes([header(), context(), complete(100, error: failed(tooManyAttempts))])
+        XCTAssertTrue(fresh.isEmpty, "another rollout has its own snapshot")
+    }
+
+    func testTokenCountStillCarriesNoTurnMetricsOrOutcomes() throws {
+        var parser = CodexEventParser(sourceIdentity: "/tmp/rollout.jsonl")
+        for data in try [header(), context(), tokenCount(5, primary: 10)] { XCTAssertNil(parser.consume(line: data)) }
+        XCTAssertTrue(parser.drainRequestOutcomes().isEmpty)
     }
 
     func testAFailureCarriesTheTurnsModelAndTheCompletionTime() throws {

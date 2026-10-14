@@ -24,6 +24,7 @@ pub struct CommunityErrorAlert {
     pub failing_contributors: u64,
     pub overloaded: u64,
     pub server_error: u64,
+    pub throttled: u64,
     pub last_failure_at: DateTime<Utc>,
 }
 
@@ -35,6 +36,7 @@ pub struct RelevantErrorAlert {
     pub failing_contributors: u64,
     pub overloaded: u64,
     pub server_error: u64,
+    pub throttled: u64,
     pub last_failure_at: DateTime<Utc>,
     /// The user had a provider failure on this model in the last hour, so the alert reads "It's
     /// not just you" and counts the other contributors.
@@ -85,6 +87,7 @@ pub fn relevant_error_alerts(
             failing_contributors: alert.failing_contributors,
             overloaded: alert.overloaded,
             server_error: alert.server_error,
+            throttled: alert.throttled,
             last_failure_at: alert.last_failure_at,
             not_just_you: failed_hour.contains(alert.model.as_str()),
             others: alert.failing_contributors.saturating_sub(1),

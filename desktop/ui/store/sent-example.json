@@ -1,7 +1,7 @@
 {
   "requestCounts": [
     {
-      "appVersion": "0.1.23",
+      "appVersion": "0.1.24",
       "client": "codex",
       "clientVersion": "1.2.3",
       "countId": "00000000-0000-4000-8000-000000000001",
@@ -12,12 +12,13 @@
       "parserVersion": "codex-rollout-v2",
       "provider": "openai",
       "serverError": 0,
-      "succeeded": 41
+      "succeeded": 41,
+      "throttled": 1
     }
   ],
   "samples": [
     {
-      "appVersion": "0.1.23",
+      "appVersion": "0.1.24",
       "cacheReadInputTokens": 36000,
       "cacheWriteInputTokens": null,
       "client": "codex",

@@ -36,7 +36,7 @@ enum SamplePayload {
             countId: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
             observedAt: Date(timeIntervalSince1970: 1_767_268_800), client: "claude-code", clientVersion: "1.2.3",
             parserVersion: "claude-transcript-v4", model: "example-model", provider: "anthropic",
-            succeeded: 41, overloaded: 3, serverError: 0
+            succeeded: 41, overloaded: 3, serverError: 0, throttled: 2
         )
     }
 

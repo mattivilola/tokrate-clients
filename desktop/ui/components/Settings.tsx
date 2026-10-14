@@ -8,6 +8,7 @@ import {
   REGION_NOTICE,
   REQUEST_COUNT_NOTICE,
   SURFACE_NOTICE,
+  THROTTLED_NOTICE,
   SentExample,
 } from "./SharingChoice";
 import { useStore } from "../store/store";
@@ -229,7 +230,7 @@ export function SettingsView() {
           />
           <p className="fine">
             Contribution is off until you choose. No prompts, responses, code or local file
-            paths are uploaded. {REGION_NOTICE} {DELEGATED_NOTICE} {SURFACE_NOTICE} {PROMPT_CACHE_NOTICE} {REQUEST_COUNT_NOTICE} You can withdraw at any time: turning sharing off stops future
+            paths are uploaded. {REGION_NOTICE} {DELEGATED_NOTICE} {SURFACE_NOTICE} {PROMPT_CACHE_NOTICE} {REQUEST_COUNT_NOTICE} {THROTTLED_NOTICE} You can withdraw at any time: turning sharing off stops future
             community requests and clears queued reports. Reports already received cannot be
             recalled by the switch.
           </p>

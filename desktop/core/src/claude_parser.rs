@@ -30,8 +30,8 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// are matched in memory and the text is discarded (contract "Request outcomes (0.1.22)").
 const REPEATED_OVERLOAD_PREFIX: &str = "API Error: Repeated 529";
 const MID_RESPONSE_SERVER_ERROR_PREFIX: &str = "API Error: Server error mid-response";
-/// Fixed fragments of the texts of a provider capacity switch and of a throttle the tool labels as
-/// not the user's own limit.
+/// Fixed fragments of the texts of a provider capacity switch (overloaded) and of a throttle the
+/// tool labels as not the user's own limit (throttled, contract "Provider throttling (0.1.24)").
 const HIGH_LOAD_FRAGMENT: &str = "is experiencing high load";
 const NOT_USER_LIMIT_FRAGMENT: &str = "not your usage limit";
 /// `attachment.type` values Claude Code writes when an API response arrives, not when its request
@@ -1175,8 +1175,8 @@ impl JsonlEventParser for ClaudeTranscriptParser {
 
 /// The provider-side failure a synthetic API-error record stands for, from its `apiErrorStatus`
 /// (529 overloaded, any other 5xx a server error) or else from fixed text fragments: an explicit
-/// overload, a capacity switch, or a throttle the tool labels as not the user's limit (overloaded),
-/// and a server error that ended a response mid-stream. Every other failure (the user's own
+/// overload or a capacity switch (overloaded), a throttle the tool labels as not the user's limit
+/// (throttled), and a server error that ended a response mid-stream. Every other failure (the user's own
 /// limits, sign-in, invalid requests, local connection trouble) is `None`.
 fn classify_api_error(
     root: &serde_json::Map<String, Value>,
@@ -1191,11 +1191,12 @@ fn classify_api_error(
     }
     let mut kind = None;
     for_each_text(message.get("content"), &mut |text| {
-        if text.starts_with(REPEATED_OVERLOAD_PREFIX)
-            || text.contains(HIGH_LOAD_FRAGMENT)
-            || text.contains(NOT_USER_LIMIT_FRAGMENT)
-        {
-            kind = Some(RequestOutcomeKind::Overloaded);
+        if text.contains(NOT_USER_LIMIT_FRAGMENT) {
+            kind = Some(RequestOutcomeKind::Throttled);
+        } else if text.starts_with(REPEATED_OVERLOAD_PREFIX) || text.contains(HIGH_LOAD_FRAGMENT) {
+            if kind != Some(RequestOutcomeKind::Throttled) {
+                kind = Some(RequestOutcomeKind::Overloaded);
+            }
         } else if kind.is_none() && text.starts_with(MID_RESPONSE_SERVER_ERROR_PREFIX) {
             kind = Some(RequestOutcomeKind::ServerError);
         }

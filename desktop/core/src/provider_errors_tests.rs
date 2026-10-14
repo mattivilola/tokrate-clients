@@ -48,8 +48,8 @@ fn shape(groups: &[ProviderErrorGroup]) -> Vec<(&str, &str, ProviderErrorKind, u
         .collect()
 }
 
-use ProviderErrorKind::{Overloaded as Over, ServerError as Server};
-use RequestOutcomeKind::{Overloaded, ServerError, Succeeded};
+use ProviderErrorKind::{Overloaded as Over, ServerError as Server, Throttled as Throttle};
+use RequestOutcomeKind::{Overloaded, ServerError, Succeeded, Throttled};
 
 #[test]
 fn counts_and_latest_time_per_client_model_and_kind() {
@@ -73,6 +73,44 @@ fn counts_and_latest_time_per_client_model_and_kind() {
         ]
     );
     assert_eq!(summary[0].latest_at, minutes_ago(10));
+}
+
+#[test]
+fn throttled_failures_are_their_own_group_and_keep_the_latest_plan_percentage() {
+    let throttled = |key: &str, minutes: i64, percent: Option<u8>| {
+        outcome(key, "codex", "gpt", Throttled, minutes_ago(minutes))
+            .with_plan_used_percent(percent)
+    };
+    let mut errors = LocalProviderErrors::new();
+    errors.ingest(
+        &[
+            // Out of order on purpose: the latest failure (10 minutes ago) decides the percentage.
+            throttled("a", 10, Some(61)),
+            throttled("b", 30, Some(12)),
+            throttled("c", 20, None),
+            outcome("d", "codex", "gpt", Overloaded, minutes_ago(40)),
+        ],
+        now(),
+    );
+    let summary = errors.summary(now());
+    assert_eq!(
+        shape(&summary),
+        vec![("codex", "gpt", Throttle, 3), ("codex", "gpt", Over, 1)]
+    );
+    assert_eq!(summary[0].plan_used_percent, Some(61));
+    assert_eq!(summary[0].latest_at, minutes_ago(10));
+    assert_eq!(summary[1].plan_used_percent, None);
+    // A later failure without a known percentage replaces it with nothing.
+    errors.ingest(&[throttled("e", 1, None)], now());
+    assert_eq!(errors.summary(now())[0].plan_used_percent, None);
+    // The percentage reaches the webview only for throttled groups, camel-cased.
+    let json = serde_json::to_value(&errors.summary(now())).unwrap();
+    assert_eq!(json[0]["kind"], "throttled");
+    assert!(json[0].get("planUsedPercent").is_none());
+    errors.ingest(&[throttled("f", 0, Some(33))], now());
+    let json = serde_json::to_value(&errors.summary(now())).unwrap();
+    assert_eq!(json[0]["planUsedPercent"], 33);
+    assert!(json[1].get("planUsedPercent").is_none());
 }
 
 #[test]

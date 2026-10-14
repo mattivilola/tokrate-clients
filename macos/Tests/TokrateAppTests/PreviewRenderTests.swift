@@ -145,6 +145,32 @@ final class PreviewRenderTests: XCTestCase {
                 .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
                 dark: dark, to: output, name: "provider-error-line-\(mode)"
             )
+            // The throttled local line with and without the plan percentage, and the community counts with throttled.
+            var withPercent = LocalProviderErrors()
+            withPercent.add([
+                Self.failure(client: "codex", model: "gpt-5.5", kind: .throttled, at: failedAt, key: "t1", percent: 41),
+                Self.failure(client: "codex", model: "gpt-5.5", kind: .throttled, at: failedAt.addingTimeInterval(-300), key: "t2", percent: 38),
+                Self.failure(client: "claude-code", model: "claude-opus-5-5", kind: .overloaded, at: failedAt.addingTimeInterval(-3_600), key: "t3")
+            ])
+            var withoutPercent = LocalProviderErrors()
+            withoutPercent.add([Self.failure(client: "claude-code", model: "claude-opus-5-5", kind: .throttled, at: failedAt, key: "t4")])
+            let throttleAlerts = [
+                GlobalBoard.ErrorAlert(model: "gpt-5.5", provider: "openai", clients: ["codex"], failingContributors: 5, overloaded: 2, serverError: 1, throttled: 7, lastFailureAt: .now.addingTimeInterval(-3 * 60))
+            ]
+            var throttleCommunity = CommunityErrorAlerts()
+            let throttleLine = throttleCommunity.line(
+                alerts: throttleAlerts,
+                relevant: CommunityErrorAlerts.relevantAlerts(throttleAlerts, usedModels: ["gpt-5.5"], localGroups: [], isSharing: true, now: .now),
+                now: .now, relativeTime: { RelativeTime.string(from: $0, now: .now) }
+            )
+            render(
+                VStack(alignment: .leading, spacing: 18) {
+                    ProviderErrorLinesView(local: withPercent.line { RelativeTime.string(from: $0, now: .now) }, community: throttleLine)
+                    ProviderErrorLinesView(local: withoutPercent.line { RelativeTime.string(from: $0, now: .now) }, community: nil)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
+                dark: dark, to: output, name: "throttled-error-line-\(mode)"
+            )
             // The community line under the local one, from a board alert, plus the muted states.
             let relative: (Date) -> String = { RelativeTime.string(from: $0, now: .now) }
             var communityAlerts = CommunityErrorAlerts()
@@ -216,10 +242,10 @@ final class PreviewRenderTests: XCTestCase {
         }
     }
 
-    private static func failure(client: String, model: String, kind: RequestOutcome.Kind, at date: Date, key: String) -> RequestOutcome {
+    private static func failure(client: String, model: String, kind: RequestOutcome.Kind, at date: Date, key: String, percent: Int? = nil) -> RequestOutcome {
         let parser = ["codex": "codex-rollout-v2", "claude-code": "claude-transcript-v4", "kimi-code": "kimi-wire-v1"][client]!
         let provider = ["codex": "openai", "claude-code": "anthropic", "kimi-code": "moonshot"][client]!
-        return RequestOutcome(dedupeKey: key, occurredAt: date, client: client, clientVersion: "1.0.0", parserVersion: parser, model: model, provider: provider, kind: kind)!
+        return RequestOutcome(dedupeKey: key, occurredAt: date, client: client, clientVersion: "1.0.0", parserVersion: parser, model: model, provider: provider, kind: kind, planUsagePercent: percent)!
     }
 
     // MARK: Rendering

@@ -39,6 +39,7 @@ struct RequestOutcomeAggregator {
         var succeeded = 0
         var overloaded = 0
         var serverError = 0
+        var throttled = 0
 
         var observedAt: Date { Date(timeIntervalSince1970: bucket.start) }
     }
@@ -66,6 +67,7 @@ struct RequestOutcomeAggregator {
             case .succeeded: group.succeeded += 1
             case .overloaded: group.overloaded += 1
             case .serverError: group.serverError += 1
+            case .throttled: group.throttled += 1
             }
             groups[bucket] = group
         }

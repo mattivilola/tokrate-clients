@@ -410,6 +410,9 @@ pub enum RequestOutcomeKind {
     Overloaded,
     /// Any other HTTP 5xx failure on the provider's side.
     ServerError,
+    /// The provider rejected the request as too many while the user's own plan still had quota
+    /// left (contract "Provider throttling (0.1.24)").
+    Throttled,
 }
 
 impl RequestOutcomeKind {
@@ -438,6 +441,9 @@ pub struct RequestOutcome {
     pub model: String,
     pub provider: String,
     pub kind: RequestOutcomeKind,
+    /// For a throttled Codex request, the highest plan usage (percent, rounded down) of the
+    /// snapshot that showed quota left. For local display only: never serialized for upload.
+    pub plan_used_percent: Option<u8>,
 }
 
 impl RequestOutcome {
@@ -466,7 +472,14 @@ impl RequestOutcome {
             model: known(model)?.to_owned(),
             provider: known(provider)?.to_owned(),
             kind,
+            plan_used_percent: None,
         })
+    }
+
+    /// The outcome with the plan usage that showed quota left (local display only).
+    pub fn with_plan_used_percent(mut self, percent: Option<u8>) -> Self {
+        self.plan_used_percent = percent;
+        self
     }
 }
 

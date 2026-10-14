@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.23";
+pub const APP_VERSION: &str = "0.1.24";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 /// The request-count entries wait in a queue of their own with the same cap.
 pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
@@ -359,6 +359,7 @@ pub fn example_request_json() -> String {
         succeeded: 41,
         overloaded: 3,
         server_error: 0,
+        throttled: 1,
         ..OpenCount::default()
     };
     let request_counts = CountKey::of(&outcome)
@@ -644,6 +645,7 @@ impl SharingQueue {
                 RequestOutcomeKind::Succeeded => open.succeeded += 1,
                 RequestOutcomeKind::Overloaded => open.overloaded += 1,
                 RequestOutcomeKind::ServerError => open.server_error += 1,
+                RequestOutcomeKind::Throttled => open.throttled += 1,
             }
         }
     }
@@ -752,6 +754,7 @@ struct OpenCount {
     succeeded: u64,
     overloaded: u64,
     server_error: u64,
+    throttled: u64,
 }
 
 /// What request counts are summed by. Everything in it is already validated and shareable.
@@ -811,7 +814,12 @@ impl CountKey {
         let observed_at = DateTime::<Utc>::from_timestamp(self.bucket, 0)
             .map(format_date)
             .unwrap_or_default();
-        let mut remaining = [counts.succeeded, counts.overloaded, counts.server_error];
+        let mut remaining = [
+            counts.succeeded,
+            counts.overloaded,
+            counts.server_error,
+            counts.throttled,
+        ];
         let mut entries = Vec::new();
         while remaining.iter().any(|count| *count > 0) {
             let take = remaining.map(|count| count.min(MAX_COUNT_PER_ENTRY));
@@ -831,6 +839,7 @@ impl CountKey {
                 succeeded: take[0] as u32,
                 overloaded: take[1] as u32,
                 server_error: take[2] as u32,
+                throttled: take[3] as u32,
             });
         }
         entries
@@ -868,6 +877,9 @@ pub struct SharedRequestCount {
     pub succeeded: u32,
     pub overloaded: u32,
     pub server_error: u32,
+    /// Requests the provider rejected as too many while the plan had quota left (contract
+    /// "Provider throttling (0.1.24)"). Always sent, 0 when none.
+    pub throttled: u32,
 }
 
 /// The samples and request-count entries one upload carries.

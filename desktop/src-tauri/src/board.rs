@@ -58,6 +58,9 @@ struct ErrorAlert {
     failing_contributors: u64,
     overloaded: u64,
     server_error: u64,
+    /// Absent on boards of servers older than 0.1.24: reads as 0.
+    #[serde(default)]
+    throttled: u64,
     first_failure_at: String,
     last_failure_at: String,
 }
@@ -71,6 +74,7 @@ impl ErrorAlert {
             failing_contributors: self.failing_contributors,
             overloaded: self.overloaded,
             server_error: self.server_error,
+            throttled: self.throttled,
             last_failure_at: DateTime::parse_from_rfc3339(&self.last_failure_at)
                 .ok()?
                 .with_timezone(&chrono::Utc),
@@ -86,7 +90,11 @@ impl ErrorAlert {
             && self.clients.len() <= MAX_ALERT_CLIENTS
             && self.clients.iter().all(|client| id(client, MAX_ID_BYTES))
             && self.failing_contributors >= 1
-            && self.overloaded.saturating_add(self.server_error) >= 1
+            && self
+                .overloaded
+                .saturating_add(self.server_error)
+                .saturating_add(self.throttled)
+                >= 1
             && [&self.first_failure_at, &self.last_failure_at]
                 .into_iter()
                 .all(|at| DateTime::parse_from_rfc3339(at).is_ok())
@@ -356,7 +364,7 @@ mod tests {
     fn alert(model: &str) -> Value {
         json!({
             "model": model, "provider": "anthropic", "clients": ["claude-code"],
-            "failingContributors": 3, "overloaded": 4, "serverError": 0,
+            "failingContributors": 3, "overloaded": 4, "serverError": 0, "throttled": 2,
             "firstFailureAt": "2026-10-13T11:10:00Z", "lastFailureAt": "2026-10-13T11:50:00Z"
         })
     }
@@ -383,6 +391,46 @@ mod tests {
     }
 
     #[test]
+    fn the_throttled_count_is_optional_and_an_alert_with_only_throttles_is_sound() {
+        // A server before 0.1.24 sends no `throttled`: it reads as 0, and is forwarded as 0.
+        let mut old = alert("old-server");
+        old.as_object_mut().unwrap().remove("throttled");
+        let board = parse(json!({
+            "schemaVersion": 1, "cohorts": [], "errors": {"alerts": [old]}
+        }))
+        .unwrap();
+        assert_eq!(board.error_alerts()[0].throttled, 0);
+        let forwarded = serde_json::to_value(&board).unwrap();
+        assert_eq!(forwarded["errors"]["alerts"][0]["throttled"], 0);
+        assert_eq!(forwarded["errors"]["alerts"][0]["overloaded"], 4);
+        // Only throttled failures count as a failure: the alert is kept and carries its count.
+        let mut only = alert("throttle-only");
+        only["overloaded"] = json!(0);
+        only["serverError"] = json!(0);
+        only["throttled"] = json!(5);
+        let board = parse(json!({
+            "schemaVersion": 1, "cohorts": [], "errors": {"alerts": [only]}
+        }))
+        .unwrap();
+        let alerts = board.error_alerts();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            (
+                alerts[0].overloaded,
+                alerts[0].server_error,
+                alerts[0].throttled
+            ),
+            (0, 0, 5)
+        );
+        // Without any of the three counts it is still no alert (older servers: no throttled).
+        let mut none = alert("none");
+        none["overloaded"] = json!(0);
+        none["serverError"] = json!(0);
+        none.as_object_mut().unwrap().remove("throttled");
+        assert!(alerts_of(json!({"alerts": [none]})).is_empty());
+    }
+
+    #[test]
     fn the_selection_reads_the_alerts_in_the_servers_order() {
         let board = parse(json!({
             "schemaVersion": 1, "cohorts": [],
@@ -398,9 +446,10 @@ mod tests {
             (
                 alerts[0].failing_contributors,
                 alerts[0].overloaded,
-                alerts[0].server_error
+                alerts[0].server_error,
+                alerts[0].throttled
             ),
-            (3, 4, 0)
+            (3, 4, 0, 2)
         );
         assert_eq!(
             alerts[0].last_failure_at,
@@ -455,6 +504,9 @@ mod tests {
             ("failingContributors", json!("3")),
             ("overloaded", json!(-1)),
             ("serverError", json!("1")),
+            ("throttled", json!(-1)),
+            ("throttled", json!("2")),
+            ("throttled", json!(1.5)),
             ("firstFailureAt", json!("yesterday")),
             ("lastFailureAt", json!(12)),
         ] {
@@ -465,6 +517,7 @@ mod tests {
         let mut no_failures = alert("broken");
         no_failures["overloaded"] = json!(0);
         no_failures["serverError"] = json!(0);
+        no_failures["throttled"] = json!(0);
         broken.push(no_failures);
         let mut missing = alert("broken");
         missing.as_object_mut().unwrap().remove("clients");

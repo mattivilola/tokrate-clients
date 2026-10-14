@@ -25,6 +25,10 @@ export const PROMPT_CACHE_NOTICE =
 export const REQUEST_COUNT_NOTICE =
   "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages.";
 
+/** From notice version 6: the request counts also include throttled requests. */
+export const THROTTLED_NOTICE =
+  "From 0.1.24 the request counts also include requests the provider rejected as too many while your plan still had quota left (throttled). Your plan usage itself is never sent.";
+
 /** What every shared turn contains, in the wording of the Mac notice. */
 export const SENT_FIELDS = [
   "Coding tool, and app, parser and metric versions",
@@ -112,6 +116,7 @@ export function SharingChoice({
       <p className="detail-fine region-notice">{SURFACE_NOTICE}</p>
       <p className="detail-fine region-notice">{PROMPT_CACHE_NOTICE}</p>
       <p className="detail-fine region-notice">{REQUEST_COUNT_NOTICE}</p>
+      <p className="detail-fine region-notice">{THROTTLED_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

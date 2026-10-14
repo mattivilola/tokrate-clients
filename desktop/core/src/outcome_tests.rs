@@ -20,7 +20,7 @@ use std::time::SystemTime;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use RequestOutcomeKind::{Overloaded, ServerError, Succeeded};
+use RequestOutcomeKind::{Overloaded, ServerError, Succeeded, Throttled};
 
 fn time(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
@@ -192,7 +192,18 @@ fn claude_overload_and_server_errors_are_attributed_to_the_previous_real_respons
             Some(429),
             "API Error: Server is temporarily limiting requests (not your usage limit)"
         )),
-        [(Overloaded, model(), provider())]
+        [(Throttled, model(), provider())]
+    );
+    // The explicit label wins over an overload wording in the same text.
+    assert_eq!(
+        claude_failure(api_error(
+            at,
+            "e6b",
+            "rate_limit",
+            None,
+            "Opus is experiencing high load (not your usage limit)"
+        )),
+        [(Throttled, model(), provider())]
     );
     // A 5xx that ends a response mid-stream.
     assert_eq!(
@@ -591,7 +602,8 @@ fn codex_failures_follow_the_error_enum_and_status() {
             );
         }
     }
-    // Everything else is the user's side, ambiguous or not a failure of the provider.
+    // Everything else is the user's side, ambiguous or not a failure of the provider (a 429 or
+    // `rate_limit_exceeded` is the provider's only with a plan-usage snapshot, see below).
     for info in [
         json!("usage_limit_exceeded"),
         json!("rate_limit_exceeded"),
@@ -614,6 +626,236 @@ fn codex_failures_follow_the_error_enum_and_status() {
         task_complete("t1", "2026-10-09T12:00:05Z", None),
     ])
     .is_empty());
+}
+
+/// A `token_count` event reporting the plan usage of the primary and secondary windows (a window
+/// of `None` is absent).
+fn token_count(at: &str, primary: Option<f64>, secondary: Option<f64>) -> Vec<u8> {
+    let window = |used: f64, minutes: i64| json!({"used_percent": used, "window_minutes": minutes, "resets_at": 1_791_000_000});
+    let mut limits = json!({"credits": {"has_credits": false, "unlimited": false}});
+    if let Some(used) = primary {
+        limits["primary"] = window(used, 300);
+    }
+    if let Some(used) = secondary {
+        limits["secondary"] = window(used, 10_080);
+    }
+    codex_line(
+        "event_msg",
+        json!({"type": "token_count", "info": null, "rate_limits": limits}),
+        at,
+    )
+}
+
+/// The failures of a rollout (version 0.159.2 on OpenAI) that has `snapshots` before its only
+/// turn, which ended at 12:00:05 with `info`.
+fn codex_throttle(snapshots: Vec<Vec<u8>>, info: Value) -> Vec<RequestOutcome> {
+    let mut lines = vec![
+        session_meta(Some("0.159.2"), "openai"),
+        turn_context("t1", "gpt-5"),
+        task_started("t1"),
+    ];
+    lines.extend(snapshots);
+    lines.push(task_complete(
+        "t1",
+        "2026-10-09T12:00:05Z",
+        Some(json!({"message": "SECRET raw provider text", "codex_error_info": info})),
+    ));
+    codex_outcomes(&lines)
+}
+
+fn too_many_429() -> Value {
+    json!({"response_too_many_failed_attempts": {"http_status_code": 429}})
+}
+
+#[test]
+fn codex_too_many_requests_with_quota_left_is_throttled_and_keeps_the_plan_percentage() {
+    for info in [
+        too_many_429(),
+        json!("rate_limit_exceeded"),
+        json!({"rate_limit_exceeded": {}}),
+    ] {
+        let outcomes = codex_throttle(
+            vec![token_count("2026-10-09T12:00:02Z", Some(42.7), Some(12.0))],
+            info.clone(),
+        );
+        assert_eq!(shape(&outcomes), [(Throttled, "gpt-5", "openai")], "{info}");
+        assert_eq!(outcomes[0].plan_used_percent, Some(42), "{info}");
+        assert_eq!(outcomes[0].occurred_at, time("2026-10-09T12:00:05Z"));
+    }
+    // The primary window alone is enough, and so is the secondary one; the highest wins.
+    let percent = |snapshot: Vec<u8>| {
+        codex_throttle(vec![snapshot], too_many_429())
+            .first()
+            .and_then(|outcome| outcome.plan_used_percent)
+    };
+    assert_eq!(
+        percent(token_count("2026-10-09T12:00:02Z", Some(7.0), None)),
+        Some(7)
+    );
+    assert_eq!(
+        percent(token_count("2026-10-09T12:00:02Z", None, Some(63.9))),
+        Some(63)
+    );
+    assert_eq!(
+        percent(token_count("2026-10-09T12:00:02Z", Some(20.0), Some(80.5))),
+        Some(80)
+    );
+    assert_eq!(
+        percent(token_count("2026-10-09T12:00:02Z", Some(0.0), None)),
+        Some(0)
+    );
+    // Only the explicit throttle kinds: a 429 of another variant, or other statuses, are not.
+    for info in [
+        json!({"http_connection_failed": {"http_status_code": 429}}),
+        json!({"response_stream_connection_failed": {"http_status_code": 429}}),
+        json!({"response_too_many_failed_attempts": {"http_status_code": 403}}),
+        json!({"response_too_many_failed_attempts": {}}),
+        json!("usage_limit_exceeded"),
+        json!({"usage_limit_exceeded": {}}),
+    ] {
+        assert!(
+            codex_throttle(
+                vec![token_count("2026-10-09T12:00:02Z", Some(10.0), Some(10.0))],
+                info.clone()
+            )
+            .is_empty(),
+            "{info}"
+        );
+    }
+}
+
+#[test]
+fn codex_throttling_needs_a_fresh_snapshot_with_every_window_below_95_percent() {
+    let throttled = |snapshots: Vec<Vec<u8>>| -> Option<Option<u8>> {
+        codex_throttle(snapshots, too_many_429())
+            .first()
+            .map(|outcome| outcome.plan_used_percent)
+    };
+    // Age of the snapshot: at most 60 minutes before the failure (12:00:05).
+    assert!(throttled(vec![token_count("2026-10-09T11:00:05Z", Some(10.0), None)]).is_some());
+    assert!(throttled(vec![token_count("2026-10-09T11:00:04Z", Some(10.0), None)]).is_none());
+    assert!(throttled(vec![token_count("2026-10-09T10:00:00Z", Some(10.0), None)]).is_none());
+    // Every reported window must be below 95%.
+    assert_eq!(
+        throttled(vec![token_count("2026-10-09T12:00:02Z", Some(94.9), None)]),
+        Some(Some(94))
+    );
+    for (primary, secondary) in [
+        (Some(95.0), None),
+        (Some(100.0), Some(10.0)),
+        (Some(10.0), Some(95.0)),
+        (None, Some(99.5)),
+    ] {
+        assert!(
+            throttled(vec![token_count(
+                "2026-10-09T12:00:02Z",
+                primary,
+                secondary
+            )])
+            .is_none(),
+            "{primary:?} {secondary:?}"
+        );
+    }
+    // Without a snapshot (API-key setups), or with one that has no usable window, it is dropped.
+    assert!(throttled(vec![]).is_none());
+    assert!(throttled(vec![token_count("2026-10-09T12:00:02Z", None, None)]).is_none());
+    assert!(throttled(vec![codex_line(
+        "event_msg",
+        json!({"type": "token_count", "info": null, "rate_limits": null}),
+        "2026-10-09T12:00:02Z"
+    )])
+    .is_none());
+    assert!(throttled(vec![codex_line(
+        "event_msg",
+        json!({"type": "token_count", "info": {"total_token_usage": {}}}),
+        "2026-10-09T12:00:02Z"
+    )])
+    .is_none());
+    // A window without a readable percentage cannot show that quota is left.
+    for bad in [
+        json!({}),
+        json!({"used_percent": "10"}),
+        json!({"used_percent": -1}),
+    ] {
+        let line = codex_line(
+            "event_msg",
+            json!({"type": "token_count", "rate_limits": {"primary": bad}}),
+            "2026-10-09T12:00:02Z",
+        );
+        assert!(throttled(vec![line]).is_none(), "{bad}");
+    }
+    // The latest snapshot of the rollout decides, whichever way it moved.
+    assert!(throttled(vec![
+        token_count("2026-10-09T12:00:01Z", Some(99.0), None),
+        token_count("2026-10-09T12:00:02Z", Some(30.0), None),
+    ])
+    .is_some());
+    assert!(throttled(vec![
+        token_count("2026-10-09T12:00:01Z", Some(30.0), None),
+        token_count("2026-10-09T12:00:02Z", Some(99.0), None),
+    ])
+    .is_none());
+    // A later event without limits leaves the snapshot in force; an unreadable one voids it.
+    assert!(throttled(vec![
+        token_count("2026-10-09T12:00:01Z", Some(30.0), None),
+        codex_line(
+            "event_msg",
+            json!({"type": "token_count", "rate_limits": null}),
+            "2026-10-09T12:00:02Z"
+        ),
+    ])
+    .is_some());
+    assert!(throttled(vec![
+        token_count("2026-10-09T12:00:01Z", Some(30.0), None),
+        codex_line(
+            "event_msg",
+            json!({"type": "token_count", "rate_limits": {"primary": {}}}),
+            "2026-10-09T12:00:02Z"
+        ),
+    ])
+    .is_none());
+    // The other rollout rules still apply: old versions and other providers report nothing.
+    for (version, provider) in [(Some("0.144.0"), "openai"), (Some("0.159.2"), "azure")] {
+        let outcomes = codex_outcomes(&[
+            session_meta(version, provider),
+            turn_context("t1", "gpt-5"),
+            task_started("t1"),
+            token_count("2026-10-09T12:00:02Z", Some(10.0), None),
+            task_complete(
+                "t1",
+                "2026-10-09T12:00:05Z",
+                Some(json!({"message": "x", "codex_error_info": too_many_429()})),
+            ),
+        ]);
+        assert!(outcomes.is_empty(), "{version:?} {provider}");
+    }
+}
+
+#[test]
+fn the_snapshot_belongs_to_its_rollout_and_never_outlives_a_reset() {
+    let mut parser = CodexEventParser::new("file".into());
+    for line in [
+        session_meta(Some("0.159.2"), "openai"),
+        turn_context("t1", "gpt-5"),
+        task_started("t1"),
+        token_count("2026-10-09T12:00:02Z", Some(10.0), None),
+    ] {
+        parser.consume(&line);
+    }
+    parser.reset("other-file".into());
+    for line in [
+        session_meta(Some("0.159.2"), "openai"),
+        turn_context("t2", "gpt-5"),
+        task_started("t2"),
+        task_complete(
+            "t2",
+            "2026-10-09T12:00:05Z",
+            Some(json!({"message": "x", "codex_error_info": too_many_429()})),
+        ),
+    ] {
+        parser.consume(&line);
+    }
+    assert!(parser.take_outcomes().is_empty());
 }
 
 #[test]
@@ -950,7 +1192,7 @@ fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
     );
     assert_eq!(entry.client, "codex");
     assert_eq!(entry.client_version, "1.2.3");
-    assert_eq!(entry.app_version, "0.1.23");
+    assert_eq!(entry.app_version, "0.1.24");
     assert_eq!(entry.parser_version, "codex-rollout-v2");
     assert_eq!(entry.metric_version, "request-outcome-v1");
     assert_eq!(entry.model, "gpt-5");
@@ -1126,6 +1368,81 @@ fn counts_over_10000_are_split_into_entries_that_each_sum_to_at_least_one() {
 }
 
 #[test]
+fn throttled_outcomes_are_summed_and_split_like_the_other_counts() {
+    let mut queue = queue(0);
+    queue.enable(time("2026-10-09T09:59:00Z"));
+    let mut outcomes: Vec<RequestOutcome> = (0..10_002)
+        .map(|index| outcome(&format!("t-{index}"), "2026-10-09T10:01:00Z", Throttled))
+        .collect();
+    // The plan percentage is local: it changes neither the count nor the upload.
+    outcomes[0] = outcomes[0].clone().with_plan_used_percent(Some(41));
+    outcomes.push(outcome("s", "2026-10-09T10:01:00Z", ServerError));
+    queue.enqueue_outcomes(&outcomes, time("2026-10-09T10:02:00Z"));
+    let entries = drain(&mut queue, time("2026-10-09T10:12:00Z"));
+    let counts: Vec<(u32, u32, u32, u32)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.succeeded,
+                entry.overloaded,
+                entry.server_error,
+                entry.throttled,
+            )
+        })
+        .collect();
+    assert_eq!(counts, [(0, 0, 1, 10_000), (0, 0, 0, 2)]);
+    // A throttle alone is an entry, and it is sent with every key, plan usage excluded.
+    let mut alone = self::queue(0);
+    alone.enable(time("2026-10-09T09:59:00Z"));
+    alone.enqueue_outcomes(
+        &[outcome("only", "2026-10-09T10:01:00Z", Throttled).with_plan_used_percent(Some(41))],
+        time("2026-10-09T10:02:00Z"),
+    );
+    let entries = drain(&mut alone, time("2026-10-09T10:12:00Z"));
+    assert_eq!(entries.len(), 1);
+    let request = signed_request(&[], &entries, &[3; 32], time("2026-10-09T10:12:00Z")).unwrap();
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    let entry = &body["requestCounts"][0];
+    assert_eq!(entry["throttled"], 1);
+    for key in ["succeeded", "overloaded", "serverError"] {
+        assert_eq!(entry[key], 0, "{key}");
+    }
+    // No plan figure is part of the entry: its keys are exactly the request-count keys.
+    let mut keys: Vec<&str> = entry
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "appVersion",
+            "client",
+            "clientVersion",
+            "countId",
+            "metricVersion",
+            "model",
+            "observedAt",
+            "overloaded",
+            "parserVersion",
+            "provider",
+            "serverError",
+            "succeeded",
+            "throttled"
+        ]
+    );
+    // The dedupe key does not depend on the percentage.
+    assert_eq!(
+        outcome("same", "2026-10-09T10:01:00Z", Throttled).dedupe_key,
+        outcome("same", "2026-10-09T10:01:00Z", Throttled)
+            .with_plan_used_percent(Some(7))
+            .dedupe_key
+    );
+}
+
+#[test]
 fn only_shareable_outcomes_are_counted_and_the_rest_is_dropped() {
     let mut queue = queue(0);
     queue.enable(time("2026-10-09T09:59:00Z"));
@@ -1147,6 +1464,7 @@ fn only_shareable_outcomes_are_counted_and_the_rest_is_dropped() {
             model: model.into(),
             provider: provider.into(),
             kind: Succeeded,
+            plan_used_percent: None,
         }
     };
     queue.enqueue_outcomes(
@@ -1455,6 +1773,7 @@ fn entry_of(index: u128, model: &str) -> SharedRequestCount {
         succeeded: 9_999,
         overloaded: 9_999,
         server_error: 9_999,
+        throttled: 9_999,
     }
 }
 
@@ -1492,9 +1811,9 @@ fn a_request_with_only_counts_is_a_signed_version_2_envelope_with_both_lists() {
     assert_eq!(body["requestCounts"].as_array().unwrap().len(), 1);
     // Keys are sorted, like the samples' keys.
     let text = String::from_utf8(request.body.clone()).unwrap();
-    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.23\",\"client\":\"codex\""));
+    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.24\",\"client\":\"codex\""));
     assert!(text.contains("\"overloaded\":9999,\"parserVersion\""));
-    assert!(text.contains("\"serverError\":9999,\"succeeded\":9999}"));
+    assert!(text.contains("\"serverError\":9999,\"succeeded\":9999,\"throttled\":9999}"));
     assert!(text.ends_with("\"sentAt\":\"2026-10-09T12:05:00Z\"}"));
     // Samples only keep the empty list of counts.
     let samples_only = signed_request(&[sample_of(1)], &[], &[3; 32], now).unwrap();

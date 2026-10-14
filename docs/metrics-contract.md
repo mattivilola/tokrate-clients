@@ -700,3 +700,29 @@ No upload field changes and no new network request. The companions can turn the 
   - Recovery: title "{model} looks healthy again", body "Contributors no longer report provider errors on this model."
 - **Activation.** Clicking a notification opens the companion's dashboard. Notifications carry no other action and nothing is persisted about them beyond the setting.
 - On the desktop the notifications are sent by the native runtime from its own board data, never by the webview, and the community line uses the same relevant-alert list the runtime computes.
+
+## Provider throttling (0.1.24)
+
+A third provider-side failure class, `throttled`: the provider rejected requests with "too many requests" while the user's own plan still had quota left. Providers can tighten limits without notice; counting these separately shows it. Evidence: Codex rollouts record `response_too_many_failed_attempts` with `http_status_code` 429 after its retries and, in the same file, `token_count` events carry the plan usage snapshot `rate_limits` (`primary` / `secondary` with `used_percent`, `window_minutes`, `resets_at`, plus `credits`).
+
+### Classification
+
+- **Codex.** A terminal `task_complete.error` whose `codex_error_info` is `response_too_many_failed_attempts` with `http_status_code` 429, or `rate_limit_exceeded`, is `throttled` only when the most recent `rate_limits` snapshot in the same rollout file is at most 60 minutes older than the failure and every reported window (`primary`, and `secondary` when present) has `used_percent` below 95. Without such a snapshot (for example API-key setups), or with a window at 95% or more, the failure is dropped as before. `usage_limit_exceeded` stays the user's own limit and is never counted. Other rules of "Request outcomes (0.1.22)" are unchanged (cli_version ≥ 0.145.0, provider `openai`).
+- **Claude Code.** A synthetic error record whose text contains `not your usage limit` moves from `overloaded` to `throttled` (Claude Code says explicitly that it is not the user's limit). Every other 429 stays excluded.
+- **OpenCode and Kimi Code.** No plan usage is recorded, so their 429s stay excluded.
+- The plan usage figures are read in memory only. They are never stored, uploaded or exported; the local line may show the latest used percentage.
+
+### Upload
+
+- A request-count entry from app version 0.1.24 always carries `throttled` (integer 0–10,000) next to `succeeded`, `overloaded` and `serverError`; the at-least-one rule counts it. Entries from 0.1.22 and 0.1.23 must not carry it. `appVersion` is `0.1.24` (both clients); samples are unchanged.
+- **Consent notice version 6.** `SharingPreferences.currentNoticeVersion` is 6 (desktop: `SHARING_NOTICE_VERSION = "2026-10-14-v6"`), with the same re-consent behaviour as earlier bumps (a saved OFF stays OFF). The notice adds: "From 0.1.24 the request counts also include requests the provider rejected as too many while your plan still had quota left (throttled). Your plan usage itself is never sent." The consent example payload includes `throttled`.
+
+### Local and community lines, notifications
+
+- Local provider errors gain a `throttled` kind, grouped per (client, model, kind) like the others. Its line: "You were rate limited {n} time(s) on {model} in the last 24 hours while your plan still had quota left ({p}% used). That’s the provider throttling, not your plan limit." — the "({p}% used)" part only when a plan percentage is known (Codex: the highest `used_percent` of the snapshot used for the latest failure, rounded down); without it the sentence reads "…while your plan still had quota left. That’s the provider throttling, not your plan limit."
+- Community alert counts phrasing adds "{t} throttled (not plan limits)" to the "{n} overloaded / at capacity" and "{m} server error(s)" parts, joined with ", " and a final " and ". The alert entries of `GET /board` carry `throttled` (servers from this version); a missing value reads as 0.
+- Notifications use the same counts phrasing. A start notification body for a throttle-only alert reads "{k} Tokrate contributor(s) reported {counts} in the last hour." like the other kinds.
+
+### Server
+
+- The detector counts `throttled` as a provider failure, like `overloaded` and `serverError`. Rows, totals, alerts, watch entries and incidents carry `throttled` separately. Apps 0.1.22–0.1.23 ignore the field; they drop an alert entry without overloaded or server errors, so a throttle-only incident reaches only 0.1.24 apps.
