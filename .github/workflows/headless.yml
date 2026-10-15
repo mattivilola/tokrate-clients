@@ -88,11 +88,18 @@ jobs:
             base64 --decode "$artifact.sig" > "$artifact.minisig"
             minisign -Vm "$artifact" -p "$RUNNER_TEMP/tokrate-public-key.pub" -x "$artifact.minisig"
           done
+      - name: Collect complete release assets
+        id: release_assets
+        run: |
+          destination="$RUNNER_TEMP/headless-release"
+          install -d "$destination"
+          cp "$RUNNER_TEMP"/tokrate-headless-deb/*.deb* "$destination/"
+          cp "$RUNNER_TEMP"/tokrate-headless_*.tar.gz* "$destination/"
+          test -s "$destination/tokrate-headless_0.1.26_$(dpkg --print-architecture).tar.gz"
+          echo "path=$destination" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tokrate-headless-debian12-${{ runner.arch }}
-          path: |
-            ${{ runner.temp }}/tokrate-headless-deb/*.deb*
-            ${{ runner.temp }}/tokrate-headless_*.tar.gz*
+          path: ${{ steps.release_assets.outputs.path }}
           if-no-files-found: error
           retention-days: 7
