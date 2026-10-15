@@ -83,8 +83,11 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     public var isSupportedSourceTuple: Bool {
         Self.isSupportedSourceTuple(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
     }
+    public var runtimeClient: String? {
+        client == T3Runtime.client ? T3Runtime.nativeClient(parser: parserVersion, metric: metricVersion) : client
+    }
     public var ttftSeconds: Double? {
-        isSupportedSourceTuple && client == "codex" ? codexTTFTSeconds : nil
+        isSupportedSourceTuple && runtimeClient == "codex" ? codexTTFTSeconds : nil
     }
     public var throughputLabel: String {
         Self.throughputLabel(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
@@ -97,7 +100,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// measurements or shared. Older parser versions stay listed so saved history keeps decoding;
     /// `SharedSample` refuses Claude v1 and v2.
     public static func isSupportedSourceTuple(client: String, parserVersion: String, metricVersion: String) -> Bool {
-        switch (client, parserVersion, metricVersion) {
+        if client == T3Runtime.client {
+            return T3Runtime.nativeClient(parser: parserVersion, metric: metricVersion) != nil
+        }
+        return switch (client, parserVersion, metricVersion) {
         case ("codex", "codex-rollout-v1", "turn-v1"),
              ("codex", "codex-rollout-v2", "turn-v1"),
              ("claude-code", "claude-transcript-v1", "claude-observed-turn-v1"),

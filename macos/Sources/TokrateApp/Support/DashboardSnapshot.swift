@@ -65,7 +65,8 @@ struct CodingTool: Equatable, Sendable {
         CodingTool(id: "grok-build", title: "Grok Build", chip: "GB"),
         CodingTool(id: "antigravity", title: "Antigravity", chip: "AG"),
         CodingTool(id: "opencode", title: "OpenCode", chip: "OC"),
-        CodingTool(id: "kimi-code", title: "Kimi Code", chip: "KC")
+        CodingTool(id: "kimi-code", title: "Kimi Code", chip: "KC"),
+        CodingTool(id: "t3-code", title: "T3 Code", chip: "T3")
     ]
 
     /// The tool for a recorded client id; an unknown id is shown as recorded, chipped by its first two letters.

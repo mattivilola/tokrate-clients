@@ -16,6 +16,7 @@ const SUPPORTED_CLIENTS = [
   "antigravity",
   "opencode",
   "kimi-code",
+  "t3-code",
 ];
 const isCount = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v) && v >= 0;

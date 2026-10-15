@@ -1,9 +1,9 @@
 //! Monitor for Antigravity (Google's agentic coding tool): the desktop app, the IDE and the `agy`
-//! CLI, which keep one SQLite database per conversation under `~/.gemini`.
+//! CLI, which keep one SQLite database per conversation under `~/.gemini`, plus T3 Code profiles.
 
 use crate::antigravity_db::{read_database, GenerationCache};
-use crate::antigravity_turns::{finished_turns, live_calls};
-use crate::model::{ResponseMetric, ToolSurface, TurnMetric};
+use crate::antigravity_turns::{finished_turns_for_client, live_calls_for_client};
+use crate::model::{ResponseMetric, ToolSurface, TurnMetric, ANTIGRAVITY_CLIENT, T3_CODE_CLIENT};
 use crate::monitor::{SourceChange, DISCOVERY_INTERVAL_SECONDS};
 use crate::sqlite_read::{retry_delay, DatabaseSignature, Remembered};
 use chrono::{DateTime, Duration, Utc};
@@ -21,6 +21,11 @@ const CONVERSATION_FOLDERS: [(&str, ToolSurface); 3] = [
 ];
 /// The names a host watches the three folders under (the watcher keys sources by name).
 const WATCH_KEYS: [&str; 3] = ["antigravity", "antigravity-ide", "antigravity-cli"];
+const T3_WATCH_KEY: &str = "antigravity-t3";
+const T3_ACP_FOLDER: &str = "antigravity-acp";
+const T3_CONVERSATIONS_FOLDER: &str = "conversations";
+const MAX_T3_PROFILES: usize = 128;
+const MAX_T3_PROFILE_ENTRIES: usize = 1_024;
 /// The history retention: databases untouched for longer are not opened.
 const RETENTION_DAYS: i64 = 7;
 const MAX_DISCOVERED_PATHS: usize = 100_000;
@@ -28,6 +33,7 @@ const MAX_DATABASES: usize = 128;
 
 struct Conversation {
     id: String,
+    client: &'static str,
     /// Where the database was found.
     surface: ToolSurface,
     /// The signature the last successful read saw; `None` until one succeeds.
@@ -47,12 +53,16 @@ struct Conversation {
 struct Candidate {
     path: PathBuf,
     id: String,
+    client: &'static str,
     surface: ToolSurface,
 }
 
 /// Bounded reader for Antigravity conversation databases.
 pub struct AntigravityMonitor {
     root: PathBuf,
+    /// Optional separately configured root for T3 Code's Antigravity profiles. It is supplied by
+    /// the desktop host only while the selected `~/.gemini` folder remains the default.
+    t3_profiles_root: Option<PathBuf>,
     conversations: HashMap<PathBuf, Conversation>,
     last_discovery: Option<DateTime<Utc>>,
     /// A new or vanished database, a new folder or lost events: enumerate on the next poll.
@@ -69,8 +79,13 @@ impl AntigravityMonitor {
     pub const MAX_POLL_BYTES: usize = 1_048_576;
 
     pub fn new(root: PathBuf) -> Self {
+        Self::with_t3_profiles_root(root, None)
+    }
+
+    pub fn with_t3_profiles_root(root: PathBuf, t3_profiles_root: Option<PathBuf>) -> Self {
         Self {
             root,
+            t3_profiles_root,
             conversations: HashMap::new(),
             last_discovery: None,
             needs_discovery: false,
@@ -88,6 +103,20 @@ impl AntigravityMonitor {
         CONVERSATION_FOLDERS
             .iter()
             .any(|(folder, _)| root.join(folder).is_dir())
+    }
+
+    /// The T3 provider root contains one bounded, immediate profile level before each
+    /// `antigravity-acp/conversations` folder. No profile or folder symlinks are followed.
+    pub fn has_t3_conversation_folder(root: &Path) -> bool {
+        !t3_conversation_folders(root).is_empty()
+    }
+
+    /// Changes the optional T3 root and schedules an immediate bounded discovery.
+    pub fn set_t3_profiles_root(&mut self, root: Option<PathBuf>) {
+        if self.t3_profiles_root != root {
+            self.t3_profiles_root = root;
+            self.needs_discovery = true;
+        }
     }
 
     pub fn poll(&mut self, now: DateTime<Utc>) -> io::Result<Vec<TurnMetric>> {
@@ -165,13 +194,20 @@ impl AntigravityMonitor {
             if snapshot.is_subagent {
                 continue;
             }
-            for turn in finished_turns(&conversation.id, conversation.surface, &snapshot) {
+            for turn in finished_turns_for_client(
+                &conversation.id,
+                conversation.surface,
+                conversation.client,
+                &snapshot,
+            ) {
                 if !conversation.emitted.contains(&turn.execution_id) {
                     conversation.emitted.insert(turn.execution_id);
                     records.push(turn.metric);
                 }
             }
-            for call in live_calls(&conversation.id, &snapshot, started_at) {
+            for call in
+                live_calls_for_client(&conversation.id, conversation.client, &snapshot, started_at)
+            {
                 if !conversation.published.contains(&call.step_index) {
                     conversation.published.insert(call.step_index);
                     self.live_responses.push(call.response);
@@ -194,21 +230,29 @@ impl AntigravityMonitor {
     /// Whether any conversation folder exists now.
     pub fn root_exists(&self) -> bool {
         Self::has_conversation_folder(&self.root)
+            || self
+                .t3_profiles_root
+                .as_deref()
+                .is_some_and(Self::has_t3_conversation_folder)
     }
 
     /// The conversation folders a host watches, each under a name of its own, with whether it
     /// exists now. Only these folders are watched: the rest of `~/.gemini` (a browser profile,
     /// caches, brain files) changes constantly and holds nothing measured.
-    pub fn watch_folders(&self) -> Vec<(&'static str, PathBuf, bool)> {
-        CONVERSATION_FOLDERS
+    pub fn watch_folders(&self) -> Vec<(&'static str, PathBuf, bool, bool)> {
+        let mut folders: Vec<_> = CONVERSATION_FOLDERS
             .iter()
             .zip(WATCH_KEYS)
             .map(|((folder, _), key)| {
                 let path = self.root.join(folder);
                 let exists = path.is_dir();
-                (key, path, exists)
+                (key, path, exists, false)
             })
-            .collect()
+            .collect();
+        if let Some(root) = &self.t3_profiles_root {
+            folders.push((T3_WATCH_KEY, root.clone(), is_real_directory(root), true));
+        }
+        folders
     }
 
     /// Marks what a folder watcher reported so the next poll reads it. Only a `<id>.db` or
@@ -232,12 +276,24 @@ impl AntigravityMonitor {
                 continue;
             }
             let Some(database) = database_of_event(path) else {
+                if self
+                    .t3_profiles_root
+                    .as_deref()
+                    .is_some_and(|root| is_t3_folder_event(root, path))
+                {
+                    self.needs_discovery = true;
+                    noted = true;
+                }
                 continue;
             };
-            if !path
+            let standard_folder = path
                 .parent()
-                .is_some_and(|parent| folders.iter().any(|folder| folder == parent))
-            {
+                .is_some_and(|parent| folders.iter().any(|folder| folder == parent));
+            let t3_folder = self
+                .t3_profiles_root
+                .as_deref()
+                .is_some_and(|root| is_t3_database_event(root, path));
+            if !standard_folder && !t3_folder {
                 continue;
             }
             match self.conversations.get_mut(&database) {
@@ -290,20 +346,24 @@ impl AntigravityMonitor {
         std::mem::take(&mut self.live_responses)
     }
 
-    /// Tracks the newest databases of the three conversation folders and forgets the rest.
+    /// Tracks the newest databases of the standard and optional T3 conversation folders and
+    /// forgets the rest.
     fn discover(&mut self, now: DateTime<Utc>) {
         let cutoff = now - Duration::days(RETENTION_DAYS);
         let mut found: Vec<(DateTime<Utc>, Candidate)> = Vec::new();
         let mut visited = 0;
         for (folder, surface) in CONVERSATION_FOLDERS {
+            if visited >= MAX_DISCOVERED_PATHS {
+                break;
+            }
             let Ok(entries) = fs::read_dir(self.root.join(folder)) else {
                 continue;
             };
             for entry in entries {
-                visited += 1;
-                if visited > MAX_DISCOVERED_PATHS {
+                if visited >= MAX_DISCOVERED_PATHS {
                     break;
                 }
+                visited += 1;
                 let Ok(entry) = entry else { continue };
                 if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
                     continue;
@@ -328,9 +388,55 @@ impl AntigravityMonitor {
                         Candidate {
                             path,
                             id: id.to_owned(),
+                            client: ANTIGRAVITY_CLIENT,
                             surface,
                         },
                     ));
+                }
+            }
+        }
+        if let Some(root) = &self.t3_profiles_root {
+            for folder in t3_conversation_folders(root) {
+                if visited >= MAX_DISCOVERED_PATHS {
+                    break;
+                }
+                let Ok(entries) = fs::read_dir(&folder) else {
+                    continue;
+                };
+                for entry in entries {
+                    if visited >= MAX_DISCOVERED_PATHS {
+                        break;
+                    }
+                    visited += 1;
+                    let Ok(entry) = entry else { continue };
+                    if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let Some(id) = name
+                        .to_str()
+                        .and_then(|name| name.strip_suffix(".db"))
+                        .filter(|id| !id.is_empty() && !id.starts_with('.'))
+                    else {
+                        continue;
+                    };
+                    let path = entry.path();
+                    let Some(modified) =
+                        DatabaseSignature::of(&path).and_then(|signature| signature.modified())
+                    else {
+                        continue;
+                    };
+                    if modified >= cutoff {
+                        found.push((
+                            modified,
+                            Candidate {
+                                path,
+                                id: id.to_owned(),
+                                client: T3_CODE_CLIENT,
+                                surface: ToolSurface::Other,
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -348,6 +454,7 @@ impl AntigravityMonitor {
                 .entry(candidate.path)
                 .or_insert_with(|| Conversation {
                     id: candidate.id,
+                    client: candidate.client,
                     surface: candidate.surface,
                     read_at: None,
                     current: None,
@@ -360,6 +467,90 @@ impl AntigravityMonitor {
                 });
         }
     }
+}
+
+/// Real directories only: `Path::is_dir` follows symlinks, which discovery intentionally avoids.
+fn is_real_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+fn is_t3_profile_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The immediate profile entries are capped independently of database discovery. Profiles are
+/// accepted only when every directory in their fixed layout is a real directory.
+fn t3_conversation_folders(root: &Path) -> Vec<PathBuf> {
+    if !is_real_directory(root) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut folders = Vec::new();
+    for entry in entries.take(MAX_T3_PROFILE_ENTRIES) {
+        if folders.len() >= MAX_T3_PROFILES {
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_t3_profile_name(&name) {
+            continue;
+        }
+        let acp = entry.path().join(T3_ACP_FOLDER);
+        let conversations = acp.join(T3_CONVERSATIONS_FOLDER);
+        if is_real_directory(&acp) && is_real_directory(&conversations) {
+            folders.push(conversations);
+        }
+    }
+    folders.sort();
+    folders
+}
+
+fn t3_profile_components(root: &Path, path: &Path) -> Option<Vec<String>> {
+    let relative = path.strip_prefix(root).ok()?;
+    relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Only the profile directory and its two fixed child folders wake discovery. File churn such as
+/// settings, logs, authentication and caches is ignored.
+fn is_t3_folder_event(root: &Path, path: &Path) -> bool {
+    let Some(parts) = t3_profile_components(root, path) else {
+        return false;
+    };
+    if parts.len() == 1 {
+        return is_t3_profile_name(&parts[0]);
+    }
+    is_t3_profile_name(&parts[0])
+        && ((parts.len() == 2 && parts[1] == T3_ACP_FOLDER)
+            || (parts.len() == 3
+                && parts[1] == T3_ACP_FOLDER
+                && parts[2] == T3_CONVERSATIONS_FOLDER))
+}
+
+fn is_t3_database_event(root: &Path, path: &Path) -> bool {
+    let Some(parts) = t3_profile_components(root, path) else {
+        return false;
+    };
+    if parts.len() != 4
+        || !is_t3_profile_name(&parts[0])
+        || parts[1] != T3_ACP_FOLDER
+        || parts[2] != T3_CONVERSATIONS_FOLDER
+    {
+        return false;
+    }
+    database_of_event(path).is_some()
 }
 
 /// The database a changed path belongs to: `<id>.db` is itself and `<id>.db-wal` is its log; nothing

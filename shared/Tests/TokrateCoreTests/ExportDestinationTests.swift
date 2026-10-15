@@ -16,9 +16,10 @@ final class ExportDestinationTests: XCTestCase {
             antigravity: home.appendingPathComponent(".gemini", isDirectory: true),
             openCode: home.appendingPathComponent(".local/share/opencode", isDirectory: true),
             kimiCode: home.appendingPathComponent(".kimi-code", isDirectory: true),
-            kimiDesktop: home.appendingPathComponent("Library/Application Support/kimi-desktop/home", isDirectory: true)
+            kimiDesktop: home.appendingPathComponent("Library/Application Support/kimi-desktop/home", isDirectory: true),
+            t3AntigravityProfiles: home.appendingPathComponent(".t3/userdata/providers/antigravity", isDirectory: true)
         )
-        for folder in [folders.codex, folders.claudeCode, folders.grokBuild, folders.antigravity, folders.openCode, folders.kimiCode, folders.kimiDesktop] {
+        for folder in [folders.codex, folders.claudeCode, folders.grokBuild, folders.antigravity, folders.openCode, folders.kimiCode, folders.kimiDesktop, folders.t3AntigravityProfiles!] {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("elsewhere"), withIntermediateDirectories: true)
@@ -120,7 +121,8 @@ final class ExportDestinationTests: XCTestCase {
         let expected: [(URL, String)] = [
             (folders.codex, "Codex sessions"), (folders.claudeCode, "Claude Code projects"), (folders.grokBuild, "Grok Build sessions"),
             (folders.antigravity, "Antigravity data"), (folders.openCode, "OpenCode data"),
-            (folders.kimiCode, "Kimi Code data"), (folders.kimiDesktop, "Kimi desktop data")
+            (folders.kimiCode, "Kimi Code data"), (folders.kimiDesktop, "Kimi desktop data"),
+            (folders.t3AntigravityProfiles!, "T3 Antigravity profiles")
         ]
         let homeComponents = [root.lastPathComponent, NSHomeDirectory()]
         for (folder, name) in expected {

@@ -63,6 +63,7 @@ final class HistoryStoreErrorNotificationTests: XCTestCase {
             claudeProjectsFolder: root.appendingPathComponent("claude", isDirectory: true),
             grokSessionsFolder: root.appendingPathComponent("grok", isDirectory: true),
             antigravityDataFolder: root.appendingPathComponent("gemini", isDirectory: true),
+            t3StateFolder: root.appendingPathComponent("t3-userdata"),
             openCodeDataFolder: root.appendingPathComponent("opencode", isDirectory: true),
             kimiCodeFolder: root.appendingPathComponent("kimi-code", isDirectory: true),
             kimiDesktopFolder: root.appendingPathComponent("kimi-desktop", isDirectory: true),

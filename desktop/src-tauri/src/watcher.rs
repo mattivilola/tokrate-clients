@@ -95,14 +95,21 @@ struct RootMapper {
     /// The spellings a watcher may use for the root: as configured, and fully resolved.
     spellings: Vec<PathBuf>,
     fold: bool,
+    /// Some roots carry noisy recursive trees and let their source monitor decide whether a
+    /// folder event matters. Other source layouts need any new folder to trigger a rescan.
+    rescan_on_folder_create: bool,
 }
 
 impl RootMapper {
-    fn new(root: &Path) -> Self {
-        Self::with_case_folding(root, FOLD_CASE)
+    fn new(root: &Path, rescan_on_folder_create: bool) -> Self {
+        Self::with_options(root, FOLD_CASE, rescan_on_folder_create)
     }
 
     fn with_case_folding(root: &Path, fold: bool) -> Self {
+        Self::with_options(root, fold, true)
+    }
+
+    fn with_options(root: &Path, fold: bool, rescan_on_folder_create: bool) -> Self {
         let mut spellings = vec![plain(root)];
         if let Ok(resolved) = fs::canonicalize(root) {
             let resolved = plain(&resolved);
@@ -114,6 +121,7 @@ impl RootMapper {
             configured: root.to_path_buf(),
             spellings,
             fold,
+            rescan_on_folder_create,
         }
     }
 
@@ -154,7 +162,9 @@ fn absorb(mapper: &RootMapper, change: &mut SourceChange, result: notify::Result
         match mapper.place(path) {
             Placement::Below(path) => {
                 // Files can be written into a new folder before the watcher covers it.
-                if matches!(event.kind, EventKind::Create(CreateKind::Folder)) {
+                if mapper.rescan_on_folder_create
+                    && matches!(event.kind, EventKind::Create(CreateKind::Folder))
+                {
                     change.must_rescan = true;
                 }
                 change.paths.insert(path);
@@ -235,7 +245,12 @@ struct Active {
 }
 
 impl Active {
-    fn start(root: &Path, recursive: bool, signal: Arc<PollSignal>) -> notify::Result<Self> {
+    fn start(
+        root: &Path,
+        recursive: bool,
+        rescan_on_folder_create: bool,
+        signal: Arc<PollSignal>,
+    ) -> notify::Result<Self> {
         let (sender, events) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(sender, Config::default())?;
         watcher.watch(
@@ -247,7 +262,7 @@ impl Active {
             },
         )?;
         let stale = Arc::new(AtomicBool::new(false));
-        let mapper = RootMapper::new(root);
+        let mapper = RootMapper::new(root, rescan_on_folder_create);
         let flag = stale.clone();
         thread::Builder::new()
             .name("tokrate-watch".into())
@@ -306,7 +321,12 @@ impl Watchers {
             if self.active.contains_key(source) || self.failed.contains_key(source) {
                 continue;
             }
-            match Active::start(&target.root, target.recursive, signal.clone()) {
+            match Active::start(
+                &target.root,
+                target.recursive,
+                target.source != "antigravity-t3",
+                signal.clone(),
+            ) {
                 Ok(active) => {
                     self.active.insert(source, active);
                 }
@@ -496,6 +516,22 @@ mod tests {
         // A new folder can receive files before the watcher covers it.
         let folder = event(EventKind::Create(CreateKind::Folder), &[&root.join("new")]);
         assert_eq!(rescan(Ok(folder)), (true, false));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn t3_profile_watch_forwards_folder_paths_without_rescanning_on_unrelated_directories() {
+        let root = temporary("t3-folder-policy");
+        let mapper = RootMapper::with_options(&root, false, false);
+        let path = root.join("a".repeat(64)).join("cache");
+        let mut change = SourceChange::default();
+        absorb(
+            &mapper,
+            &mut change,
+            Ok(event(EventKind::Create(CreateKind::Folder), &[&path])),
+        );
+        assert!(!change.must_rescan);
+        assert_eq!(change.paths, [path].into());
         fs::remove_dir_all(root).unwrap();
     }
 

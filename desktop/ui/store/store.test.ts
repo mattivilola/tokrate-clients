@@ -20,6 +20,7 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
     opencodeRoot: "",
     kimiRoot: "",
     kimiDesktopRoot: "",
+    t3Root: "",
   },
   consentPromptRequired: true,
   records: [],

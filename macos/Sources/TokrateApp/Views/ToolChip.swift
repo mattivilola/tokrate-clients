@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TokrateCore
 
 /// The coding-tool chip: two letters in a stroked rounded rectangle. Neutral on purpose; the
 /// maker badge next to it carries the colour.
@@ -15,19 +16,23 @@ enum ToolChip {
     @MainActor static func image(chip: String) -> NSImage {
         if let cached = images[chip] { return cached }
         let image = NSImage(size: size, flipped: false) { rect in
-            NSColor.labelColor.setStroke()
+            let t3 = chip == "T3"
+            let accent = NSColor(srgbRed: 49.0/255, green: 156.0/255, blue: 252.0/255, alpha: 1)
+            let ink = t3 ? NSColor(srgbRed: 7.0/255, green: 27.0/255, blue: 46.0/255, alpha: 1) : NSColor.labelColor
+            (t3 ? accent : NSColor.labelColor).setStroke()
             let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: cornerRadius, yRadius: cornerRadius)
             outline.lineWidth = 1
+            if t3 { accent.setFill(); outline.fill() }
             outline.stroke()
             let text = NSAttributedString(string: chip, attributes: [
                 .font: NSFont.systemFont(ofSize: 8, weight: .bold),
-                .foregroundColor: NSColor.labelColor
+                .foregroundColor: ink
             ])
             let textSize = text.size()
             text.draw(at: NSPoint(x: rect.midX - textSize.width / 2, y: rect.midY - textSize.height / 2))
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = chip != "T3"
         images[chip] = image
         return image
     }
@@ -40,7 +45,8 @@ struct ToolChipView: View {
     var body: some View {
         Text(tool.chip)
             .font(.system(size: 8, weight: .bold))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(tool.id == T3Runtime.client ? Color(red: 7/255, green: 27/255, blue: 46/255) : Color.secondary)
+            .background(tool.id == T3Runtime.client ? Color(red: 49/255, green: 156/255, blue: 252/255) : Color.clear, in: RoundedRectangle(cornerRadius: ToolChip.cornerRadius))
             .frame(width: ToolChip.size.width, height: ToolChip.size.height)
             .overlay {
                 RoundedRectangle(cornerRadius: ToolChip.cornerRadius, style: .continuous)

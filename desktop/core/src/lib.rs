@@ -25,6 +25,7 @@ mod selector;
 mod sharing;
 mod sources;
 mod sqlite_read;
+mod t3_identity;
 
 #[cfg(test)]
 mod antigravity_tests;
@@ -65,6 +66,7 @@ pub use model::{
     GROK_PARSER_VERSION, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, OPENCODE_CLIENT,
     OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION, REQUEST_OUTCOME_METRIC_VERSION,
     RESPONSE_MAX_DURATION_SECONDS, RESPONSE_METRIC_VERSION, RESPONSE_MIN_OUTPUT_TOKENS,
+    T3_CODE_CLIENT,
 };
 pub use monitor::{Monitor, SourceChange, SourceFileCheckpoint};
 pub use opencode::OpenCodeMonitor;

@@ -55,6 +55,7 @@ export const CLIENT_ORDER = [
   "antigravity",
   "opencode",
   "kimi-code",
+  "t3-code",
 ] as const;
 
 /** Everything the home flyout and the history window render, derived purely from the records. */

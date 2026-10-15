@@ -9,7 +9,7 @@ use crate::{
     signed_request, RequestOutcome, RequestOutcomeKind, SharedRequestCount, SharedSample,
     SharingQueue, SourceMonitor, TurnMetric, CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CODEX_CLIENT,
     CODEX_PARSER_VERSION, KIMI_CLIENT, KIMI_PARSER_VERSION, MAX_PENDING_REQUEST_COUNTS,
-    OPENCODE_CLIENT, OPENCODE_PARSER_VERSION,
+    OPENCODE_CLIENT, OPENCODE_PARSER_VERSION, T3_CODE_CLIENT,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
@@ -628,6 +628,39 @@ fn codex_failures_follow_the_error_enum_and_status() {
     .is_empty());
 }
 
+#[test]
+fn t3_codex_outcomes_keep_native_dedupe_identity() {
+    let mut t3_session =
+        serde_json::from_slice::<Value>(&session_meta(Some("0.159.2"), "openai")).unwrap();
+    t3_session["payload"]["originator"] = json!(" T3 Code ");
+    let t3_session = serde_json::to_vec(&t3_session).unwrap();
+    let tail = [
+        turn_context("t1", "gpt-5"),
+        task_started("t1"),
+        task_complete(
+            "t1",
+            "2026-10-09T12:00:05Z",
+            Some(
+                json!({"message": "SECRET raw provider text", "codex_error_info": "internal_server_error"}),
+            ),
+        ),
+    ];
+    let mut native_lines = vec![session_meta(Some("0.159.2"), "openai")];
+    native_lines.extend(tail.clone());
+    let mut t3_lines = vec![t3_session];
+    t3_lines.extend(tail);
+
+    let native = codex_outcomes(&native_lines);
+    let t3 = codex_outcomes(&t3_lines);
+    assert_eq!(native.len(), 1);
+    assert_eq!(t3.len(), 1);
+    assert_eq!(native[0].client, CODEX_CLIENT);
+    assert_eq!(t3[0].client, T3_CODE_CLIENT);
+    assert_eq!(native[0].dedupe_key, t3[0].dedupe_key);
+    assert_eq!(native[0].kind, t3[0].kind);
+    assert_eq!(native[0].provider, t3[0].provider);
+}
+
 /// A `token_count` event reporting the plan usage of the primary and secondary windows (a window
 /// of `None` is absent).
 fn token_count(at: &str, primary: Option<f64>, secondary: Option<f64>) -> Vec<u8> {
@@ -1192,7 +1225,7 @@ fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
     );
     assert_eq!(entry.client, "codex");
     assert_eq!(entry.client_version, "1.2.3");
-    assert_eq!(entry.app_version, "0.1.24");
+    assert_eq!(entry.app_version, "0.1.25");
     assert_eq!(entry.parser_version, "codex-rollout-v2");
     assert_eq!(entry.metric_version, "request-outcome-v1");
     assert_eq!(entry.model, "gpt-5");
@@ -1811,7 +1844,7 @@ fn a_request_with_only_counts_is_a_signed_version_2_envelope_with_both_lists() {
     assert_eq!(body["requestCounts"].as_array().unwrap().len(), 1);
     // Keys are sorted, like the samples' keys.
     let text = String::from_utf8(request.body.clone()).unwrap();
-    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.24\",\"client\":\"codex\""));
+    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.25\",\"client\":\"codex\""));
     assert!(text.contains("\"overloaded\":9999,\"parserVersion\""));
     assert!(text.contains("\"serverError\":9999,\"succeeded\":9999,\"throttled\":9999}"));
     assert!(text.ends_with("\"sentAt\":\"2026-10-09T12:05:00Z\"}"));

@@ -533,6 +533,59 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertFalse(AntigravityConversationMonitor.hasConversationFolder(root: root.appendingPathComponent("absent")))
     }
 
+    func testT3ProfilesAreAdditiveAndUseNativeDedupeIdentity() async throws {
+        let profiles = root.appendingPathComponent("t3-profiles")
+        let folder = "t3-profiles/\(String(repeating: "a", count: 64))/antigravity-acp"
+        let database = try makeDatabase(folder: folder)
+        try addRun(database, calls: standardCalls)
+        let native = try makeDatabase()
+        try addRun(native, calls: standardCalls)
+        let monitor = AntigravityConversationMonitor(root: root, t3ProfilesRoot: profiles)
+        let update = await monitor.poll()
+        XCTAssertEqual(update.metrics.count, 2)
+        XCTAssertEqual(Set(update.metrics.map(\.surface)), [.desktop, .other])
+        XCTAssertEqual(Set(update.metrics.map(\.id)).count, 1, "A store copy cannot create a second measurement identity")
+        XCTAssertEqual(Set(update.metrics.map(\.client)), ["antigravity", "t3-code"])
+        XCTAssertTrue(update.metrics.allSatisfy { SharedSample($0) != nil })
+        let repeated = await monitor.poll()
+        XCTAssertTrue(repeated.metrics.isEmpty)
+    }
+
+    func testT3NewProfileWakesDiscoveryButCredentialsDoNot() async throws {
+        let profiles = root.appendingPathComponent("t3-profiles")
+        let monitor = AntigravityConversationMonitor(root: root, t3ProfilesRoot: profiles)
+        _ = await monitor.poll()
+        let folder = "t3-profiles/\(String(repeating: "b", count: 64))/antigravity-acp"
+        let database = try makeDatabase(folder: folder)
+        try addRun(database, calls: standardCalls)
+        let ignored = await monitor.noteChanges(SessionFolderChange(paths: [database.url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("acp_token.json").path]))
+        XCTAssertFalse(ignored)
+        let relevant = await monitor.noteChanges(SessionFolderChange(paths: [database.url.path]))
+        XCTAssertTrue(relevant)
+        let update = await monitor.poll()
+        XCTAssertEqual(update.metrics.count, 1)
+        let directoryEvent = await monitor.noteChanges(SessionFolderChange(paths: [profiles.appendingPathComponent(String(repeating: "c", count: 64)).path]))
+        XCTAssertTrue(directoryEvent)
+    }
+
+    func testT3ProfileDiscoveryRejectsSymlinksAndUnexpectedFolders() async throws {
+        let profiles = root.appendingPathComponent("t3-profiles")
+        let outside = try makeDatabase(folder: "outside/antigravity-acp")
+        try addRun(outside, calls: standardCalls)
+        try FileManager.default.createDirectory(at: profiles, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: profiles.appendingPathComponent(String(repeating: "a", count: 64)),
+            withDestinationURL: root.appendingPathComponent("outside")
+        )
+        let unexpected = try makeDatabase(folder: "t3-profiles/unrelated/antigravity-acp")
+        try addRun(unexpected, calls: standardCalls)
+        let monitor = AntigravityConversationMonitor(root: root, t3ProfilesRoot: profiles)
+        let update = await monitor.poll()
+        XCTAssertTrue(update.metrics.isEmpty)
+        let status = await monitor.status()
+        XCTAssertFalse(status.rootAvailable)
+    }
+
     func testFilesOlderThanSevenDaysAreNotOpened() async throws {
         let database = try makeDatabase()
         try addRun(database, calls: standardCalls)
@@ -920,7 +973,7 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertEqual(json["reasoningEffort"] as? String, "medium")
         XCTAssertEqual(json["sourceKind"] as? String, "primary")
         XCTAssertEqual(json["delegatedOutputTokens"] as? Int, 0)
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.24")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.25")
         XCTAssertEqual(json["surface"] as? String, "desktop")
         XCTAssertTrue(SharedSample.isAllowedProvider("google", client: "antigravity"))
         XCTAssertFalse(SharedSample.isAllowedProvider("google", client: "codex"))

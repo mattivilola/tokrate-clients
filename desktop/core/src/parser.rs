@@ -1,8 +1,9 @@
 use crate::delegation::{root_session_key, DelegationEvent};
 use crate::model::{
-    push_outcomes, request_outcome_key, response_qualifies, speed_is_plausible,
-    ReportedReasoningEffort, RequestOutcome, RequestOutcomeKind, ResponseMetric, ResponseTotals,
-    ToolSurface, TurnMetric, CODEX_CLIENT, CODEX_PARSER_VERSION,
+    is_t3_codex_originator, push_outcomes, request_outcome_key, response_qualifies,
+    speed_is_plausible, ReportedReasoningEffort, RequestOutcome, RequestOutcomeKind,
+    ResponseMetric, ResponseTotals, ToolSurface, TurnMetric, CODEX_CLIENT, CODEX_PARSER_VERSION,
+    T3_CODE_CLIENT,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Number, Value};
@@ -113,6 +114,8 @@ pub(crate) struct CodexEventParser {
     root_session: Option<String>,
     delegation_events: Vec<DelegationEvent>,
     client_version: Option<String>,
+    /// The native Codex parser can report a separate T3 Code client identity.
+    client: &'static str,
     surface: Option<ToolSurface>,
     source_kind: String,
     provider: String,
@@ -140,6 +143,7 @@ impl CodexEventParser {
             root_session: None,
             delegation_events: Vec::new(),
             client_version: None,
+            client: CODEX_CLIENT,
             surface: None,
             source_kind: "unknown".to_owned(),
             provider: "unknown".to_owned(),
@@ -323,7 +327,7 @@ impl CodexEventParser {
             turn_throughput_tps: measured.throughput,
             streaming_tps: None,
             client_version: self.client_version.clone(),
-            client: crate::model::CODEX_CLIENT.to_owned(),
+            client: self.client.to_owned(),
             parser_version: crate::model::CODEX_PARSER_VERSION.to_owned(),
             metric_version: crate::model::CODEX_METRIC_VERSION.to_owned(),
             reasoning_output_tokens: state.reasoning_output_tokens,
@@ -522,7 +526,7 @@ impl CodexEventParser {
             completed_at: end,
             model: Some(model),
             provider: Some(self.provider.clone()),
-            client: crate::model::CODEX_CLIENT.to_owned(),
+            client: self.client.to_owned(),
             source_kind: Some(self.source_kind.clone()),
             metric_version: crate::model::CODEX_METRIC_VERSION.to_owned(),
             reasoning_effort,
@@ -668,7 +672,7 @@ impl CodexEventParser {
         if let Some(outcome) = RequestOutcome::new(
             dedupe_key,
             occurred_at,
-            CODEX_CLIENT,
+            self.client,
             self.client_version.clone(),
             CODEX_PARSER_VERSION,
             model.as_deref(),
@@ -690,6 +694,11 @@ impl CodexEventParser {
         // originator is kept, never the string itself.
         self.surface =
             ToolSurface::from_codex_originator(payload.get("originator").and_then(Value::as_str));
+        self.client = if is_t3_codex_originator(payload.get("originator").and_then(Value::as_str)) {
+            T3_CODE_CLIENT
+        } else {
+            CODEX_CLIENT
+        };
         self.provider = if payload.get("model_provider").and_then(Value::as_str) == Some("openai") {
             "openai".to_owned()
         } else {

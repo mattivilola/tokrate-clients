@@ -16,7 +16,7 @@ public actor CodexSessionMonitor {
     static let discoveryInterval: TimeInterval = 300
     private static let versionKey = SourceFileCheckpoint.versionKey(
         parser: TurnMetric.codexParserVersion, metric: TurnMetric.codexMetricVersion
-    )
+    ) + "|t3-v1"
 
     private struct WatchedFile {
         var live: JSONLFileReader

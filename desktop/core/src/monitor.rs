@@ -9,6 +9,7 @@ use crate::model::{
     CODEX_PARSER_VERSION, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION, RESPONSE_METRIC_VERSION,
 };
 use crate::reader::{file_identity, FileIdentity, IncrementalReader};
+use crate::t3_identity::T3ClaudeIdentityIndex;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const MAX_POLL_BYTES_PER_CALL: usize = 1_048_576;
 const LIVE_BUDGET_BYTES: usize = MAX_POLL_BYTES_PER_CALL * 3 / 4;
@@ -193,6 +195,8 @@ pub struct Monitor {
     /// Codex rollouts hold primary sessions and their spawned children together, so this
     /// monitor attributes delegated work itself. Claude's two monitors are joined by their owner.
     delegation: Option<DelegationTracker>,
+    /// Shared metadata index used only when matching native Claude transcripts to T3 Code.
+    t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -224,6 +228,19 @@ impl Monitor {
 
     pub fn new_claude(root: PathBuf) -> Self {
         Self::with_format(root, JsonlFormat::Claude, None)
+    }
+
+    pub(crate) fn new_claude_with_t3_identity(
+        root: PathBuf,
+        t3_identity: Arc<T3ClaudeIdentityIndex>,
+    ) -> Self {
+        let mut monitor = Self::with_format(root, JsonlFormat::Claude, None);
+        monitor.t3_identity = Some(t3_identity);
+        monitor
+    }
+
+    pub(crate) fn set_t3_identity_index(&mut self, t3_identity: Arc<T3ClaudeIdentityIndex>) {
+        self.t3_identity = Some(t3_identity);
     }
 
     /// Monitors only the Claude Code subagent transcripts under a projects root, with
@@ -259,6 +276,7 @@ impl Monitor {
             request_outcomes: Vec::new(),
             delegation_events: Vec::new(),
             delegation: (format == JsonlFormat::Codex).then(DelegationTracker::new),
+            t3_identity: None,
         }
     }
 
@@ -675,7 +693,11 @@ impl Monitor {
                 (KIMI_PARSER_VERSION, KIMI_METRIC_VERSION)
             }
         };
-        format!("{parser}|{metric}|{RESPONSE_METRIC_VERSION}")
+        let attribution = match self.format {
+            JsonlFormat::Codex | JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => "|t3-v1",
+            _ => "",
+        };
+        format!("{parser}|{metric}|{RESPONSE_METRIC_VERSION}{attribution}")
     }
 
     /// The checkpoint that says this newly found file was already read as it is now.
@@ -697,7 +719,7 @@ impl Monitor {
         match self.format {
             JsonlFormat::Codex => IncrementalReader::beginning(path),
             JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => {
-                IncrementalReader::beginning_claude(path)
+                IncrementalReader::beginning_claude_with_t3_identity(path, self.t3_identity.clone())
             }
             JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
                 IncrementalReader::beginning_kimi(path, self.surface)
@@ -710,7 +732,10 @@ impl Monitor {
         match self.format {
             JsonlFormat::Codex => IncrementalReader::recent_tail(path),
             JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => {
-                IncrementalReader::recent_tail_claude(path)
+                IncrementalReader::recent_tail_claude_with_t3_identity(
+                    path,
+                    self.t3_identity.clone(),
+                )
             }
             JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
                 IncrementalReader::recent_tail_kimi(path, self.surface)
@@ -723,7 +748,11 @@ impl Monitor {
         match self.format {
             JsonlFormat::Codex => IncrementalReader::resumed(path, offset),
             JsonlFormat::Claude | JsonlFormat::ClaudeSubagent => {
-                IncrementalReader::resumed_claude(path, offset)
+                IncrementalReader::resumed_claude_with_t3_identity(
+                    path,
+                    offset,
+                    self.t3_identity.clone(),
+                )
             }
             JsonlFormat::Kimi | JsonlFormat::KimiSubagent => {
                 IncrementalReader::resumed_kimi(path, offset, self.surface)

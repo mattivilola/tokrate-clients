@@ -325,6 +325,19 @@ impl Fixture {
         self.dir.path().join(".gemini")
     }
 
+    fn t3_root(&self) -> PathBuf {
+        self.dir.path().join(".t3/userdata/providers/antigravity")
+    }
+
+    fn t3_database(&self, profile: &str, id: &str) -> Database {
+        Database::create(
+            self.t3_root()
+                .join(profile)
+                .join("antigravity-acp/conversations")
+                .join(format!("{id}.db")),
+        )
+    }
+
     fn database(&self, folder: &str, id: &str) -> Database {
         Database::create(
             self.root()
@@ -340,6 +353,10 @@ impl Fixture {
 
     fn monitor(&self) -> AntigravityMonitor {
         AntigravityMonitor::new(self.root())
+    }
+
+    fn t3_monitor(&self) -> AntigravityMonitor {
+        AntigravityMonitor::with_t3_profiles_root(self.root(), Some(self.t3_root()))
     }
 }
 
@@ -1283,6 +1300,107 @@ fn only_conversation_databases_of_the_three_folders_are_read_and_pb_files_are_ig
 }
 
 #[test]
+fn t3_profiles_are_opt_in_bounded_to_direct_hash_profiles_and_report_other_surface() {
+    let fixture = Fixture::new();
+    let t0 = now() - Duration::seconds(120);
+    let profile = "a".repeat(64);
+    let db = fixture.t3_database(&profile, "t3-conversation");
+    finished_execution(&db, t0, 4);
+
+    // Ordinary monitor construction never consults the process home or an implicit T3 root.
+    assert!(poll(&mut fixture.monitor(), now()).is_empty());
+
+    // Profile names must be exactly 64 hex characters, and the layout is one profile deep.
+    for (name, id) in [
+        ("a".repeat(63), "short-profile"),
+        ("g".repeat(64), "non-hex-profile"),
+        (format!(".{}", "a".repeat(63)), "hidden-profile"),
+    ] {
+        let rejected = fixture.t3_database(&name, id);
+        finished_execution(&rejected, t0, 4);
+    }
+    let nested = fixture.t3_root().join(&profile).join("nested-profile");
+    let nested_db = Database::create(
+        nested
+            .join("antigravity-acp/conversations")
+            .join("nested-conversation.db"),
+    );
+    finished_execution(&nested_db, t0, 4);
+
+    let mut monitor = fixture.t3_monitor();
+    let turns = poll(&mut monitor, now());
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].id, turn_id("t3-conversation", EXECUTION));
+    assert_eq!(turns[0].client, "t3-code");
+    assert_eq!(turns[0].surface, Some(ToolSurface::Other));
+    assert!(monitor.root_exists());
+}
+
+#[test]
+fn t3_profile_changes_rescan_new_profiles_but_settings_and_auth_churn_are_ignored() {
+    let fixture = Fixture::new();
+    let first_profile = "1".repeat(64);
+    let first = fixture.t3_database(&first_profile, "first-conversation");
+    finished_execution(&first, now() - Duration::seconds(120), 4);
+    let mut monitor = fixture.t3_monitor();
+    let at = now();
+    assert_eq!(poll(&mut monitor, at).len(), 1);
+
+    let second_profile = "2".repeat(64);
+    let second = fixture.t3_database(&second_profile, "second-conversation");
+    finished_execution(&second, now() - Duration::seconds(90), 4);
+    assert!(poll(&mut monitor, at + Duration::minutes(1)).is_empty());
+    assert_eq!(monitor.bytes_read_last_poll(), 0);
+
+    let profile_folder = fixture.t3_root().join(&second_profile);
+    assert!(monitor.note_changes(&changed(&[&profile_folder])));
+    assert_eq!(poll(&mut monitor, at + Duration::minutes(1)).len(), 1);
+
+    let noise = fixture
+        .t3_root()
+        .join(&second_profile)
+        .join("settings.json");
+    fs::write(&noise, b"provider auth and preferences").unwrap();
+    assert!(!monitor.note_changes(&changed(&[&noise])));
+    let unrelated = fixture.t3_root().join("not-a-profile");
+    fs::create_dir_all(&unrelated).unwrap();
+    assert!(!monitor.note_changes(&changed(&[&unrelated])));
+    let wrong_location = fixture
+        .t3_root()
+        .join(&second_profile)
+        .join("antigravity-acp/cache/ignored.db");
+    assert!(!monitor.note_changes(&changed(&[&wrong_location])));
+}
+
+#[cfg(unix)]
+#[test]
+fn t3_discovery_does_not_follow_profile_or_layout_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let t0 = now() - Duration::seconds(120);
+    let outside = fixture.dir.path().join("outside");
+    let linked_profile = "3".repeat(64);
+    let external =
+        Database::create(outside.join("antigravity-acp/conversations/linked-profile.db"));
+    finished_execution(&external, t0, 4);
+    fs::create_dir_all(fixture.t3_root()).unwrap();
+    symlink(&outside, fixture.t3_root().join(&linked_profile)).unwrap();
+
+    let linked_layout = "4".repeat(64);
+    let real_profile = fixture.t3_root().join(&linked_layout);
+    fs::create_dir_all(&real_profile).unwrap();
+    let layout_target = fixture.dir.path().join("outside-layout");
+    let layout_db = Database::create(layout_target.join("conversations/linked-layout.db"));
+    finished_execution(&layout_db, t0, 4);
+    symlink(layout_target, real_profile.join("antigravity-acp")).unwrap();
+
+    let mut monitor = fixture.t3_monitor();
+    assert!(poll(&mut monitor, now()).is_empty());
+    assert!(!monitor.root_exists());
+}
+
+#[test]
 fn databases_untouched_for_more_than_seven_days_are_not_opened() {
     let fixture = Fixture::new();
     let db = fixture.primary();
@@ -1632,6 +1750,97 @@ fn the_deadline_is_now_for_deferred_reads_and_the_retry_time_for_a_failing_datab
         monitor.next_poll_deadline(later),
         Some(later + Duration::seconds(20))
     );
+}
+
+#[test]
+fn source_monitor_watches_and_routes_the_explicit_t3_root_and_custom_roots_disable_it() {
+    let fixture = Fixture::new();
+    let profile = "5".repeat(64);
+    let db = fixture.t3_database(&profile, "source-monitor-conversation");
+    finished_execution(&db, now() - Duration::seconds(120), 4);
+    let duplicate_profile = "6".repeat(64);
+    let duplicate = fixture.t3_database(&duplicate_profile, "source-monitor-conversation");
+    finished_execution(&duplicate, now() - Duration::seconds(120), 4);
+    let empty = |name: &str| {
+        let path = fixture.dir.path().join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let mut monitor = SourceMonitor::new_with_t3_profiles_root(
+        empty("codex"),
+        empty("claude"),
+        empty("grok"),
+        fixture.root(),
+        empty("opencode"),
+        empty("kimi"),
+        empty("kimi-desktop"),
+        Some(fixture.t3_root()),
+    );
+    // Identical native conversation/execution IDs in separate profiles remain one metric.
+    let turns = monitor.poll(now()).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].client, "t3-code");
+    assert_eq!(turns[0].surface, Some(ToolSurface::Other));
+    assert_eq!(monitor.root_exists("antigravity"), Some(true));
+    let t3 = monitor
+        .watch_folders("antigravity")
+        .into_iter()
+        .find(|folder| folder.name == "antigravity-t3")
+        .unwrap();
+    assert!(t3.recursive);
+    assert_eq!(t3.path, fixture.t3_root());
+
+    let auth_noise = fixture.t3_root().join(&profile).join("auth.json");
+    assert!(!monitor.note_changes(&changed(&[&auth_noise])));
+    db.step(&StepSpec::new(99, "later-execution").created(now()));
+    assert!(monitor.note_changes(&changed(&[&db.path])));
+
+    let custom = empty("custom-gemini");
+    monitor.set_root("antigravity", custom).unwrap();
+    assert!(monitor
+        .watch_folders("antigravity")
+        .iter()
+        .all(|folder| folder.name != "antigravity-t3"));
+    assert!(!monitor.root_exists("antigravity").unwrap());
+}
+
+#[test]
+fn source_monitor_watches_only_t3_state_database_changes_for_claude_attribution() {
+    let fixture = Fixture::new();
+    let make_dir = |name: &str| {
+        let path = fixture.dir.path().join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let state_root = make_dir(".t3/userdata");
+    let profiles_root = state_root.join("providers/antigravity");
+    let mut monitor = SourceMonitor::new_with_t3_roots(
+        make_dir("codex"),
+        make_dir("claude"),
+        make_dir("grok"),
+        make_dir("gemini"),
+        make_dir("opencode"),
+        make_dir("kimi"),
+        make_dir("kimi-desktop"),
+        Some(state_root.clone()),
+        Some(profiles_root),
+    );
+    assert_eq!(monitor.root("t3-code"), Some(&state_root));
+    assert_eq!(monitor.root_exists("t3-code"), Some(true));
+    let watched = monitor.watch_folders("t3-code");
+    assert_eq!(watched.len(), 1);
+    assert_eq!(watched[0].path, state_root);
+    assert!(!watched[0].recursive);
+
+    let state_db = state_root.join("statev2.sqlite");
+    fs::write(&state_db, b"private provider metadata").unwrap();
+    assert!(monitor.note_changes(&changed(&[&state_db])));
+    let state_wal = state_root.join("statev2.sqlite-wal");
+    assert!(monitor.note_changes(&changed(&[&state_wal])));
+    let noise = state_root.join("settings.json");
+    fs::write(&noise, b"private settings").unwrap();
+    assert!(!monitor.note_changes(&changed(&[&noise])));
+    assert!(!monitor.note_changes(&changed(&[&state_root.join("statev2.sqlite-shm"),])));
 }
 
 #[test]

@@ -21,6 +21,9 @@ pub const OPENCODE_METRIC_VERSION: &str = "opencode-observed-turn-v1";
 pub const KIMI_CLIENT: &str = "kimi-code";
 pub const KIMI_PARSER_VERSION: &str = "kimi-wire-v1";
 pub const KIMI_METRIC_VERSION: &str = "kimi-observed-turn-v1";
+/// T3 Code is the host identity for samples attributed to its native Codex, Claude and
+/// Antigravity logs. The underlying parser and metric contracts stay native-source versions.
+pub const T3_CODE_CLIENT: &str = "t3-code";
 
 /// Contract version of the request-outcome counts (contract "Request outcomes (0.1.22)").
 pub const REQUEST_OUTCOME_METRIC_VERSION: &str = "request-outcome-v1";
@@ -112,6 +115,18 @@ impl ToolSurface {
             _ => Self::Other,
         })
     }
+}
+
+/// T3 Code uses native Codex rollouts but writes one of these exact originator values. Keep this
+/// separate from [`ToolSurface::from_codex_originator`]: T3 remains the unclassified `.other`
+/// surface, while the dedicated client identity is used for reporting.
+pub(crate) fn is_t3_codex_originator(originator: Option<&str>) -> bool {
+    originator.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "t3 code" | "t3code_desktop"
+        )
+    })
 }
 
 /// A stored surface this version does not know (or of another type) is unknown, not an error.

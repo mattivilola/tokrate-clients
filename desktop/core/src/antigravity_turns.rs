@@ -28,9 +28,10 @@ pub(crate) struct LiveCall {
 
 /// Executions of the snapshot that are finished and measurable. An execution id that appears in
 /// more than one executor row is ambiguous and skipped.
-pub(crate) fn finished_turns(
+pub(crate) fn finished_turns_for_client(
     conversation_id: &str,
     surface: ToolSurface,
+    client: &'static str,
     snapshot: &Snapshot,
 ) -> Vec<ExecutionTurn> {
     let executors = unique_executors(snapshot);
@@ -51,6 +52,7 @@ pub(crate) fn finished_turns(
         if let Some(metric) = execution_metric(
             conversation_id,
             surface,
+            client,
             executor,
             execution_steps,
             snapshot,
@@ -67,6 +69,7 @@ pub(crate) fn finished_turns(
 fn execution_metric(
     conversation_id: &str,
     surface: ToolSurface,
+    client: &'static str,
     executor: &Executor,
     steps: &[&Step],
     snapshot: &Snapshot,
@@ -142,7 +145,7 @@ fn execution_metric(
         Some("primary".to_owned()),
         Some(provider.to_owned()),
         effort,
-        ANTIGRAVITY_CLIENT,
+        client,
         ANTIGRAVITY_PARSER_VERSION,
         ANTIGRAVITY_METRIC_VERSION,
     );
@@ -164,8 +167,9 @@ fn execution_metric(
 
 /// Model calls that completed after `since` and qualify as a response, oldest first. The caller
 /// publishes each step index once.
-pub(crate) fn live_calls(
+pub(crate) fn live_calls_for_client(
     conversation_id: &str,
+    client: &'static str,
     snapshot: &Snapshot,
     since: DateTime<Utc>,
 ) -> Vec<LiveCall> {
@@ -204,7 +208,7 @@ pub(crate) fn live_calls(
                 provider: Some(provider_of(Some(&model), &[generation]).to_owned()),
                 reasoning_effort: effort_of(variant, Some(&model)),
                 model: Some(model),
-                client: ANTIGRAVITY_CLIENT.to_owned(),
+                client: client.to_owned(),
                 source_kind: Some("primary".to_owned()),
                 metric_version: ANTIGRAVITY_METRIC_VERSION.to_owned(),
                 output_tokens: usage.output_tokens,

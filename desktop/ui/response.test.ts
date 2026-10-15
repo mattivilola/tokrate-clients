@@ -62,6 +62,8 @@ describe("response speed helpers", () => {
     expect(parseSelection("auto")).toEqual({ kind: "auto", tool: null });
     expect(parseSelection("latest")).toEqual({ kind: "auto", tool: null });
     expect(parseSelection("auto:codex")).toEqual({ kind: "auto", tool: "codex" });
+    expect(parseSelection("auto:t3-code")).toEqual({ kind: "auto", tool: "t3-code" });
+    expect(parseSelection("auto:t3-code")).toEqual({ kind: "auto", tool: "t3-code" });
     expect(parseSelection("auto:nope")).toEqual({ kind: "auto", tool: null });
     expect(parseSelection("all")).toEqual({ kind: "all" });
     expect(parseSelection(modelSelection({ model: "gpt-5", provider: "openai" }))).toEqual({ kind: "model", key: { model: "gpt-5", provider: "openai" } });
@@ -80,6 +82,10 @@ describe("response speed helpers", () => {
     expect(autoSelection("opencode")).toBe("auto:opencode");
     expect(parseSelection("auto:kimi-code")).toEqual({ kind: "auto", tool: "kimi-code" });
     expect(autoSelection("kimi-code")).toBe("auto:kimi-code");
+    expect(parseSelection("auto:t3-code")).toEqual({ kind: "auto", tool: "t3-code" });
+    expect(autoSelection("t3-code")).toBe("auto:t3-code");
+    expect(parseSelection("auto:t3-code")).toEqual({ kind: "auto", tool: "t3-code" });
+    expect(autoSelection("t3-code")).toBe("auto:t3-code");
   });
 
   it("classifies the provider badge like the native tray icon", () => {

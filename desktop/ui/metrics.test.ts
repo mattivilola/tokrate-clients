@@ -10,6 +10,8 @@ import {
   alertsForCohorts,
   measurementExplanation,
   measurementLabel,
+  toolChip,
+  toolLabel,
   signal,
   buckets,
   DAY,
@@ -38,6 +40,10 @@ describe("metric parity", () => {
     expect(s.ttft.median).toBe(0);
     expect(stats([]).median).toBeNull();
     expect(stats([1, 3, 7, 9]).median).toBe(5);
+  });
+  it("labels T3 Code as a distinct coding tool", () => {
+    expect(toolLabel("t3-code")).toBe("T3 Code");
+    expect(toolChip("t3-code")).toBe("T3");
   });
   it("does not pool models or reasoning effort", () => {
     const a = m(),

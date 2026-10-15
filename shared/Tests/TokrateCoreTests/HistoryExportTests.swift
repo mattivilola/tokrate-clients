@@ -145,6 +145,7 @@ final class HistoryExportTests: XCTestCase {
         XCTAssertEqual(plain.claudeCode.path, "/Users/example/.claude/projects")
         XCTAssertEqual(plain.grokBuild.path, "/Users/example/.grok/sessions")
         XCTAssertEqual(plain.antigravity.path, "/Users/example/.gemini")
+        XCTAssertEqual(plain.t3AntigravityProfiles?.path, "/Users/example/.t3/userdata/providers/antigravity")
         XCTAssertEqual(plain.openCode.path, "/Users/example/.local/share/opencode")
         XCTAssertEqual(plain.kimiCode.path, "/Users/example/.kimi-code")
         XCTAssertEqual(

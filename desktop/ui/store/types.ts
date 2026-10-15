@@ -1,6 +1,6 @@
 import type { LiveResponse, Metric } from "../metrics";
 
-export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode" | "kimi-code";
+export type SourceId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode" | "kimi-code" | "t3-code";
 
 export interface Settings {
   sharing: boolean;
@@ -26,6 +26,7 @@ export interface Settings {
   opencodeRoot: string;
   kimiRoot: string;
   kimiDesktopRoot: string;
+  t3Root: string;
 }
 
 /** Detected state of one coding-tool log folder (the path stays on the device). */

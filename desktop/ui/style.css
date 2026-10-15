@@ -628,6 +628,11 @@ time,
   font-weight: 700;
   line-height: 1;
 }
+.tool-chip[data-tool="t3-code"] {
+  border-color: #319CFC;
+  background: #319CFC;
+  color: #071B2E;
+}
 .chip {
   display: inline-flex;
   align-items: center;

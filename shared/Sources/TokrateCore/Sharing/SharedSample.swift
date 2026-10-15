@@ -7,7 +7,7 @@ public struct SharedSample: Encodable, Sendable {
     public let client: String
     public let clientVersion: String
     /// The release this build reports, in every upload and in the `User-Agent` of every community request.
-    public static let appVersion = "0.1.24"
+    public static let appVersion = "0.1.25"
     public let appVersion = SharedSample.appVersion
     public let parserVersion: String
     public let metricVersion: String
@@ -67,7 +67,8 @@ public struct SharedSample: Encodable, Sendable {
         let duration = metric.durationSeconds * 1_000
         if !metric.isSupportedSourceTuple { return .unsupportedSourceTuple }
         if ["claude-transcript-v1", "claude-transcript-v2"].contains(metric.parserVersion) { return .legacyClaudeParser }
-        if !isAllowedProvider(metric.provider, client: metric.client) { return .providerNotShared }
+        if metric.client == T3Runtime.client, metric.runtimeClient == "antigravity", !["google", "unknown"].contains(metric.provider ?? "unknown") { return .providerNotShared }
+        if !isAllowedProvider(metric.provider, client: metric.runtimeClient ?? "unsupported") { return .providerNotShared }
         if metric.client == "kimi-code", metric.cacheWriteInputTokens != nil { return .unreportedCacheWrite }
         if metric.client == "grok-build", let version = metric.clientVersion, version != "unknown" { return .grokClientVersion }
         if !metric.isDelegationFinal { return .delegationNotFinal }

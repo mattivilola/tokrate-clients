@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -37,9 +37,10 @@ const HISTORY_PRUNE_INTERVAL_SECONDS: i64 = 600;
 const HISTORY_RETENTION_DAYS: i64 = 7;
 /// The coding tools the app reads: recorded id, display title and the two-letter chip the tray text
 /// and the model picker use (the UI's `CODING_TOOLS`, the Mac app's `CodingTool.known`).
-const CODING_TOOLS: [(&str, &str, &str); 6] = [
+const CODING_TOOLS: [(&str, &str, &str); 7] = [
     ("codex", "Codex", "CX"),
     ("claude-code", "Claude Code", "CC"),
+    ("t3-code", "T3 Code", "T3"),
     ("grok-build", "Grok Build", "GB"),
     ("antigravity", "Antigravity", "AG"),
     ("opencode", "OpenCode", "OC"),
@@ -96,6 +97,7 @@ pub struct Settings {
     pub days: u8,
     pub root: String,
     pub claude_root: String,
+    pub t3_root: String,
     pub grok_root: String,
     pub antigravity_root: String,
     pub opencode_root: String,
@@ -106,9 +108,7 @@ pub struct Settings {
 }
 impl Default for Settings {
     fn default() -> Self {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let home = user_home_directory();
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
@@ -140,6 +140,7 @@ impl Default for Settings {
             days: 1,
             root: codex_home.join("sessions").to_string_lossy().into(),
             claude_root: claude_home.join("projects").to_string_lossy().into(),
+            t3_root: default_t3_state_root(&home).to_string_lossy().into(),
             grok_root: grok_home.join("sessions").to_string_lossy().into(),
             // Antigravity has no home override: its data folder is always `~/.gemini`.
             antigravity_root: home.join(".gemini").to_string_lossy().into(),
@@ -319,7 +320,14 @@ impl Runtime {
         let loaded_history = History::load(&dir.join("history.json"), Utc::now());
         let history_read_error = loaded_history.is_err();
         let history = loaded_history.unwrap_or_default();
-        let mut monitor = SourceMonitor::new(
+        let defaults = Settings::default();
+        let t3_state_root = PathBuf::from(&settings.t3_root);
+        let t3_profiles_root = t3_profiles_root_for_setting(
+            &settings.antigravity_root,
+            &defaults.antigravity_root,
+            &t3_state_root,
+        );
+        let mut monitor = SourceMonitor::new_with_t3_roots(
             PathBuf::from(&settings.root),
             PathBuf::from(&settings.claude_root),
             PathBuf::from(&settings.grok_root),
@@ -327,6 +335,8 @@ impl Runtime {
             PathBuf::from(&settings.opencode_root),
             PathBuf::from(&settings.kimi_root),
             PathBuf::from(&settings.kimi_desktop_root),
+            Some(t3_state_root),
+            t3_profiles_root,
         );
         // Files already read to their end by the run that saved this history are not read again.
         monitor.set_checkpoints(history.checkpoints().clone());
@@ -367,6 +377,7 @@ impl Runtime {
         settings.sharing = false;
         settings.root = dir.join("sessions").to_string_lossy().into();
         settings.claude_root = dir.join("claude-projects").to_string_lossy().into();
+        settings.t3_root = dir.join("t3-userdata").to_string_lossy().into();
         settings.grok_root = dir.join("grok-sessions").to_string_lossy().into();
         settings.antigravity_root = dir.join("gemini").to_string_lossy().into();
         settings.opencode_root = dir.join("opencode").to_string_lossy().into();
@@ -375,6 +386,7 @@ impl Runtime {
         for root in [
             &settings.root,
             &settings.claude_root,
+            &settings.t3_root,
             &settings.grok_root,
             &settings.antigravity_root,
             &settings.opencode_root,
@@ -449,6 +461,7 @@ impl Runtime {
                 &self.settings.claude_root,
                 &defaults.claude_root,
             ),
+            ("t3-code", &self.settings.t3_root, &defaults.t3_root),
             ("grok-build", &self.settings.grok_root, &defaults.grok_root),
             (
                 "antigravity",
@@ -687,6 +700,7 @@ impl Runtime {
         let root = match source {
             "codex" => defaults.root,
             "claude-code" => defaults.claude_root,
+            "t3-code" => defaults.t3_root,
             "grok-build" => defaults.grok_root,
             "antigravity" => defaults.antigravity_root,
             "opencode" => defaults.opencode_root,
@@ -696,21 +710,36 @@ impl Runtime {
         self.apply_source_root(source, PathBuf::from(root))
     }
     fn apply_source_root(&mut self, source: &str, root: PathBuf) -> Result<(), String> {
+        let defaults = Settings::default();
         let mut next = self.settings.clone();
         match source {
             "codex" => next.root = root.to_string_lossy().into(),
             "claude-code" => next.claude_root = root.to_string_lossy().into(),
+            "t3-code" => next.t3_root = root.to_string_lossy().into(),
             "grok-build" => next.grok_root = root.to_string_lossy().into(),
             "antigravity" => next.antigravity_root = root.to_string_lossy().into(),
             "opencode" => next.opencode_root = root.to_string_lossy().into(),
             "kimi-code" => next.kimi_root = root.to_string_lossy().into(),
             _ => return Err("Choose a supported source".into()),
         }
+        let t3_profiles_root = if matches!(source, "antigravity" | "t3-code") {
+            t3_profiles_root_for_setting(
+                &next.antigravity_root,
+                &defaults.antigravity_root,
+                Path::new(&next.t3_root),
+            )
+        } else {
+            None
+        };
         self.save_settings(&next)?;
         self.settings = next;
         self.monitor
             .set_root(source, root)
             .map_err(|_| "Could not start the selected monitor")?;
+        if matches!(source, "antigravity" | "t3-code") {
+            self.monitor
+                .set_antigravity_t3_profiles_root(t3_profiles_root);
+        }
         // The folder is watched and read from the new place.
         self.signal.request();
         Ok(())
@@ -967,6 +996,13 @@ impl Runtime {
     /// which the Sources settings do not list on its own.
     fn source_is_found(&self, id: &str, root: &str) -> bool {
         source_found(id, root)
+            || id == "antigravity"
+                && t3_profiles_root_for_setting(
+                    root,
+                    &Settings::default().antigravity_root,
+                    Path::new(&self.settings.t3_root),
+                )
+                .is_some_and(|profiles| AntigravityMonitor::has_t3_conversation_folder(&profiles))
             || id == "kimi-code" && std::path::Path::new(&self.settings.kimi_desktop_root).is_dir()
     }
 
@@ -975,6 +1011,7 @@ impl Runtime {
         for (id, name, root) in [
             ("codex", "Codex", &self.settings.root),
             ("claude-code", "Claude Code", &self.settings.claude_root),
+            ("t3-code", "T3 Code", &self.settings.t3_root),
             ("grok-build", "Grok Build", &self.settings.grok_root),
             (
                 "antigravity",
@@ -995,6 +1032,31 @@ impl Runtime {
         }
     }
 }
+fn user_home_directory() -> PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// T3 Code keeps Claude attribution metadata and Antigravity profiles under this root.
+fn default_t3_state_root(home: &std::path::Path) -> PathBuf {
+    home.join(".t3").join("userdata")
+}
+
+/// Antigravity's T3 provider profiles are separate from the user's selected `~/.gemini` folder.
+fn default_t3_profiles_root(state_root: &std::path::Path) -> PathBuf {
+    state_root.join("providers").join("antigravity")
+}
+
+fn t3_profiles_root_for_setting(
+    selected_antigravity_root: &str,
+    default_antigravity_root: &str,
+    state_root: &std::path::Path,
+) -> Option<PathBuf> {
+    (selected_antigravity_root == default_antigravity_root)
+        .then(|| default_t3_profiles_root(state_root))
+}
+
 /// OpenCode's data folder: `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode`, on every
 /// platform (Windows included), as OpenCode resolves it itself.
 fn opencode_data_dir(xdg_data_home: Option<std::ffi::OsString>, home: &std::path::Path) -> PathBuf {
@@ -1438,6 +1500,50 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         p
     }
+
+    #[test]
+    fn t3_profile_discovery_is_added_only_for_the_default_antigravity_folder() {
+        let home = PathBuf::from("/fixture/home");
+        let state_root = default_t3_state_root(&home);
+        assert_eq!(default_t3_state_root(&home), home.join(".t3/userdata"));
+        assert_eq!(
+            t3_profiles_root_for_setting(
+                "/fixture/home/.gemini",
+                "/fixture/home/.gemini",
+                &state_root
+            ),
+            Some(state_root.join("providers/antigravity"))
+        );
+        assert_eq!(
+            t3_profiles_root_for_setting("/selected/gemini", "/fixture/home/.gemini", &state_root),
+            None
+        );
+    }
+
+    #[test]
+    fn t3_root_is_a_first_class_source_setting_and_status() {
+        let dir = temporary();
+        let runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        let expected = dir.join("t3-userdata");
+        assert_eq!(runtime.settings.t3_root, expected.to_string_lossy());
+
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        assert_eq!(
+            snapshot["settings"]["t3Root"],
+            expected.to_string_lossy().as_ref()
+        );
+        let source = snapshot["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["id"] == "t3-code")
+            .unwrap();
+        assert_eq!(source["root"], expected.to_string_lossy().as_ref());
+        assert_eq!(source["found"], true);
+        assert_eq!(source["isDefault"], false);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// What the sharing client puts on the wire: a local plain-HTTP server records the header
     /// lines of one GET and one POST (the https-only rule is lifted for the test only).
     #[tokio::test]
@@ -1745,7 +1851,7 @@ mod tests {
         assert!(!codex.is_default);
         assert!(codex.found);
         assert_eq!(codex.root, custom.to_string_lossy());
-        assert_eq!(sources.len(), 6);
+        assert_eq!(sources.len(), 7);
         runtime.reset_source_root("codex").unwrap();
         let sources = runtime.snapshot(None).sources;
         let codex = sources.iter().find(|s| s.id == "codex").unwrap();
@@ -3107,39 +3213,41 @@ mod tests {
             [
                 "codex",
                 "claude-code",
+                "t3-code",
                 "grok-build",
                 "antigravity",
                 "antigravity-ide",
                 "antigravity-cli",
                 "opencode",
                 "kimi-code",
-                "kimi-desktop"
+                "kimi-desktop",
             ]
         );
         // The smoke roots exist, but not Antigravity's conversation folders below its root.
         let exists: Vec<_> = targets.iter().map(|target| target.exists).collect();
         assert_eq!(
             exists,
-            [true, true, true, false, false, false, true, true, true]
+            [true, true, true, true, false, false, false, true, true, true]
         );
         // Antigravity's folders and OpenCode's data folder are watched shallowly.
         let recursive: Vec<_> = targets.iter().map(|target| target.recursive).collect();
         assert_eq!(
             recursive,
-            [true, true, true, false, false, false, false, true, true]
+            [true, true, false, true, false, false, false, false, true, true]
         );
+        assert_eq!(targets[2].root, PathBuf::from(&runtime.settings.t3_root));
         assert_eq!(
-            targets[3].root,
+            targets[4].root,
             PathBuf::from(&runtime.settings.antigravity_root).join("antigravity/conversations")
         );
         assert_eq!(
-            targets[6].root,
+            targets[7].root,
             PathBuf::from(&runtime.settings.opencode_root)
         );
         // Kimi Code's two homes are watched whole, each under its own name.
-        assert_eq!(targets[7].root, PathBuf::from(&runtime.settings.kimi_root));
+        assert_eq!(targets[8].root, PathBuf::from(&runtime.settings.kimi_root));
         assert_eq!(
-            targets[8].root,
+            targets[9].root,
             PathBuf::from(&runtime.settings.kimi_desktop_root)
         );
         let custom = dir.join("custom-codex");

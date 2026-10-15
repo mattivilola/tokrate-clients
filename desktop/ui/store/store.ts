@@ -43,6 +43,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     opencodeRoot: "",
     kimiRoot: "",
     kimiDesktopRoot: "",
+    t3Root: "",
   },
   consentPromptRequired: false,
   records: [],

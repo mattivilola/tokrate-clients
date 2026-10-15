@@ -3,14 +3,16 @@ use crate::model::{
     bedrock_region_or_unknown, push_outcomes, request_outcome_key, response_qualifies,
     speed_is_plausible, ReportedReasoningEffort, RequestOutcome, RequestOutcomeKind,
     ResponseMetric, ResponseTotals, ToolSurface, TurnMetric, CLAUDE_CLIENT, CLAUDE_METRIC_VERSION,
-    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION,
+    CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, T3_CODE_CLIENT,
 };
 use crate::parser::JsonlEventParser;
+use crate::t3_identity::T3ClaudeIdentityIndex;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::Arc;
 
 const MAX_TRACKED_MESSAGES: usize = 4_096;
 const MAX_EMITTED_TURNS: usize = 8_192;
@@ -136,6 +138,7 @@ struct TurnState {
     private_identity: String,
     session_identity: Option<String>,
     agent_identity: Option<String>,
+    surface: Option<ToolSurface>,
     last_activity: Option<DateTime<Utc>>,
     invalid: bool,
     ambiguous: bool,
@@ -158,8 +161,6 @@ struct TurnState {
     responses: ResponseTotals,
     /// Id of the delegated work item reported as started for this subagent turn.
     work_id: Option<String>,
-    /// Category of the first usable `entrypoint`: the prompt record's, else an assistant record's.
-    surface: Option<ToolSurface>,
 }
 
 /// The API response (one unique `message.id`) whose records are currently being read.
@@ -176,6 +177,7 @@ struct OpenResponse {
     effort: Option<String>,
     session_identity: Option<String>,
     agent_identity: Option<String>,
+    surface: Option<ToolSurface>,
     /// The turn that was active when the response began; only that turn counts it.
     turn_serial: Option<u64>,
     /// The latest record holds the message's final content block and its stop reason.
@@ -236,6 +238,7 @@ pub(crate) struct ClaudeTranscriptParser {
     /// Model and provider evidence of the most recent real (non-synthetic) response of this file,
     /// which a synthetic API-error record is attributed to: it names no model of its own.
     last_real_response: Option<(Option<String>, Option<&'static str>)>,
+    t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
 }
 
 impl ClaudeTranscriptParser {
@@ -257,16 +260,33 @@ impl ClaudeTranscriptParser {
     }
 
     /// Chooses subagent or primary measurement from the transcript's location.
+    #[cfg(test)]
     pub fn for_path(path: &Path) -> Self {
+        Self::for_path_with_t3_identity(path, None)
+    }
+
+    pub(crate) fn for_path_with_t3_identity(
+        path: &Path,
+        t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
+    ) -> Self {
         let scope = if is_subagent_transcript_path(path) {
             RecordScope::Subagent
         } else {
             RecordScope::Primary
         };
-        Self::with_scope(String::new(), scope)
+        Self::with_scope_and_t3_identity(String::new(), scope, t3_identity)
     }
 
+    #[cfg(test)]
     fn with_scope(source_identity: String, scope: RecordScope) -> Self {
+        Self::with_scope_and_t3_identity(source_identity, scope, None)
+    }
+
+    fn with_scope_and_t3_identity(
+        source_identity: String,
+        scope: RecordScope,
+        t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
+    ) -> Self {
         Self {
             scope,
             synchronized: true,
@@ -287,7 +307,22 @@ impl ClaudeTranscriptParser {
             delegation_events: Vec::new(),
             outcomes: Vec::new(),
             last_real_response: None,
+            t3_identity,
         }
+    }
+
+    fn client_for_activity(
+        &self,
+        session: Option<&str>,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        surface: Option<ToolSurface>,
+    ) -> &'static str {
+        self.t3_identity
+            .as_ref()
+            .is_some_and(|index| index.is_t3_activity(session, start, end, surface, Utc::now()))
+            .then_some(T3_CODE_CLIENT)
+            .unwrap_or(CLAUDE_CLIENT)
     }
 
     fn consume_value(&mut self, root: &Value) -> Option<TurnMetric> {
@@ -703,6 +738,7 @@ impl ClaudeTranscriptParser {
                     .and_then(Value::as_str)
                     .filter(|value| safe_identifier(value, MAX_IDENTIFIER_BYTES))
                     .map(str::to_owned),
+                surface: entrypoint_surface(root),
             });
         }
         let Some(open) = self.open_response.as_mut() else {
@@ -789,7 +825,14 @@ impl ClaudeTranscriptParser {
             completed_at: end,
             model: open.model,
             provider: Some(open.provider.unwrap_or("unknown").to_owned()),
-            client: CLAUDE_CLIENT.to_owned(),
+            client: self
+                .client_for_activity(
+                    open.session_identity.as_deref(),
+                    Some(trigger),
+                    Some(end),
+                    open.surface,
+                )
+                .to_owned(),
             source_kind: Some(
                 match self.scope {
                     RecordScope::Primary => "primary",
@@ -817,6 +860,12 @@ impl ClaudeTranscriptParser {
         };
         self.push_outcome(
             request_outcome_key(&[CLAUDE_CLIENT, "response", &open.message_id]),
+            self.client_for_activity(
+                open.session_identity.as_deref(),
+                open.last_at,
+                open.last_at,
+                open.surface,
+            ),
             at,
             open.model.as_deref(),
             open.provider,
@@ -851,6 +900,12 @@ impl ClaudeTranscriptParser {
         };
         self.push_outcome(
             request_outcome_key(&[CLAUDE_CLIENT, "api-error", uuid]),
+            self.client_for_activity(
+                root.get("sessionId").and_then(Value::as_str),
+                Some(at),
+                Some(at),
+                entrypoint_surface(root),
+            ),
             at,
             model.as_deref(),
             provider,
@@ -861,6 +916,7 @@ impl ClaudeTranscriptParser {
     fn push_outcome(
         &mut self,
         dedupe_key: String,
+        client: &'static str,
         occurred_at: DateTime<Utc>,
         model: Option<&str>,
         provider: Option<&str>,
@@ -869,7 +925,7 @@ impl ClaudeTranscriptParser {
         if let Some(outcome) = RequestOutcome::new(
             dedupe_key,
             occurred_at,
-            CLAUDE_CLIENT,
+            client,
             self.client_version.clone(),
             CLAUDE_PARSER_VERSION,
             model,
@@ -1024,6 +1080,12 @@ impl ClaudeTranscriptParser {
         }
         let (input_tokens, cache_read_input_tokens, cache_write_input_tokens) =
             prompt_cache_totals(&turn.messages);
+        let client = self.client_for_activity(
+            turn.session_identity.as_deref(),
+            Some(started_at),
+            Some(completed_at),
+            turn.surface,
+        );
         let mut metric = TurnMetric {
             id,
             completed_at,
@@ -1042,7 +1104,7 @@ impl ClaudeTranscriptParser {
             } else {
                 self.client_version.clone()
             },
-            client: CLAUDE_CLIENT.to_owned(),
+            client: client.to_owned(),
             parser_version: CLAUDE_PARSER_VERSION.to_owned(),
             metric_version: match self.scope {
                 RecordScope::Primary => CLAUDE_METRIC_VERSION,
@@ -1101,7 +1163,8 @@ impl JsonlEventParser for ClaudeTranscriptParser {
         // Work this parser started will never be finished by it: settle it as discarded.
         self.drop_turn();
         let events = std::mem::take(&mut self.delegation_events);
-        *self = Self::with_scope(source_identity, self.scope);
+        *self =
+            Self::with_scope_and_t3_identity(source_identity, self.scope, self.t3_identity.clone());
         self.delegation_events = events;
     }
 

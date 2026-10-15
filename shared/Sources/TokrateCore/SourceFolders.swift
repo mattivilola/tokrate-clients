@@ -15,8 +15,11 @@ public struct SourceFolders: Sendable, Equatable {
     public let kimiCode: URL
     /// The Kimi desktop app's embedded Kimi Code home, which holds `sessions/`.
     public let kimiDesktop: URL
+    /// T3 Code's isolated Antigravity profiles; absent for explicitly constructed source sets.
+    public let t3AntigravityProfiles: URL?
+    public let t3State: URL?
 
-    public init(codex: URL, claudeCode: URL, grokBuild: URL, antigravity: URL, openCode: URL, kimiCode: URL, kimiDesktop: URL) {
+    public init(codex: URL, claudeCode: URL, grokBuild: URL, antigravity: URL, openCode: URL, kimiCode: URL, kimiDesktop: URL, t3AntigravityProfiles: URL? = nil, t3State: URL? = nil) {
         self.codex = codex
         self.claudeCode = claudeCode
         self.grokBuild = grokBuild
@@ -24,6 +27,8 @@ public struct SourceFolders: Sendable, Equatable {
         self.openCode = openCode
         self.kimiCode = kimiCode
         self.kimiDesktop = kimiDesktop
+        self.t3AntigravityProfiles = t3AntigravityProfiles
+        self.t3State = t3State
     }
 
     public static func defaults(
@@ -44,7 +49,9 @@ public struct SourceFolders: Sendable, Equatable {
             // Electron's userData folder on macOS.
             kimiDesktop: home.appendingPathComponent(
                 "Library/Application Support/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home", isDirectory: true
-            )
+            ),
+            t3AntigravityProfiles: home.appendingPathComponent(".t3/userdata/providers/antigravity", isDirectory: true),
+            t3State: home.appendingPathComponent(".t3/userdata", isDirectory: true)
         )
     }
 

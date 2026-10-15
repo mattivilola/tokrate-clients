@@ -1,5 +1,6 @@
 use crate::delegation::DelegationTracker;
 use crate::monitor::{SourceChange, SourceFileCheckpoint, MAX_FILES};
+use crate::t3_identity::T3ClaudeIdentityIndex;
 use crate::{
     AntigravityMonitor, GrokMonitor, Monitor, OpenCodeMonitor, RequestOutcome, ResponseMetric,
     ToolSurface, TurnMetric,
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Local history keeps what it needs for seven days; so do checkpoints.
 const CHECKPOINT_RETENTION_DAYS: i64 = 7;
@@ -116,10 +118,14 @@ struct DelegatedSource {
 }
 
 impl DelegatedSource {
-    fn claude(root: PathBuf) -> Self {
+    fn claude(root: PathBuf, t3_identity: Arc<T3ClaudeIdentityIndex>) -> Self {
         Self {
-            primary: Monitor::new_claude(root.clone()),
-            subagents: Monitor::new_claude_subagents(root),
+            primary: Monitor::new_claude_with_t3_identity(root.clone(), t3_identity.clone()),
+            subagents: {
+                let mut monitor = Monitor::new_claude_subagents(root);
+                monitor.set_t3_identity_index(t3_identity);
+                monitor
+            },
             delegation: DelegationTracker::new(),
         }
     }
@@ -248,6 +254,9 @@ pub struct SourceMonitor {
     opencode_root: PathBuf,
     kimi_cli_root: PathBuf,
     kimi_desktop_root: PathBuf,
+    antigravity_t3_profiles_root: Option<PathBuf>,
+    t3_root: Option<PathBuf>,
+    t3_identity: Arc<T3ClaudeIdentityIndex>,
     codex: Monitor,
     claude: DelegatedSource,
     kimi_cli: DelegatedSource,
@@ -271,13 +280,68 @@ impl SourceMonitor {
         kimi_cli_root: PathBuf,
         kimi_desktop_root: PathBuf,
     ) -> Self {
+        Self::new_with_t3_profiles_root(
+            codex_root,
+            claude_root,
+            grok_root,
+            antigravity_root,
+            opencode_root,
+            kimi_cli_root,
+            kimi_desktop_root,
+            None,
+        )
+    }
+
+    /// Creates a source monitor with an explicitly configured T3 Code Antigravity profiles root.
+    /// Ordinary constructors stay independent of the real home directory for fixtures and replay.
+    pub fn new_with_t3_profiles_root(
+        codex_root: PathBuf,
+        claude_root: PathBuf,
+        grok_root: PathBuf,
+        antigravity_root: PathBuf,
+        opencode_root: PathBuf,
+        kimi_cli_root: PathBuf,
+        kimi_desktop_root: PathBuf,
+        antigravity_t3_profiles_root: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_t3_roots(
+            codex_root,
+            claude_root,
+            grok_root,
+            antigravity_root,
+            opencode_root,
+            kimi_cli_root,
+            kimi_desktop_root,
+            None,
+            antigravity_t3_profiles_root,
+        )
+    }
+
+    /// Creates a source monitor with explicit T3 state and (when the host permits it) Antigravity
+    /// profile roots. No constructor derives paths from the process home directory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_t3_roots(
+        codex_root: PathBuf,
+        claude_root: PathBuf,
+        grok_root: PathBuf,
+        antigravity_root: PathBuf,
+        opencode_root: PathBuf,
+        kimi_cli_root: PathBuf,
+        kimi_desktop_root: PathBuf,
+        t3_root: Option<PathBuf>,
+        antigravity_t3_profiles_root: Option<PathBuf>,
+    ) -> Self {
+        let t3_identity = Arc::new(T3ClaudeIdentityIndex::default());
         Self {
             codex: Monitor::new(codex_root.clone()),
-            claude: DelegatedSource::claude(claude_root.clone()),
+            claude: DelegatedSource::claude(claude_root.clone(), t3_identity.clone()),
             kimi_cli: DelegatedSource::kimi(kimi_cli_root.clone(), ToolSurface::Cli),
             kimi_desktop: DelegatedSource::kimi(kimi_desktop_root.clone(), ToolSurface::Desktop),
             grok: GrokMonitor::new(grok_root.clone()),
-            antigravity: AntigravityMonitor::new(antigravity_root.clone()),
+            antigravity: AntigravityMonitor::with_t3_profiles_root(
+                antigravity_root.clone(),
+                antigravity_t3_profiles_root.clone(),
+            ),
             opencode: OpenCodeMonitor::new(opencode_root.clone()),
             codex_root,
             claude_root,
@@ -286,6 +350,9 @@ impl SourceMonitor {
             opencode_root,
             kimi_cli_root,
             kimi_desktop_root,
+            antigravity_t3_profiles_root,
+            t3_root,
+            t3_identity,
             bytes_read_last_poll: 0,
             had_source_error: false,
         }
@@ -299,7 +366,16 @@ impl SourceMonitor {
             }
             "claude-code" => {
                 self.claude_root = root.clone();
-                self.claude = DelegatedSource::claude(root);
+                self.claude = DelegatedSource::claude(root, self.t3_identity.clone());
+            }
+            "t3-code" => {
+                self.t3_root = Some(root.clone());
+                self.t3_identity.invalidate();
+                if self.antigravity_t3_profiles_root.is_some() {
+                    let profiles = root.join("providers").join("antigravity");
+                    self.antigravity_t3_profiles_root = Some(profiles.clone());
+                    self.antigravity.set_t3_profiles_root(Some(profiles));
+                }
             }
             "kimi-code" => {
                 self.kimi_cli_root = root.clone();
@@ -312,6 +388,7 @@ impl SourceMonitor {
             "antigravity" => {
                 self.antigravity_root = root.clone();
                 self.antigravity = AntigravityMonitor::new(root);
+                self.antigravity_t3_profiles_root = None;
             }
             "opencode" => {
                 self.opencode_root = root.clone();
@@ -327,6 +404,12 @@ impl SourceMonitor {
         Ok(())
     }
 
+    /// Enables or disables T3 profile discovery without deriving any paths from the process home.
+    pub fn set_antigravity_t3_profiles_root(&mut self, root: Option<PathBuf>) {
+        self.antigravity_t3_profiles_root = root.clone();
+        self.antigravity.set_t3_profiles_root(root);
+    }
+
     pub fn root(&self, source: &str) -> Option<&PathBuf> {
         match source {
             "codex" => Some(&self.codex_root),
@@ -335,6 +418,7 @@ impl SourceMonitor {
             "antigravity" => Some(&self.antigravity_root),
             "opencode" => Some(&self.opencode_root),
             "kimi-code" => Some(&self.kimi_cli_root),
+            "t3-code" => self.t3_root.as_ref(),
             _ => None,
         }
     }
@@ -343,6 +427,10 @@ impl SourceMonitor {
         self.bytes_read_last_poll = 0;
         let mut records = Vec::new();
         self.had_source_error = false;
+
+        if let Some(root) = self.t3_root.as_deref() {
+            self.t3_identity.refresh(root, now);
+        }
 
         // Each monitor notices a root that is missing or has just appeared; a missing one costs a
         // stat per poll.
@@ -461,7 +549,35 @@ impl SourceMonitor {
         let kimi_desktop = within(&self.kimi_desktop_root);
         let grok = within(&self.grok_root);
         let antigravity = within(&self.antigravity_root);
+        let antigravity_t3 = self
+            .antigravity_t3_profiles_root
+            .as_deref()
+            .map(within)
+            .unwrap_or_default();
         let opencode = within(&self.opencode_root);
+        let t3_state = self.t3_root.as_deref().map(|root| SourceChange {
+            paths: change
+                .paths
+                .iter()
+                .filter(|path| {
+                    matches!(
+                        path.strip_prefix(root)
+                            .ok()
+                            .and_then(|relative| relative.file_name())
+                            .and_then(|name| name.to_str()),
+                        Some("statev2.sqlite" | "statev2.sqlite-wal")
+                    )
+                })
+                .cloned()
+                .collect(),
+            must_rescan: change.must_rescan,
+        });
+        let noted_t3_state = t3_state
+            .as_ref()
+            .is_some_and(|state| state.must_rescan || !state.paths.is_empty());
+        if noted_t3_state {
+            self.t3_identity.invalidate();
+        }
         let noted_codex = self.codex.note_changes(&codex);
         let noted_claude = self.claude.note_changes(&claude);
         let noted_kimi_cli = self.kimi_cli.note_changes(&kimi_cli);
@@ -469,13 +585,17 @@ impl SourceMonitor {
         let noted_grok = self.grok.note_changes(&grok);
         // Only a conversation database (or an Antigravity folder) and OpenCode's database count;
         // the rest of `~/.gemini` and of OpenCode's data folder changes constantly.
-        let noted_antigravity = self.antigravity.note_changes(&antigravity);
+        let mut antigravity_change = antigravity;
+        antigravity_change.paths.extend(antigravity_t3.paths);
+        antigravity_change.must_rescan |= antigravity_t3.must_rescan;
+        let noted_antigravity = self.antigravity.note_changes(&antigravity_change);
         let noted_opencode = self.opencode.note_changes(&opencode);
         noted_codex
             || noted_claude
             || noted_kimi_cli
             || noted_kimi_desktop
             || noted_grok
+            || noted_t3_state
             || noted_antigravity
             || noted_opencode
     }
@@ -504,6 +624,7 @@ impl SourceMonitor {
         match source {
             "codex" => Some(self.codex.root_exists()),
             "claude-code" => Some(self.claude.primary.root_exists()),
+            "t3-code" => Some(self.t3_root.as_deref().is_some_and(Path::is_dir)),
             "kimi-code" => Some(self.kimi_cli.primary.root_exists()),
             "grok-build" => Some(self.grok.root_exists()),
             "antigravity" => Some(self.antigravity.root_exists()),
@@ -529,16 +650,27 @@ impl SourceMonitor {
         match source {
             "codex" => whole("codex", &self.codex_root),
             "claude-code" => whole("claude-code", &self.claude_root),
+            "t3-code" => self
+                .t3_root
+                .iter()
+                .map(|root| WatchFolder {
+                    name: "t3-code",
+                    path: root.clone(),
+                    exists: root.is_dir(),
+                    recursive: false,
+                })
+                .into_iter()
+                .collect(),
             "grok-build" => whole("grok-build", &self.grok_root),
             "antigravity" => self
                 .antigravity
                 .watch_folders()
                 .into_iter()
-                .map(|(name, path, exists)| WatchFolder {
+                .map(|(name, path, exists, recursive)| WatchFolder {
                     name,
                     path,
                     exists,
-                    recursive: false,
+                    recursive,
                 })
                 .collect(),
             "opencode" => vec![WatchFolder {

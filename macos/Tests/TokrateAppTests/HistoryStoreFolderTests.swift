@@ -29,6 +29,7 @@ final class HistoryStoreFolderTests: XCTestCase {
             claudeProjectsFolder: root.appendingPathComponent("default-claude", isDirectory: true),
             grokSessionsFolder: root.appendingPathComponent("default-grok", isDirectory: true),
             antigravityDataFolder: root.appendingPathComponent("default-gemini", isDirectory: true),
+            t3StateFolder: root.appendingPathComponent("default-t3"),
             openCodeDataFolder: root.appendingPathComponent("default-opencode", isDirectory: true),
             kimiCodeFolder: root.appendingPathComponent("default-kimi-code", isDirectory: true),
             kimiDesktopFolder: root.appendingPathComponent("default-kimi-desktop", isDirectory: true),
@@ -192,6 +193,15 @@ final class HistoryStoreFolderTests: XCTestCase {
         assertReadoutMatchesPopover(store, "grok live")
     }
 
+    func testT3ProfilesAreFoundWithoutAStateDatabase() throws {
+        let profiles = root.appendingPathComponent("default-t3/providers/antigravity/" + String(repeating: "a", count: 64) + "/antigravity-acp/conversations")
+        try FileManager.default.createDirectory(at: profiles, withIntermediateDirectories: true)
+        let store = makeStore()
+        defer { store.stopMonitoring() }
+        XCTAssertEqual(store.sourceStatuses.first { $0.client == "t3-code" }?.isFound, true)
+        XCTAssertTrue(store.sourceStatus.contains("T3 Code available"))
+    }
+
     func testDefaultsApplyUntilAFolderIsChosen() {
         let store = makeStore()
         for kind in SourceFolderKind.allCases { XCTAssertFalse(store.hasCustomFolder(for: kind)) }
@@ -201,8 +211,8 @@ final class HistoryStoreFolderTests: XCTestCase {
         XCTAssertEqual(store.folder(for: .openCode).lastPathComponent, "default-opencode")
         XCTAssertEqual(store.folder(for: .kimiCode).lastPathComponent, "default-kimi-code")
         XCTAssertEqual(store.folder(for: .kimiDesktop).lastPathComponent, "default-kimi-desktop")
-        XCTAssertEqual(store.sourceStatuses.map(\.client), ["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code", "kimi-desktop"])
-        XCTAssertEqual(store.sourceStatuses.map(\.title), ["Codex", "Claude Code", "Grok Build", "Antigravity", "OpenCode", "Kimi Code", "Kimi desktop"])
+        XCTAssertEqual(store.sourceStatuses.map(\.client), ["t3-code", "codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code", "kimi-desktop"])
+        XCTAssertEqual(store.sourceStatuses.map(\.title), ["T3 Code", "Codex", "Claude Code", "Grok Build", "Antigravity", "OpenCode", "Kimi Code", "Kimi desktop"])
         XCTAssertEqual(Set(store.sourceStatuses.map(\.id)).count, store.sourceStatuses.count, "every row has its own identity")
         XCTAssertEqual(store.sourceStatuses.last?.isFound, false)
         XCTAssertEqual(SourceFolderKind.antigravity.folderNoun, "data folder")

@@ -3,11 +3,13 @@ use crate::delegation::{extend_bounded, DelegationEvent};
 use crate::kimi::KimiWireParser;
 use crate::model::{push_outcomes, RequestOutcome, ResponseMetric, ToolSurface, TurnMetric};
 use crate::parser::{CodexEventParser, JsonlEventParser};
+use crate::t3_identity::T3ClaudeIdentityIndex;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) const MAX_LINE_BYTES: usize = 1_048_576;
 const DEFAULT_TAIL_BYTES: u64 = 262_144;
@@ -118,8 +120,16 @@ impl IncrementalReader {
         )
     }
 
+    #[cfg(test)]
     pub fn beginning_claude(path: PathBuf) -> Self {
-        let parser = ClaudeTranscriptParser::for_path(&path);
+        Self::beginning_claude_with_t3_identity(path, None)
+    }
+
+    pub fn beginning_claude_with_t3_identity(
+        path: PathBuf,
+        t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
+    ) -> Self {
+        let parser = ClaudeTranscriptParser::for_path_with_t3_identity(&path, t3_identity);
         Self::new(
             path,
             Startup::Beginning,
@@ -151,8 +161,16 @@ impl IncrementalReader {
         )
     }
 
+    #[cfg(test)]
     pub fn recent_tail_claude(path: PathBuf) -> Self {
-        let parser = ClaudeTranscriptParser::for_path(&path);
+        Self::recent_tail_claude_with_t3_identity(path, None)
+    }
+
+    pub fn recent_tail_claude_with_t3_identity(
+        path: PathBuf,
+        t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
+    ) -> Self {
+        let parser = ClaudeTranscriptParser::for_path_with_t3_identity(&path, t3_identity);
         Self::new(
             path,
             Startup::Header,
@@ -180,8 +198,15 @@ impl IncrementalReader {
         Self::resume(Self::recent_tail(path), offset)
     }
 
-    pub fn resumed_claude(path: PathBuf, offset: u64) -> Self {
-        Self::resume(Self::recent_tail_claude(path), offset)
+    pub fn resumed_claude_with_t3_identity(
+        path: PathBuf,
+        offset: u64,
+        t3_identity: Option<Arc<T3ClaudeIdentityIndex>>,
+    ) -> Self {
+        Self::resume(
+            Self::recent_tail_claude_with_t3_identity(path, t3_identity),
+            offset,
+        )
     }
 
     pub fn resumed_kimi(path: PathBuf, offset: u64, surface: Option<ToolSurface>) -> Self {

@@ -1164,7 +1164,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.24");
+    assert_eq!(sample.app_version, "0.1.25");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1958,7 +1958,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::minutes(12));
     let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.24");
+    assert_eq!(first[0].app_version, "0.1.25");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2188,7 +2188,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.24-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.25-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2196,7 +2196,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.24-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.25-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2213,7 +2213,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts.len(), 3);
     assert_eq!(counts[0]["client"], "claude-code");
     assert_eq!(counts[0]["overloaded"], 3);
-    assert_eq!(counts[0]["appVersion"], "0.1.24");
+    assert_eq!(counts[0]["appVersion"], "0.1.25");
     assert_eq!(counts[0]["metricVersion"], "request-outcome-v1");
     assert_eq!(counts[1]["serverError"], 1);
     // Throttled is always sent, 0 when there is none.
@@ -2234,7 +2234,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.24");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.25");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2294,7 +2294,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][4]["inputTokens"], 36_590);
     assert_eq!(actual["samples"][4]["cacheReadInputTokens"], 30_976);
     assert_eq!(actual["samples"][4]["cacheWriteInputTokens"], Value::Null);
-    assert_eq!(actual["samples"][4]["appVersion"], "0.1.24");
+    assert_eq!(actual["samples"][4]["appVersion"], "0.1.25");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2764,7 +2764,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.24");
+    assert_eq!(crate::APP_VERSION, "0.1.25");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -6552,6 +6552,43 @@ fn codex_surface_comes_from_the_originator_never_from_the_source() {
     );
 }
 
+#[test]
+fn t3_codex_originators_change_only_the_client_identity() {
+    let native = codex_turn_with_meta(json!({
+        "id":"s",
+        "source":"cli",
+        "originator":"Codex Desktop",
+        "model_provider":"openai"
+    }));
+    for originator in ["T3 Code", " t3code_desktop ", "T3CODE_DESKTOP"] {
+        let turn = codex_turn_with_meta(json!({
+            "id":"s",
+            "source":"cli",
+            "originator":originator,
+            "model_provider":"openai"
+        }));
+        assert_eq!(turn.client, "t3-code");
+        assert_eq!(turn.surface, Some(ToolSurface::Other));
+        assert_eq!(turn.id, native.id);
+        assert_eq!(turn.parser_version, native.parser_version);
+        assert_eq!(turn.metric_version, native.metric_version);
+        let serialized = serde_json::to_string(&turn).unwrap();
+        assert!(!serialized.contains(originator));
+    }
+    for originator in ["T3 Code Pro", "t3code-desktop", "not t3code_desktop"] {
+        assert_eq!(
+            codex_turn_with_meta(json!({
+                "id":"s",
+                "source":"cli",
+                "originator":originator,
+                "model_provider":"openai"
+            }))
+            .client,
+            "codex"
+        );
+    }
+}
+
 fn with_entrypoint(line: Vec<u8>, entrypoint: &str) -> Vec<u8> {
     let mut record: Value = serde_json::from_slice(&line).unwrap();
     record["entrypoint"] = json!(entrypoint);
@@ -7466,7 +7503,9 @@ fn a_claude_monitor_polls_once_more_after_a_read_so_its_parser_can_close_a_waiti
     assert!(monitor.checkpoints().unwrap().is_empty());
     monitor.poll(now + Duration::seconds(31)).unwrap();
     assert_eq!(monitor.next_poll_deadline(now), None);
-    assert_eq!(monitor.checkpoints().unwrap().len(), 1);
+    let checkpoints = monitor.checkpoints().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert!(checkpoints[0].version_key.ends_with("|t3-v1"));
 }
 
 #[test]
@@ -7491,6 +7530,7 @@ fn launch_checkpoints_skip_a_fully_read_file_and_a_later_append_still_resolves_t
         assert_eq!(ids.len(), 1);
         let checkpoints = first.checkpoints().unwrap();
         assert_eq!(checkpoints.len(), 1);
+        assert!(checkpoints[0].version_key.ends_with("|t3-v1"));
 
         let mut second = Monitor::new(fixture.root.clone());
         second.set_checkpoints(checkpoints);

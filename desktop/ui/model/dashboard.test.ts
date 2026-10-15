@@ -56,6 +56,15 @@ const input = (records: Metric[], over = {}) => ({
 });
 
 describe("dashboard model", () => {
+  it("filters T3 Code separately and includes it in tool scope", () => {
+    const t3 = turn("t3", 5, 80, { client: "t3-code", parserVersion: "codex-rollout-v2", metricVersion: "turn-v1" });
+    const native = turn("native", 6, 60, { client: "codex" });
+    const d = buildDashboard(input([native, t3], { tool: "t3-code", selection: "all" }));
+    expect(d.filtered.map((m) => m.client)).toEqual(["t3-code"]);
+    expect(d.tools).toContain("t3-code");
+    expect(SOURCE_TITLES["t3-code"]).toBe("T3 Code");
+  });
+
   it("selects the latest cohort and compares the latest turn with its own 24 h median", () => {
     const records = [turn("1", 5, 60), turn("2", 60, 50), turn("3", 120, 50), turn("4", 180, 50)];
     const d = buildDashboard(input(records));
@@ -97,6 +106,7 @@ describe("dashboard model", () => {
     expect(CLIENT_ORDER).toContain("opencode");
     expect(SOURCE_TITLES.opencode).toBe("OpenCode");
     expect(CLIENT_ORDER).toContain("kimi-code");
+    expect(CLIENT_ORDER).toContain("t3-code");
     expect(SOURCE_TITLES["kimi-code"]).toBe("Kimi Code");
   });
   it("filters by the Kimi Code tool and the Moonshot AI provider", () => {
@@ -553,7 +563,7 @@ describe("sharing notice", () => {
   });
   it("states the request counts in the notice and shows one in the example", () => {
     expect(REQUEST_COUNT_NOTICE).toBe(
-      "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages.",
+      "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). From 0.1.25, T3 Code adds these counts for its Codex and Claude Code observations; its Antigravity observations do not report request outcomes. Only the counts are sent, never error messages.",
     );
     const example = JSON.parse(sentExample);
     expect(example.schemaVersion).toBe(2);

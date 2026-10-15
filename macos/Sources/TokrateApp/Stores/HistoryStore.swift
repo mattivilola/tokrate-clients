@@ -29,6 +29,7 @@ enum SourceFolderKind: String, CaseIterable, Sendable {
     case claudeCode = "claude-code"
     case grokBuild = "grok-build"
     case antigravity
+    case t3Code = "t3-code"
     case openCode = "opencode"
     case kimiCode = "kimi-code"
     /// The Kimi desktop app's embedded Kimi Code home: a second folder of the same client.
@@ -47,7 +48,7 @@ enum SourceFolderKind: String, CaseIterable, Sendable {
         case .codex: "session folder"
         case .claudeCode: "projects folder"
         case .grokBuild: "sessions folder"
-        case .antigravity, .openCode: "data folder"
+        case .antigravity, .openCode, .t3Code: "data folder"
         case .kimiCode, .kimiDesktop: "home folder"
         }
     }
@@ -153,6 +154,7 @@ final class HistoryStore {
     @ObservationIgnored private let pausedRetentionInterval: TimeInterval
     /// One watcher per existing source folder; a change wakes the polling task early.
     @ObservationIgnored private var watchers: [SourceFolderKind: SessionFolderWatcher] = [:]
+    @ObservationIgnored private let defaultT3AntigravityProfiles: URL?
     @ObservationIgnored private var waker: PollWaker?
     @ObservationIgnored private let defaultFolders: [SourceFolderKind: URL]
     @ObservationIgnored private var securityScopedFolders: [SourceFolderKind: URL] = [:]
@@ -200,6 +202,8 @@ final class HistoryStore {
         claudeProjectsFolder: URL? = nil,
         grokSessionsFolder: URL? = nil,
         antigravityDataFolder: URL? = nil,
+        t3AntigravityProfiles: URL? = nil,
+        t3StateFolder: URL? = nil,
         openCodeDataFolder: URL? = nil,
         kimiCodeFolder: URL? = nil,
         kimiDesktopFolder: URL? = nil,
@@ -221,6 +225,8 @@ final class HistoryStore {
             .appendingPathComponent("Tokrate", isDirectory: true)
         self.persistenceURL = persistenceURL ?? supportDirectory.appendingPathComponent("history-v1.json")
         let sourceDefaults = SourceFolders.defaults()
+        defaultT3AntigravityProfiles = t3AntigravityProfiles
+            ?? (antigravityDataFolder == nil ? (t3StateFolder ?? sourceDefaults.t3State)?.appendingPathComponent("providers/antigravity") : nil)
         defaultFolders = [
             .codex: codexFolder ?? sourceDefaults.codex,
             .claudeCode: claudeProjectsFolder ?? sourceDefaults.claudeCode,
@@ -228,7 +234,8 @@ final class HistoryStore {
             .antigravity: antigravityDataFolder ?? sourceDefaults.antigravity,
             .openCode: openCodeDataFolder ?? sourceDefaults.openCode,
             .kimiCode: kimiCodeFolder ?? sourceDefaults.kimiCode,
-            .kimiDesktop: kimiDesktopFolder ?? sourceDefaults.kimiDesktop
+            .kimiDesktop: kimiDesktopFolder ?? sourceDefaults.kimiDesktop,
+            .t3Code: t3StateFolder ?? sourceDefaults.t3State!
         ]
 
         let decoder = JSONDecoder()
@@ -308,10 +315,13 @@ final class HistoryStore {
         monitor = CodexSessionMonitor(root: folder(for: .codex), liveSince: launchedAt, checkpoints: checkpoints.codex)
         claudeMonitor = ClaudeSessionMonitor(
             root: folder(for: .claudeCode), liveSince: launchedAt,
-            primaryCheckpoints: checkpoints.claudePrimary, subagentCheckpoints: checkpoints.claudeSubagents
+            primaryCheckpoints: checkpoints.claudePrimary, subagentCheckpoints: checkpoints.claudeSubagents,
+            t3StateRoot: folder(for: .t3Code)
         )
         grokMonitor = GrokSessionMonitor(root: folder(for: .grokBuild))
-        antigravityMonitor = AntigravityConversationMonitor(root: folder(for: .antigravity), liveSince: launchedAt)
+        antigravityMonitor = AntigravityConversationMonitor(
+            root: folder(for: .antigravity), liveSince: launchedAt, t3ProfilesRoot: activeT3AntigravityProfiles
+        )
         openCodeMonitor = OpenCodeMonitor(root: folder(for: .openCode), liveSince: launchedAt)
         kimiCodeMonitor = KimiSessionMonitor(
             root: folder(for: .kimiCode), surface: .cli, liveSince: launchedAt,
@@ -489,6 +499,14 @@ final class HistoryStore {
             case .grokBuild:
                 guard let grokMonitor else { continue }
                 notify = { await grokMonitor.noteChanges($0) }
+            case .t3Code:
+                guard let antigravityMonitor, let claudeMonitor else { continue }
+                notify = { change in
+                    let metadata = change.mustRescan || change.paths.contains { ["statev2.sqlite", "statev2.sqlite-wal"].contains(URL(fileURLWithPath: $0).lastPathComponent) }
+                    if metadata { await claudeMonitor.refreshT3Index() }
+                    let profiles = await antigravityMonitor.noteChanges(change)
+                    return metadata || profiles
+                }
             case .antigravity:
                 guard let antigravityMonitor else { continue }
                 notify = { await antigravityMonitor.noteChanges($0) }
@@ -516,6 +534,13 @@ final class HistoryStore {
         case .kimiCode, .kimiDesktop: KimiSessionMonitor.watchedFolder(home: folder(for: kind))
         default: folder(for: kind)
         }
+    }
+
+    /// A custom source selection limits reads to that selection, as for every other tool.
+    private var activeT3AntigravityProfiles: URL? {
+        if hasCustomFolder(for: .antigravity) { return nil }
+        if hasCustomFolder(for: .t3Code) { return folder(for: .t3Code).appendingPathComponent("providers/antigravity") }
+        return defaultT3AntigravityProfiles
     }
 
     /// Writes what the next launch needs when the app quits, so the files read since the last write are
@@ -745,7 +770,9 @@ final class HistoryStore {
     ) {
         let codexFolder = folder(for: .codex), claudeFolder = folder(for: .claudeCode), grokFolder = folder(for: .grokBuild)
         let antigravityFolder = folder(for: .antigravity)
-        let antigravityOnDisk = AntigravityConversationMonitor.hasConversationFolder(root: antigravityFolder)
+        let antigravityOnDisk = AntigravityConversationMonitor.hasConversationFolder(
+            root: antigravityFolder, t3ProfilesRoot: activeT3AntigravityProfiles
+        )
         let openCodeFolder = folder(for: .openCode)
         let openCodeOnDisk = OpenCodeMonitor.hasDatabase(root: openCodeFolder)
         let kimiCodeFolder = folder(for: .kimiCode), kimiDesktopFolder = folder(for: .kimiDesktop)
@@ -763,7 +790,10 @@ final class HistoryStore {
             ?? (FileManager.default.fileExists(atPath: kimiCodeFolder.path) ? "Kimi Code available" : "Kimi Code folder not found")
         let kimiDesktopText = kimiDesktop.map { $0.rootAvailable ? "Kimi desktop \($0.files) files" : "Kimi desktop folder not found" }
             ?? (FileManager.default.fileExists(atPath: kimiDesktopFolder.path) ? "Kimi desktop available" : "Kimi desktop folder not found")
-        sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText) · \(antigravityText) · \(openCodeText) · \(kimiCodeText) · \(kimiDesktopText)"
+        let t3Folder = folder(for: .t3Code)
+        let t3Found = FileManager.default.fileExists(atPath: t3Folder.appendingPathComponent("statev2.sqlite").path)
+            || AntigravityConversationMonitor.hasT3ConversationFolder(profilesRoot: t3Folder.appendingPathComponent("providers/antigravity"))
+        sourceStatus = "\(codex) \(codexAvailable ? "available" : "folder not found") · \(claudeText) · \(grokText) · \(antigravityText) · \(openCodeText) · \(kimiCodeText) · \(kimiDesktopText) · T3 Code \(t3Found ? "available" : "folder not found")"
 
         let claudeFound = claude?.rootAvailable ?? FileManager.default.fileExists(atPath: claudeFolder.path)
         let grokFound = grok?.rootAvailable ?? FileManager.default.fileExists(atPath: grokFolder.path)
@@ -772,6 +802,8 @@ final class HistoryStore {
         let kimiCodeFound = kimiCode?.rootAvailable ?? FileManager.default.fileExists(atPath: kimiCodeFolder.path)
         let kimiDesktopFound = kimiDesktop?.rootAvailable ?? FileManager.default.fileExists(atPath: kimiDesktopFolder.path)
         sourceStatuses = [
+            SourceStatus(client: T3Runtime.client, availability: t3Found ? .found : .notFound,
+                         detail: "Codex, Claude Code & Antigravity", path: Self.displayPath(t3Folder)),
             SourceStatus(
                 client: TurnMetric.codexClient,
                 availability: codexAvailable ? .found : .notFound,

@@ -14,11 +14,7 @@ import Foundation
 public actor AntigravityConversationMonitor {
     /// The three conversation folders under the data root, relative to it, and the surface a
     /// conversation found in each one ran on (contract "Surface (0.1.18)").
-    private static let conversationSources: [(path: String, surface: ToolSurface)] = [
-        ("antigravity/conversations", .desktop),
-        ("antigravity-ide/conversations", .ide),
-        ("antigravity-cli/conversations", .cli)
-    ]
+    private static let conversationSources = AntigravityLocations.nativeSources
     public static let conversationFolderPaths = conversationSources.map(\.path)
 
     private static let maximumReadsPerPoll = 8
@@ -51,7 +47,7 @@ public actor AntigravityConversationMonitor {
         var publishedCalls = BoundedSet<Int64>(limit: AntigravityConversationMonitor.maximumRememberedItems)
     }
 
-    private let root: URL
+    private let locations: AntigravityLocations
     private let scope: MonitorScope
     private let liveSince: Date
     private var databases: [String: WatchedDatabase] = [:]
@@ -62,20 +58,24 @@ public actor AntigravityConversationMonitor {
 
     /// `liveSince` is the moment from which completed model calls count as live; earlier calls are
     /// history and never reach the live stream.
-    public init(root: URL, liveSince: Date = .now, scope: MonitorScope = .live) {
-        self.root = root
+    public init(root: URL, liveSince: Date = .now, scope: MonitorScope = .live, t3ProfilesRoot: URL? = nil) {
+        locations = AntigravityLocations(root: root, t3ProfilesRoot: t3ProfilesRoot)
         self.scope = scope
         self.liveSince = liveSince
     }
 
     /// The conversation folders of a data root.
-    public static func conversationFolders(root: URL) -> [URL] {
-        conversationFolderPaths.map { root.appendingPathComponent($0, isDirectory: true) }
+    public static func conversationFolders(root: URL, t3ProfilesRoot: URL? = nil) -> [URL] {
+        AntigravityLocations(root: root, t3ProfilesRoot: t3ProfilesRoot).sources().map(\.url)
     }
 
     /// Whether any of a data root's conversation folders exists.
-    public static func hasConversationFolder(root: URL) -> Bool {
-        conversationFolders(root: root).contains { isDirectory($0) }
+    public static func hasConversationFolder(root: URL, t3ProfilesRoot: URL? = nil) -> Bool {
+        conversationFolders(root: root, t3ProfilesRoot: t3ProfilesRoot).contains { isDirectory($0) }
+    }
+
+    public static func hasT3ConversationFolder(profilesRoot: URL) -> Bool {
+        AntigravityLocations(root: profilesRoot, t3ProfilesRoot: profilesRoot).sources().contains { $0.surface == .other }
     }
 
     public func poll(now: Date = .now) -> MonitorUpdate {
@@ -114,10 +114,10 @@ public actor AntigravityConversationMonitor {
     public func noteChanges(_ change: SessionFolderChange) -> Bool {
         var noted = change.mustRescan
         if change.mustRescan { needsDiscovery = true }
-        let folders = Set(Self.conversationFolders(root: root).map(\.standardizedFileURL.path))
+        let folders = Set(locations.sources().map { $0.url.standardizedFileURL.path })
         for path in change.paths {
             let url = URL(fileURLWithPath: path)
-            if folders.contains(path) {
+            if folders.contains(path) || locations.isT3DirectoryEvent(url) {
                 needsDiscovery = true
                 noted = true
                 continue
@@ -203,7 +203,7 @@ public actor AntigravityConversationMonitor {
                 id: digest.map { String(format: "%02x", $0) }.joined(),
                 model: generation.model,
                 provider: generation.provider,
-                client: AntigravityTurnBuilder.client,
+                client: watched.surface == .other ? T3Runtime.client : AntigravityTurnBuilder.client,
                 sourceKind: "primary",
                 metricVersion: AntigravityTurnBuilder.metricVersion,
                 reasoningEffort: builder.effort(of: call),
@@ -250,8 +250,7 @@ public actor AntigravityConversationMonitor {
     private func discoverDatabases(now: Date) {
         var available = false
         var candidates: [(url: URL, signature: DatabaseFileSignature, surface: ToolSurface)] = []
-        for (path, surface) in Self.conversationSources {
-            let folder = root.appendingPathComponent(path, isDirectory: true)
+        for (folder, surface) in locations.sources() {
             guard let urls = try? FileManager.default.contentsOfDirectory(
                 at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
             ) else { continue }

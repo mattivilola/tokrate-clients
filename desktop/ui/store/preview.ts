@@ -322,6 +322,7 @@ const DEFAULT_ROOTS: Record<SourceId, string> = {
   antigravity: "~/.gemini",
   opencode: "~/.local/share/opencode",
   "kimi-code": "~/.kimi-code",
+  "t3-code": "~/.t3/userdata",
 };
 
 function previewBoard(records: Metric[]): Board {
@@ -370,6 +371,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
     opencodeRoot: "",
     kimiRoot: "",
     kimiDesktopRoot: "",
+    t3Root: "",
   };
   const custom: Partial<Record<SourceId, string>> = {};
   const sources = (): SourceStatus[] =>
@@ -377,7 +379,7 @@ export function createPreviewBridge(params: PreviewParams): Bridge {
       id,
       root: custom[id] ?? DEFAULT_ROOTS[id],
       isDefault: custom[id] === undefined,
-      found: params.scenario === "empty" ? id === "codex" : id !== "grok-build",
+      found: params.scenario === "empty" ? id === "codex" : id !== "grok-build" && id !== "t3-code",
     }));
   let snap: Snapshot = {
     settings,

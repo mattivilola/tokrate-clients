@@ -101,6 +101,7 @@ export const CODING_TOOLS: Record<SourceId, { title: string; chip: string }> = {
   antigravity: { title: "Antigravity", chip: "AG" },
   opencode: { title: "OpenCode", chip: "OC" },
   "kimi-code": { title: "Kimi Code", chip: "KC" },
+  "t3-code": { title: "T3 Code", chip: "T3" },
 };
 const codingTool = (id: string): (typeof CODING_TOOLS)[SourceId] | undefined =>
   CODING_TOOLS[id as SourceId];

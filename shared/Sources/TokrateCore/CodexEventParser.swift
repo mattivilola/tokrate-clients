@@ -42,6 +42,7 @@ public struct CodexEventParser: Sendable {
     private var primaryRootKey: String?
     private var delegationEvents: [DelegationEvent] = []
     private var clientVersion: String?
+    private var client = TurnMetric.codexClient
     private var surface: ToolSurface?
     private var sourceKind = "unknown"
     private var provider = "unknown"
@@ -85,6 +86,7 @@ public struct CodexEventParser: Sendable {
         delegatedRootKey = nil
         primaryRootKey = nil
         clientVersion = nil
+        client = TurnMetric.codexClient
         surface = nil
         sourceKind = "unknown"
         provider = "unknown"
@@ -126,6 +128,7 @@ public struct CodexEventParser: Sendable {
         if eventType == "session_meta" {
             if let version = payload["cli_version"] as? String, version.range(of: "^[a-zA-Z0-9._+-]{1,40}$", options: .regularExpression) != nil { clientVersion = version }
             surface = ToolSurface.codex(originator: payload["originator"] as? String)
+            client = T3Runtime.isCodexOriginator(payload["originator"] as? String) ? T3Runtime.client : TurnMetric.codexClient
             provider = payload["model_provider"] as? String == "openai" ? "openai" : "unknown"
             recordsFailureCauses = Self.recordsFailureCauses(cliVersion: payload["cli_version"] as? String)
             if let source = payload["source"] as? String, ["cli", "vscode", "exec", "desktop", "app"].contains(source) { sourceKind = "primary" }
@@ -272,7 +275,7 @@ public struct CodexEventParser: Sendable {
             codexTTFTSeconds: ttft,
             turnThroughputTPS: throughput,
             streamingTPS: nil,
-            client: TurnMetric.codexClient,
+            client: client,
             clientVersion: clientVersion,
             parserVersion: TurnMetric.codexParserVersion,
             metricVersion: TurnMetric.codexMetricVersion,
@@ -351,7 +354,7 @@ public struct CodexEventParser: Sendable {
             id: SHA256.hexDigest(of: "response|\(sessionIdentity ?? sourceIdentity)|\(responseID)"),
             model: model,
             provider: provider,
-            client: TurnMetric.codexClient,
+            client: client,
             sourceKind: sourceKind,
             metricVersion: TurnMetric.codexMetricVersion,
             reasoningEffort: state.reasoningEffortWasAmbiguous ? nil : state.reasoningEffort,
@@ -375,7 +378,7 @@ public struct CodexEventParser: Sendable {
         guard let model = outcomeModel(of: state) else { return }
         append(RequestOutcome(
             dedupeKey: RequestOutcome.key(TurnMetric.codexClient, sessionIdentity ?? sourceIdentity, responseID),
-            occurredAt: completedAt, client: TurnMetric.codexClient, clientVersion: clientVersion,
+            occurredAt: completedAt, client: client, clientVersion: clientVersion,
             parserVersion: TurnMetric.codexParserVersion, model: model, provider: provider, kind: .succeeded
         ))
     }
@@ -396,7 +399,7 @@ public struct CodexEventParser: Sendable {
         guard let kind else { return }
         append(RequestOutcome(
             dedupeKey: RequestOutcome.key(TurnMetric.codexClient, sessionIdentity ?? sourceIdentity, turnID, "failure"),
-            occurredAt: completedAt, client: TurnMetric.codexClient, clientVersion: clientVersion,
+            occurredAt: completedAt, client: client, clientVersion: clientVersion,
             parserVersion: TurnMetric.codexParserVersion, model: model, provider: provider, kind: kind,
             planUsagePercent: planUsagePercent
         ))

@@ -100,7 +100,7 @@ export function ProviderBadge({
  */
 export function ToolChip({ tool }: { tool: string }) {
   return (
-    <span className="tool-chip" aria-hidden="true">
+    <span className="tool-chip" data-tool={tool} aria-hidden="true">
       {toolChip(tool)}
     </span>
   );

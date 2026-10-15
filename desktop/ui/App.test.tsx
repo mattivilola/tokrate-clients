@@ -123,6 +123,18 @@ describe("Kimi Code", () => {
   });
 });
 
+describe("T3 Code", () => {
+  it("is listed as a distinct source in settings", async () => {
+    const store = new AppStore(createPreviewBridge({ scenario: "default", view: "home" }), {});
+    await show(store);
+    await act(async () => store.openSettings());
+    const names = [...host.querySelectorAll(".source-name")].map((n) => n.textContent ?? "");
+    expect(names.some((name) => name.startsWith("T3 Code"))).toBe(true);
+    expect(host.querySelector('[aria-label="Choose T3 Code folder"]')).not.toBeNull();
+    expect(host.textContent).toContain("T3 T3 Code");
+  });
+});
+
 describe("ErrorBoundary", () => {
   function Throws(): never {
     throw new Error("boom");

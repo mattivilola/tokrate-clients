@@ -31,7 +31,7 @@ export const sameModel = (
 
 // --- selection ---------------------------------------------------------------------------------
 
-export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode" | "kimi-code";
+export type ToolId = "codex" | "claude-code" | "grok-build" | "antigravity" | "opencode" | "kimi-code" | "t3-code";
 const TOOLS: ToolId[] = [
   "codex",
   "claude-code",
@@ -39,6 +39,7 @@ const TOOLS: ToolId[] = [
   "antigravity",
   "opencode",
   "kimi-code",
+  "t3-code",
 ];
 
 /** The persisted `selection` setting; `latest` (before 0.1.14) means `auto`. */
@@ -203,7 +204,7 @@ export interface ModelSpeedRow {
   untimed: number;
 }
 
-const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code"];
+const TOOL_ORDER = ["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code", "t3-code"];
 
 /**
  * One row per model and provider across coding tools and subagent/primary work. Response speed

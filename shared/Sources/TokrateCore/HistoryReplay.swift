@@ -34,7 +34,7 @@ public enum HistoryReplay {
                 poll: { try await monitor.poll(now: $0).metrics }, deadline: { await monitor.nextPollDeadline(now: $0) }
             ))
         }
-        let claude = ClaudeSessionMonitor(root: folders.claudeCode, liveSince: neverLive, scope: scope)
+        let claude = ClaudeSessionMonitor(root: folders.claudeCode, liveSince: neverLive, scope: scope, t3StateRoot: folders.t3State)
         record("Claude Code", await drain(
             poll: { try await claude.poll(now: $0).metrics }, deadline: { await claude.nextPollDeadline(now: $0) }
         ))
@@ -42,7 +42,9 @@ public enum HistoryReplay {
         record("Grok Build", await drain(
             poll: { try await grok.poll(now: $0) }, deadline: { await grok.nextPollDeadline(now: $0) }
         ))
-        let antigravity = AntigravityConversationMonitor(root: folders.antigravity, liveSince: neverLive, scope: scope)
+        let antigravity = AntigravityConversationMonitor(
+            root: folders.antigravity, liveSince: neverLive, scope: scope, t3ProfilesRoot: folders.t3AntigravityProfiles
+        )
         record("Antigravity", await drain(
             poll: { await antigravity.poll(now: $0).metrics }, deadline: { await antigravity.nextPollDeadline(now: $0) }
         ))

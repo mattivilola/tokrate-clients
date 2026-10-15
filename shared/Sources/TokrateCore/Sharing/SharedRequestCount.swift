@@ -31,9 +31,9 @@ public struct SharedRequestCount: Encodable, Sendable {
         countId: UUID = UUID(), observedAt: Date, client: String, clientVersion: String?, parserVersion: String,
         model: String, provider: String, succeeded: Int, overloaded: Int, serverError: Int, throttled: Int
     ) {
-        guard RequestOutcome.parserVersions[client] == parserVersion,
+        guard RequestOutcome.supports(client: client, parser: parserVersion),
               model != "unknown", model.range(of: RequestOutcome.modelPattern, options: .regularExpression) != nil,
-              RequestOutcome.allowedProviders(client: client).contains(provider),
+              RequestOutcome.allowedProviders(client: client, parser: parserVersion).contains(provider),
               [succeeded, overloaded, serverError, throttled].allSatisfy({ (0...Self.maximumCount).contains($0) }),
               succeeded + overloaded + serverError + throttled >= 1,
               observedAt.timeIntervalSince1970.isFinite

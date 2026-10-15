@@ -8,7 +8,7 @@ import XCTest
 final class SourceFileCheckpointTests: XCTestCase {
     /// Whole seconds, so timestamps (millisecond precision) round-trip exactly.
     private let origin = Date(timeIntervalSince1970: Date.now.timeIntervalSince1970.rounded(.down))
-    private let codexVersion = SourceFileCheckpoint.versionKey(parser: TurnMetric.codexParserVersion, metric: TurnMetric.codexMetricVersion)
+    private let codexVersion = SourceFileCheckpoint.versionKey(parser: TurnMetric.codexParserVersion, metric: TurnMetric.codexMetricVersion) + "|t3-v1"
     private var directory: URL!
 
     override func setUpWithError() throws {

@@ -23,7 +23,7 @@ export const PROMPT_CACHE_NOTICE =
  * succeeded and those that failed on the provider's side.
  */
 export const REQUEST_COUNT_NOTICE =
-  "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). Only the counts are sent, never error messages.";
+  "From 0.1.22 sharing also counts, per model and five-minute period, how many requests succeeded and how many failed because the provider was overloaded or had a server error (Claude Code, Codex, OpenCode and Kimi Code). From 0.1.25, T3 Code adds these counts for its Codex and Claude Code observations; its Antigravity observations do not report request outcomes. Only the counts are sent, never error messages.";
 
 /** From notice version 6: the request counts also include throttled requests. */
 export const THROTTLED_NOTICE =

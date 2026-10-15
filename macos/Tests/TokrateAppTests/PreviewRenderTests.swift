@@ -321,6 +321,7 @@ final class PreviewRenderTests: XCTestCase {
             claudeProjectsFolder: claude,
             grokSessionsFolder: grok,
             antigravityDataFolder: grok.deletingLastPathComponent().appendingPathComponent("gemini", isDirectory: true),
+            t3StateFolder: grok.deletingLastPathComponent().appendingPathComponent("t3-userdata"),
             openCodeDataFolder: grok.deletingLastPathComponent().appendingPathComponent("opencode", isDirectory: true),
             kimiCodeFolder: grok.deletingLastPathComponent().appendingPathComponent("kimi-code", isDirectory: true),
             kimiDesktopFolder: grok.deletingLastPathComponent().appendingPathComponent("kimi-desktop", isDirectory: true),

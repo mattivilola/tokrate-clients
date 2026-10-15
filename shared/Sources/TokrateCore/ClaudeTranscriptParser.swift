@@ -58,6 +58,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         let agentID: String?
         /// The `version` of the response's first record, for its request outcome.
         let clientVersion: String?
+        let surface: ToolSurface?
     }
 
     private struct TurnState: Sendable {
@@ -92,6 +93,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     }
 
     private let scope: Scope
+    private let t3Sessions: T3SessionIndex?
     private var sourceIdentity: String
     private var turn: TurnState?
     private var emittedUserTurnIDs: Set<String> = []
@@ -123,9 +125,14 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
 
     init(sourceIdentity: String) { self.init(sourceIdentity: sourceIdentity, scope: .primary) }
 
-    init(sourceIdentity: String, scope: Scope) {
+    init(sourceIdentity: String, scope: Scope, t3Sessions: T3SessionIndex? = nil) {
+        self.t3Sessions = t3Sessions
         self.sourceIdentity = sourceIdentity
         self.scope = scope
+    }
+
+    private func client(session: String?, at time: Date, surface: ToolSurface?) -> String {
+        surface == .sdk && t3Sessions?.contains(session: session, at: time) == true ? T3Runtime.client : "claude-code"
     }
 
     mutating func reset(sourceIdentity: String) {
@@ -436,7 +443,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             turnID: turn?.userTurnID,
             sessionID: safeIdentifier(root["sessionId"] as? String, maximum: 120) ?? turn?.sessionID,
             agentID: scope == .subagent ? safeIdentifier(root["agentId"] as? String, maximum: 120) : nil,
-            clientVersion: validatedVersion(root["version"])
+            clientVersion: validatedVersion(root["version"]),
+            surface: ToolSurface.claude(entrypoint: root["entrypoint"] as? String) ?? turn?.surface
         )
         if let output, track.outputTokens.map({ output >= $0 }) ?? true { track.outputTokens = output }
         if let timestamp { track.endedAt = max(track.endedAt ?? timestamp, timestamp) } else { track.endedAt = nil }
@@ -477,7 +485,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             id: SHA256.hexDigest(of: "response|\(track.sessionID ?? sourceIdentity)|\(track.agentID ?? "")|\(track.id)"),
             model: track.model,
             provider: track.provider ?? "unknown",
-            client: "claude-code",
+            client: client(session: track.sessionID, at: end, surface: track.surface),
             sourceKind: scope == .subagent ? "subagent" : "primary",
             metricVersion: scope == .subagent ? Self.subagentMetricVersion : Self.primaryMetricVersion,
             reasoningEffort: track.effort,
@@ -496,7 +504,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         guard track.outputTokens != nil, let end = track.endedAt, let provider = track.provider else { return }
         append(RequestOutcome(
             dedupeKey: RequestOutcome.key("claude-code", track.sessionID ?? sourceIdentity, track.agentID ?? "", track.id),
-            occurredAt: end, client: "claude-code", clientVersion: track.clientVersion, parserVersion: Self.parserVersion,
+            occurredAt: end, client: client(session: track.sessionID, at: end, surface: track.surface), clientVersion: track.clientVersion, parserVersion: Self.parserVersion,
             model: track.model, provider: provider, kind: .succeeded
         ))
     }
@@ -516,7 +524,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
                 "claude-code", safeIdentifier(root["sessionId"] as? String, maximum: 120) ?? sourceIdentity,
                 scope == .subagent ? safeIdentifier(root["agentId"] as? String, maximum: 120) ?? "" : "", "failure", record
             ),
-            occurredAt: occurredAt, client: "claude-code", clientVersion: validatedVersion(root["version"]),
+            occurredAt: occurredAt, client: client(session: root["sessionId"] as? String, at: occurredAt, surface: ToolSurface.claude(entrypoint: root["entrypoint"] as? String)), clientVersion: validatedVersion(root["version"]),
             parserVersion: Self.parserVersion, model: evidence.model, provider: evidence.provider, kind: kind
         ))
     }
@@ -600,7 +608,7 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             codexTTFTSeconds: nil,
             turnThroughputTPS: throughput,
             streamingTPS: nil,
-            client: "claude-code",
+            client: client(session: state.sessionID, at: completedAt, surface: state.surface),
             clientVersion: state.versionIsAmbiguous ? nil : state.clientVersion,
             parserVersion: Self.parserVersion,
             metricVersion: scope == .subagent ? Self.subagentMetricVersion : Self.primaryMetricVersion,
@@ -781,7 +789,10 @@ enum ClaudeModelID {
 struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
     private var parser: ClaudeTranscriptParser
 
-    init(sourceIdentity: String) { parser = ClaudeTranscriptParser(sourceIdentity: sourceIdentity, scope: .subagent) }
+    init(sourceIdentity: String) { self.init(sourceIdentity: sourceIdentity, t3Sessions: nil) }
+    init(sourceIdentity: String, t3Sessions: T3SessionIndex?) {
+        parser = ClaudeTranscriptParser(sourceIdentity: sourceIdentity, scope: .subagent, t3Sessions: t3Sessions)
+    }
     var hasPendingWork: Bool { parser.hasPendingWork }
     mutating func consume(line: Data) -> TurnMetric? { parser.consume(line: line) }
     mutating func pollEnded(now: Date, isFinal: Bool) -> TurnMetric? { parser.pollEnded(now: now, isFinal: isFinal) }
@@ -802,6 +813,7 @@ struct ClaudeSubagentTranscriptParser: JSONLMetricParser {
 /// (see `DelegationAttributor`): a primary turn is emitted at once and re-emitted under the same id
 /// once its delegated output tokens are final.
 public actor ClaudeSessionMonitor {
+    private let t3Sessions: T3SessionIndex?
     private let primary: JSONLSourceSessionMonitor<ClaudeTranscriptParser>
     private let subagents: JSONLSourceSessionMonitor<ClaudeSubagentTranscriptParser>
     private var attributor: DelegationAttributor
@@ -813,34 +825,40 @@ public actor ClaudeSessionMonitor {
     public init(
         root: URL, liveSince: Date = .now,
         primaryCheckpoints: [SourceFileCheckpoint] = [], subagentCheckpoints: [SourceFileCheckpoint] = [],
-        scope: MonitorScope = .live
+        scope: MonitorScope = .live, t3StateRoot: URL? = nil
     ) {
+        let t3Sessions = t3StateRoot.map(T3SessionIndex.init(root:))
+        self.t3Sessions = t3Sessions
         attributor = DelegationAttributor(scope: scope)
         primary = JSONLSourceSessionMonitor(
             root: root, liveSince: liveSince,
             versionKey: SourceFileCheckpoint.versionKey(
                 parser: ClaudeTranscriptParser.parserVersion, metric: ClaudeTranscriptParser.primaryMetricVersion
-            ),
+            ) + "|t3-v1",
             checkpoints: primaryCheckpoints,
-            scope: scope
-        ) { url in
-            url.pathExtension.lowercased() == "jsonl"
-                && !url.lastPathComponent.hasPrefix("agent-")
-                && !url.pathComponents.contains("subagents")
-        }
+            scope: scope,
+            includesFile: { url in
+                url.pathExtension.lowercased() == "jsonl" && !url.lastPathComponent.hasPrefix("agent-")
+                    && !url.pathComponents.contains("subagents")
+            },
+            makeParser: { ClaudeTranscriptParser(sourceIdentity: $0, scope: .primary, t3Sessions: t3Sessions) }
+        )
         subagents = JSONLSourceSessionMonitor(
             root: root, liveSince: liveSince,
             versionKey: SourceFileCheckpoint.versionKey(
                 parser: ClaudeTranscriptParser.parserVersion, metric: ClaudeTranscriptParser.subagentMetricVersion
             ),
             checkpoints: subagentCheckpoints,
-            scope: scope
-        ) { url in
-            url.pathExtension.lowercased() == "jsonl" && Self.isSubagentTranscript(url)
-        }
+            scope: scope,
+            includesFile: { $0.pathExtension.lowercased() == "jsonl" && Self.isSubagentTranscript($0) },
+            makeParser: { ClaudeSubagentTranscriptParser(sourceIdentity: $0, t3Sessions: t3Sessions) }
+        )
     }
 
+    public func refreshT3Index() { t3Sessions?.refresh() }
+
     public func poll(now: Date = .now) async throws -> MonitorUpdate {
+        t3Sessions?.refresh(now: now)
         let primaryUpdate = try await primary.poll(now: now)
         // Discovery is the only throwing step and runs before any bytes are consumed, so a failed
         // subagent poll loses nothing and is retried on the next cycle.

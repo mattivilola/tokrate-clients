@@ -113,7 +113,7 @@ struct AntigravityTurnBuilder: Sendable {
             codexTTFTSeconds: nil,
             turnThroughputTPS: Double(outputTokens) / duration,
             streamingTPS: nil,
-            client: Self.client,
+            client: surface == .other ? T3Runtime.client : Self.client,
             clientVersion: nil,
             parserVersion: Self.parserVersion,
             metricVersion: Self.metricVersion,

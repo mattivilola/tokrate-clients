@@ -21,9 +21,13 @@ import { EfficiencyAbout, EfficiencyDetailRows, requestsOfFloor } from "./Effici
 import { Disclosure, Segmented, useAppStore } from "./primitives";
 import { TrendChart } from "./TrendChart";
 
-/** First-token time exists only for Codex; other tools stay separate and say so. */
+/** First-token time follows the observed runtime: native Codex and T3's Codex parser report it. */
 export const supportsFirstToken = (sample: Metric | undefined) =>
-  !sample || client(sample) === "codex";
+  !sample || client(sample) === "codex" || (
+    client(sample) === "t3-code" &&
+    sample.parserVersion === "codex-rollout-v2" &&
+    sample.metricVersion === "turn-v1"
+  );
 
 /**
  * Response speed pools the model's turns across tools; turn speed and first token stay on one

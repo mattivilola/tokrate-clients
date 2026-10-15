@@ -5,7 +5,7 @@ use crate::model::{
     CLAUDE_SUBAGENT_METRIC_VERSION, CODEX_CLIENT, CODEX_METRIC_VERSION, CODEX_PARSER_VERSION,
     GROK_CLIENT, GROK_METRIC_VERSION, GROK_PARSER_VERSION, KIMI_CLIENT, KIMI_METRIC_VERSION,
     KIMI_PARSER_VERSION, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
-    REQUEST_OUTCOME_METRIC_VERSION,
+    REQUEST_OUTCOME_METRIC_VERSION, T3_CODE_CLIENT,
 };
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.24";
+pub const APP_VERSION: &str = "0.1.25";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 /// The request-count entries wait in a queue of their own with the same cap.
 pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
@@ -123,6 +123,30 @@ impl SharedSample {
             (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION) => {
                 (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION, false)
             }
+            (T3_CODE_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => (
+                T3_CODE_CLIENT,
+                CODEX_PARSER_VERSION,
+                CODEX_METRIC_VERSION,
+                true,
+            ),
+            (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION) => (
+                T3_CODE_CLIENT,
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_METRIC_VERSION,
+                false,
+            ),
+            (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION) => (
+                T3_CODE_CLIENT,
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_SUBAGENT_METRIC_VERSION,
+                false,
+            ),
+            (T3_CODE_CLIENT, ANTIGRAVITY_PARSER_VERSION, ANTIGRAVITY_METRIC_VERSION) => (
+                T3_CODE_CLIENT,
+                ANTIGRAVITY_PARSER_VERSION,
+                ANTIGRAVITY_METRIC_VERSION,
+                false,
+            ),
             _ => return None,
         };
         // Kimi Code attributes Moonshot's own API or nothing, and reports no cache writes.
@@ -182,13 +206,26 @@ impl SharedSample {
             });
         let (response_output_tokens, response_duration_ms, response_count) =
             shared_response_fields(metric);
-        let provider = shared_provider(client, metric.provider.as_deref());
-        let (input_tokens, cache_read_input_tokens, cache_write_input_tokens) =
-            consistent_prompt_cache(
-                metric.input_tokens,
-                metric.cache_read_input_tokens,
-                metric.cache_write_input_tokens,
-            );
+        let provider = shared_provider(
+            client,
+            parser_version,
+            metric_version,
+            metric.provider.as_deref(),
+        );
+        let cache = consistent_prompt_cache(
+            metric.input_tokens,
+            metric.cache_read_input_tokens,
+            metric.cache_write_input_tokens,
+        );
+        let (input_tokens, cache_read_input_tokens, cache_write_input_tokens) = if client
+            == T3_CODE_CLIENT
+            && parser_version != CLAUDE_PARSER_VERSION
+            && metric.cache_write_input_tokens.is_some()
+        {
+            return None;
+        } else {
+            cache
+        };
         Some(Self {
             sample_id,
             observed_at: format_date(observed_at),
@@ -245,7 +282,34 @@ fn shared_response_fields(metric: &TurnMetric) -> (Option<i64>, Option<f64>, Opt
 /// Providers the public allowlist accepts. Bedrock and Vertex routes are attributed only for
 /// Claude Code, Google only for Antigravity and OpenCode, and Moonshot only for Kimi Code; any
 /// other value or pairing is shared as `unknown`.
-fn shared_provider(client: &str, provider: Option<&str>) -> &'static str {
+fn shared_provider(
+    client: &str,
+    parser_version: &str,
+    metric_version: &str,
+    provider: Option<&str>,
+) -> &'static str {
+    if client == T3_CODE_CLIENT {
+        return match (parser_version, metric_version, provider) {
+            (CODEX_PARSER_VERSION, CODEX_METRIC_VERSION, Some("openai")) => "openai",
+            (
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_METRIC_VERSION | CLAUDE_SUBAGENT_METRIC_VERSION,
+                Some("anthropic"),
+            ) => "anthropic",
+            (
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_METRIC_VERSION | CLAUDE_SUBAGENT_METRIC_VERSION,
+                Some("amazon-bedrock"),
+            ) => "amazon-bedrock",
+            (
+                CLAUDE_PARSER_VERSION,
+                CLAUDE_METRIC_VERSION | CLAUDE_SUBAGENT_METRIC_VERSION,
+                Some("google-vertex"),
+            ) => "google-vertex",
+            (ANTIGRAVITY_PARSER_VERSION, ANTIGRAVITY_METRIC_VERSION, Some("google")) => "google",
+            _ => "unknown",
+        };
+    }
     match (client, provider) {
         (_, Some("openai")) => "openai",
         (_, Some("anthropic")) => "anthropic",
@@ -777,6 +841,8 @@ impl CountKey {
         let (client, parser_version) = match (outcome.client, outcome.parser_version) {
             (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION) => (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION),
             (CODEX_CLIENT, CODEX_PARSER_VERSION) => (CODEX_CLIENT, CODEX_PARSER_VERSION),
+            (T3_CODE_CLIENT, CODEX_PARSER_VERSION) => (T3_CODE_CLIENT, CODEX_PARSER_VERSION),
+            (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION) => (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION),
             (OPENCODE_CLIENT, OPENCODE_PARSER_VERSION) => {
                 (OPENCODE_CLIENT, OPENCODE_PARSER_VERSION)
             }
@@ -800,7 +866,7 @@ impl CountKey {
                 .to_owned(),
             parser_version,
             model: model.to_owned(),
-            provider: request_count_provider(client, &outcome.provider)?,
+            provider: request_count_provider(client, parser_version, &outcome.provider)?,
         })
     }
 
@@ -848,7 +914,19 @@ impl CountKey {
 
 /// The providers a client's request counts may name (contract "Request outcomes (0.1.22)"). Not
 /// `unknown`, and nothing the tool merely passes through (an OpenCode gateway or local server).
-fn request_count_provider(client: &str, provider: &str) -> Option<&'static str> {
+fn request_count_provider(
+    client: &str,
+    parser_version: &str,
+    provider: &str,
+) -> Option<&'static str> {
+    if client == T3_CODE_CLIENT {
+        let allowed: &[&'static str] = match parser_version {
+            CODEX_PARSER_VERSION => &["openai"],
+            CLAUDE_PARSER_VERSION => &["anthropic", "amazon-bedrock", "google-vertex"],
+            _ => &[],
+        };
+        return allowed.iter().copied().find(|allowed| *allowed == provider);
+    }
     let allowed: &[&'static str] = match client {
         CLAUDE_CLIENT => &["anthropic", "amazon-bedrock", "google-vertex"],
         CODEX_CLIENT => &["openai"],
@@ -857,6 +935,145 @@ fn request_count_provider(client: &str, provider: &str) -> Option<&'static str> 
         _ => &[],
     };
     allowed.iter().copied().find(|allowed| *allowed == provider)
+}
+
+#[cfg(test)]
+mod t3_contract_tests {
+    use super::*;
+
+    fn t3_metric(
+        parser: &str,
+        metric_version: &str,
+        provider: Option<&str>,
+        source_kind: &str,
+    ) -> TurnMetric {
+        let mut metric = TurnMetric::new_observed(
+            "native-id-stays-local".into(),
+            DateTime::from_timestamp(1_797_057_600, 0).unwrap(),
+            Some("claude-sonnet-4-5".into()),
+            400,
+            10.0,
+            Some("2.1.0".into()),
+            None,
+            Some(source_kind.into()),
+            provider.map(str::to_owned),
+            Some("high".into()),
+            T3_CODE_CLIENT,
+            parser,
+            metric_version,
+        );
+        metric.codex_ttft_seconds = Some(0.5);
+        if parser == ANTIGRAVITY_PARSER_VERSION {
+            metric.surface = Some(ToolSurface::Other);
+        }
+        if source_kind == "primary" {
+            metric.delegated_output_tokens = Some(0);
+        }
+        metric
+    }
+
+    fn outcome(parser: &'static str, provider: &str) -> RequestOutcome {
+        RequestOutcome::new(
+            "native-outcome-dedupe-key".into(),
+            DateTime::from_timestamp(1_797_057_600, 0).unwrap(),
+            T3_CODE_CLIENT,
+            Some("2.1.0".into()),
+            parser,
+            Some("claude-sonnet-4-5"),
+            Some(provider),
+            RequestOutcomeKind::Succeeded,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn only_the_native_t3_tuple_contracts_share_and_keep_their_semantics() {
+        let codex = t3_metric(
+            CODEX_PARSER_VERSION,
+            CODEX_METRIC_VERSION,
+            Some("openai"),
+            "primary",
+        );
+        let codex_sample = SharedSample::from_metric(&codex, Uuid::new_v4()).unwrap();
+        assert_eq!(codex_sample.client, T3_CODE_CLIENT);
+        assert_eq!(codex_sample.parser_version, CODEX_PARSER_VERSION);
+        assert_eq!(codex_sample.metric_version, CODEX_METRIC_VERSION);
+        assert_eq!(codex_sample.provider, "openai");
+        assert_eq!(codex_sample.ttft_ms, Some(500.0));
+        assert_eq!(codex_sample.app_version, APP_VERSION);
+
+        let claude = t3_metric(
+            CLAUDE_PARSER_VERSION,
+            CLAUDE_METRIC_VERSION,
+            Some("amazon-bedrock"),
+            "primary",
+        );
+        let mut claude = claude;
+        claude.set_prompt_cache(Some(100), Some(30), Some(20));
+        let claude_sample = SharedSample::from_metric(&claude, Uuid::new_v4()).unwrap();
+        assert_eq!(claude_sample.provider, "amazon-bedrock");
+        assert_eq!(claude_sample.ttft_ms, None);
+        assert_eq!(claude_sample.input_tokens, Some(100));
+        assert_eq!(claude_sample.cache_read_input_tokens, Some(30));
+        assert_eq!(claude_sample.cache_write_input_tokens, Some(20));
+
+        let subagent = t3_metric(
+            CLAUDE_PARSER_VERSION,
+            CLAUDE_SUBAGENT_METRIC_VERSION,
+            Some("google-vertex"),
+            "subagent",
+        );
+        let subagent_sample = SharedSample::from_metric(&subagent, Uuid::new_v4()).unwrap();
+        assert_eq!(subagent_sample.provider, "google-vertex");
+        assert_eq!(subagent_sample.source_kind, "subagent");
+        assert_eq!(subagent_sample.delegated_output_tokens, None);
+
+        let antigravity = t3_metric(
+            ANTIGRAVITY_PARSER_VERSION,
+            ANTIGRAVITY_METRIC_VERSION,
+            Some("google"),
+            "primary",
+        );
+        let antigravity_sample = SharedSample::from_metric(&antigravity, Uuid::new_v4()).unwrap();
+        assert_eq!(antigravity_sample.provider, "google");
+        assert_eq!(antigravity_sample.surface, Some(ToolSurface::Other));
+
+        let invalid = t3_metric(
+            CODEX_PARSER_VERSION,
+            CLAUDE_METRIC_VERSION,
+            Some("openai"),
+            "primary",
+        );
+        assert!(SharedSample::from_metric(&invalid, Uuid::new_v4()).is_none());
+
+        let mut unsafe_cache = t3_metric(
+            CODEX_PARSER_VERSION,
+            CODEX_METRIC_VERSION,
+            Some("openai"),
+            "primary",
+        );
+        unsafe_cache.set_prompt_cache(Some(100), Some(20), Some(10));
+        assert!(SharedSample::from_metric(&unsafe_cache, Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn t3_request_outcomes_use_parser_specific_provider_allowlists() {
+        assert_eq!(
+            CountKey::of(&outcome(CODEX_PARSER_VERSION, "openai"))
+                .unwrap()
+                .provider,
+            "openai"
+        );
+        assert!(CountKey::of(&outcome(CODEX_PARSER_VERSION, "anthropic")).is_none());
+        assert_eq!(
+            CountKey::of(&outcome(CLAUDE_PARSER_VERSION, "amazon-bedrock"))
+                .unwrap()
+                .provider,
+            "amazon-bedrock"
+        );
+        assert!(CountKey::of(&outcome(CLAUDE_PARSER_VERSION, "openai")).is_none());
+        assert!(CountKey::of(&outcome(ANTIGRAVITY_PARSER_VERSION, "google")).is_none());
+    }
 }
 
 /// How many requests of one model succeeded and failed on the provider's side during one

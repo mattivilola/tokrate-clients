@@ -41,12 +41,14 @@ public enum ExportDestination {
             destination = destination.resolvingSymlinksInPath()
         }
         let path = destination.path
-        let roots = [
+        var roots = [
             ("Codex sessions", sourceFolders.codex), ("Claude Code projects", sourceFolders.claudeCode),
             ("Grok Build sessions", sourceFolders.grokBuild), ("Antigravity data", sourceFolders.antigravity),
             ("OpenCode data", sourceFolders.openCode), ("Kimi Code data", sourceFolders.kimiCode),
             ("Kimi desktop data", sourceFolders.kimiDesktop)
         ]
+        if let profiles = sourceFolders.t3AntigravityProfiles { roots.append(("T3 Antigravity profiles", profiles)) }
+        if let state = sourceFolders.t3State { roots.append(("T3 Code data", state)) }
         for (name, root) in roots {
             let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
             if path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/") {

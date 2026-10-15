@@ -167,7 +167,7 @@ export function SettingsView() {
           <SwitchRow
             id="show-tool-chip"
             label="Show coding tool chip"
-            hint="Two letters for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode, KC Kimi Code) before the speed in the tray text, where the desktop shows adjacent text. The tray tooltip always names the tool."
+            hint="Two letters for the coding tool (CX Codex, CC Claude Code, GB Grok Build, AG Antigravity, OC OpenCode, KC Kimi Code, T3 T3 Code) before the speed in the tray text, where the desktop shows adjacent text. The tray tooltip always names the tool."
             checked={settings.showToolChip}
             onChange={(showToolChip) => void store.patch({ showToolChip })}
           />

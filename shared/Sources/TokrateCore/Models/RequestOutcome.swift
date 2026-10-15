@@ -32,10 +32,16 @@ public struct RequestOutcome: Hashable, Sendable {
         "kimi-code": "kimi-wire-v1"
     ]
 
+    static func supports(client: String, parser: String) -> Bool {
+        guard let runtime = T3Runtime.outcomeRuntime(client: client, parser: parser) else { return false }
+        return parserVersions[runtime] == parser
+    }
+
     /// The hosted providers each client reports outcomes for. `unknown` is never one of them: a custom
     /// gateway, a local server or an unknown route is the user's own infrastructure.
-    static func allowedProviders(client: String) -> Set<String> {
-        switch client {
+    static func allowedProviders(client: String, parser: String? = nil) -> Set<String> {
+        let runtime = parser.flatMap { T3Runtime.outcomeRuntime(client: client, parser: $0) } ?? client
+        return switch runtime {
         case "claude-code": ["anthropic", "amazon-bedrock", "google-vertex"]
         case "codex": ["openai"]
         case "opencode": ["anthropic", "openai", "google", "xai"]
@@ -69,9 +75,9 @@ public struct RequestOutcome: Hashable, Sendable {
         dedupeKey: String, occurredAt: Date, client: String, clientVersion: String?, parserVersion: String,
         model: String?, provider: String?, kind: Kind, planUsagePercent: Int? = nil
     ) {
-        guard !dedupeKey.isEmpty, Self.parserVersions[client] == parserVersion,
+        guard !dedupeKey.isEmpty, Self.supports(client: client, parser: parserVersion),
               let model, model != "unknown", model.range(of: Self.modelPattern, options: .regularExpression) != nil,
-              let provider, Self.allowedProviders(client: client).contains(provider)
+              let provider, Self.allowedProviders(client: client, parser: parserVersion).contains(provider)
         else { return nil }
         self.dedupeKey = dedupeKey
         self.occurredAt = occurredAt

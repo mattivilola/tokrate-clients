@@ -98,6 +98,18 @@ final class ReadOnlySQLiteDatabase {
         }
         self.handle = handle
         sqlite3_busy_timeout(handle, Self.busyTimeoutMilliseconds)
+        // Probe before returning any rows/calling a transaction closure. Some Apple SQLite builds
+        // cannot read a closed WAL database whose sidecars have already been removed.
+        var probe: OpaquePointer?
+        let prepared = sqlite3_prepare_v2(handle, "PRAGMA schema_version", -1, &probe, nil)
+        let probeStatus = prepared == SQLITE_OK ? sqlite3_step(probe) : prepared
+        sqlite3_finalize(probe)
+        if probeStatus & 0xff == SQLITE_CANTOPEN {
+            if let snapshot = try ClosedWALSnapshot.open(url) {
+                sqlite3_close(handle)
+                self.handle = snapshot
+            }
+        }
     }
 
     deinit { close() }
