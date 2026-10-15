@@ -6,7 +6,7 @@ dependencies. Local monitoring is the default mode and makes no community
 network requests. Community sharing runs as a separate service and requires
 current consent plus a host-encrypted signing credential.
 
-The integration is an initial source and package path. It has no automatic
+This is an [initial Debian server alpha](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.26-headless-alpha.1), with native amd64 and arm64 packages. It has no automatic
 updater or stable-support promise. Read the project privacy information and
 the [shared metrics contract](../../docs/metrics-contract.md) before enabling
 sharing or distributing a build.

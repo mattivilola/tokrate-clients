@@ -4,9 +4,9 @@ set -Eeuo pipefail
 readonly VERSION=0.1.26
 readonly RELEASE_TAG="v${VERSION}-headless-alpha.1"
 readonly RELEASE_BASE="https://github.com/mattivilola/tokrate-clients/releases/download/${RELEASE_TAG}"
-# The release owner replaces these placeholders with the published asset hashes.
-readonly SHA256_AMD64='__ROOT_FILL_AMD64_SHA256__'
-readonly SHA256_ARM64='__ROOT_FILL_ARM64_SHA256__'
+# SHA-256 pins for the native Debian release archives.
+readonly SHA256_AMD64='a6887ea092ea5201a64d5cb8e82f03b38c1cda7d4a7b93491d1d4e62fc76f7ed'
+readonly SHA256_ARM64='2fd9ba9095263159738c528cdfb7f75945701ab8fc2de383634a75b7ef5ddcfa'
 
 usage() {
   cat <<'EOF'
