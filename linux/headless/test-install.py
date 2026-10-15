@@ -83,7 +83,7 @@ def main() -> None:
     verify_hash = bootstrap.index("sha256sum --check --status")
     extract_archive = bootstrap.index("tar --extract")
     run_installer = bootstrap.index('install_command=("$installer"')
-    require("tokrate-headless_${VERSION}_amd64.tar.gz" in bootstrap and "tokrate-headless_${VERSION}_arm64.tar.gz" in bootstrap, "bootstrap must select the pinned Debian amd64 and arm64 assets")
+    require("tokrate-headless_${TOKRATE_VERSION}_amd64.tar.gz" in bootstrap and "tokrate-headless_${TOKRATE_VERSION}_arm64.tar.gz" in bootstrap, "bootstrap must select the pinned Debian amd64 and arm64 assets")
     require(verify_hash < extract_archive < run_installer, "bootstrap must check the pinned archive hash before extraction and execution")
     require("readonly SHA256_AMD64=" in bootstrap and "readonly SHA256_ARM64=" in bootstrap, "bootstrap must hardcode a checksum for each supported architecture")
     require("root must pass --user USER explicitly" in bootstrap, "bootstrap must never guess a root target account")

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly VERSION=0.1.26
-readonly RELEASE_TAG="v${VERSION}-headless-alpha.1"
+readonly TOKRATE_VERSION=0.1.26
+readonly RELEASE_TAG="v${TOKRATE_VERSION}-headless-alpha.1"
 readonly RELEASE_BASE="https://github.com/mattivilola/tokrate-clients/releases/download/${RELEASE_TAG}"
 # SHA-256 pins for the native Debian release archives.
 readonly SHA256_AMD64='a6887ea092ea5201a64d5cb8e82f03b38c1cda7d4a7b93491d1d4e62fc76f7ed'
@@ -82,11 +82,11 @@ done
 architecture=$(dpkg --print-architecture)
 case "$architecture" in
   amd64)
-    asset="tokrate-headless_${VERSION}_amd64.tar.gz"
+    asset="tokrate-headless_${TOKRATE_VERSION}_amd64.tar.gz"
     expected_sha=$SHA256_AMD64
     ;;
   arm64)
-    asset="tokrate-headless_${VERSION}_arm64.tar.gz"
+    asset="tokrate-headless_${TOKRATE_VERSION}_arm64.tar.gz"
     expected_sha=$SHA256_ARM64
     ;;
   *) fail "unsupported Debian architecture: $architecture (supported: amd64, arm64)" ;;
@@ -115,7 +115,7 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 archive="$work_dir/$asset"
-printf 'Downloading Tokrate Headless %s for %s…\n' "$VERSION" "$architecture"
+printf 'Downloading Tokrate Headless %s for %s…\n' "$TOKRATE_VERSION" "$architecture"
 curl --fail --silent --show-error --location --output "$archive" "${RELEASE_BASE}/${asset}"
 printf '%s  %s\n' "$expected_sha" "$archive" | sha256sum --check --status || fail 'release archive SHA-256 did not match the pinned value'
 
