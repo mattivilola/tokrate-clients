@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Check, ChevronDown, Settings as SettingsIcon } from "lucide-react";
-import { client, clientLabel, toolLabel, type CohortRow } from "../metrics";
+import { client, clientLabel, toolChipStyle, toolLabel, type CohortRow } from "../metrics";
 import { autoSelection, modelSelection } from "../response";
 import type { Dashboard } from "../model/dashboard";
 import { CLIENT_ORDER } from "../model/dashboard";
@@ -13,8 +13,8 @@ import { Mark, ProviderBadge, Segmented, ToolChip, useAppStore, useDismiss } fro
 
 const TOOL_OPTIONS = [
   { value: "all", label: "All" },
-  ...CLIENT_ORDER.map((id) => ({ value: id, label: SOURCE_TITLES[id] })),
-] satisfies { value: ToolFilter; label: string }[];
+  ...CLIENT_ORDER.map((id) => ({ value: id, label: SOURCE_TITLES[id], toolStyle: toolChipStyle(id) })),
+] satisfies { value: ToolFilter; label: string; toolStyle?: ReturnType<typeof toolChipStyle> }[];
 
 /** "Model · effort · Subagent · v1" on one line, as listed under More models. */
 export function cohortMenuTitle(row: CohortRow) {
@@ -160,6 +160,7 @@ export function ModelPicker({ dashboard }: { dashboard: Dashboard }) {
           <div className="picker-filters">
             <Segmented
               label="Coding tool"
+              className="tool-filter"
               size="sm"
               value={toolFilter}
               options={TOOL_OPTIONS}

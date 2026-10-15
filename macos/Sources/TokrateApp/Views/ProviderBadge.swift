@@ -95,8 +95,8 @@ struct MenuBarLabel: View {
                             .renderingMode(.original)
                     }
                     if let tool {
-                        Image(nsImage: ToolChip.image(chip: tool.chip))
-                            .renderingMode(.template)
+                        Image(nsImage: ToolChip.image(chip: tool.chip, isDark: colorScheme == .dark))
+                            .renderingMode(.original)
                     }
                 }
             } else {

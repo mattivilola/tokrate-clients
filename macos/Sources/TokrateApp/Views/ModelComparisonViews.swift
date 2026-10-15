@@ -12,7 +12,7 @@ struct CodingToolFilterPicker: View {
         Picker("Coding tool", selection: $client) {
             Text("All coding tools").tag(String?.none)
             ForEach(clients, id: \.self) { value in
-                Text(ModelCohort.clientTitle(value)).tag(Optional(value))
+                ToolChipLabel(title: ModelCohort.clientTitle(value), tool: CodingTool.named(value)).tag(Optional(value))
             }
         }
         .pickerStyle(.inline)
@@ -159,7 +159,7 @@ struct ModelSelectionItems: View {
     }
 
     private func chipLabel(_ title: String, tool: CodingTool) -> some View {
-        Label { Text(title) } icon: { Image(nsImage: ToolChip.image(chip: tool.chip)).renderingMode(.template) }
+        ToolChipLabel(title: title, tool: tool)
     }
 }
 

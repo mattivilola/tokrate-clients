@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { ChevronDown, Info } from "lucide-react";
-import { toolChip } from "../metrics";
+import { toolChip, toolChipStyle, toolLabel } from "../metrics";
 import { BADGE_LABEL, BADGE_LETTER, badgeFamily } from "../response";
 import { useStore, type AppStore } from "../store/store";
 
@@ -95,13 +95,22 @@ export function ProviderBadge({
 }
 
 /**
- * Two bold letters in a thin outline for a coding tool (CX, CC, GB). Neutral on purpose: the
- * maker badge carries the colour. Decorative: the tool's name is in the option or label text.
+ * Two bold letters in the coding tool's brand colours. Decorative: the tool's name is in
+ * the option or label text.
  */
 export function ToolChip({ tool }: { tool: string }) {
   return (
-    <span className="tool-chip" data-tool={tool} aria-hidden="true">
+    <span className="tool-chip" data-tool={tool} style={toolChipStyle(tool)} aria-hidden="true">
       {toolChip(tool)}
+    </span>
+  );
+}
+
+/** Full coding-tool name in a branded chip for model rows. */
+export function ToolNameChip({ tool }: { tool: string }) {
+  return (
+    <span className="chip tool-name-chip" data-tool={tool} style={toolChipStyle(tool)}>
+      {toolLabel(tool)}
     </span>
   );
 }
@@ -127,6 +136,7 @@ export interface SegmentOption<T extends string> {
   label: string;
   disabled?: boolean;
   title?: string;
+  toolStyle?: ReturnType<typeof toolChipStyle>;
 }
 
 /** Radio-group segmented control; arrow keys move the selection like native radios. */
@@ -136,12 +146,14 @@ export function Segmented<T extends string>({
   options,
   onChange,
   size = "md",
+  className = "",
 }: {
   label: string;
   value: T;
   options: SegmentOption<T>[];
   onChange: (value: T) => void;
   size?: "sm" | "md";
+  className?: string;
 }) {
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     const enabled = options.filter((o) => !o.disabled);
@@ -162,7 +174,7 @@ export function Segmented<T extends string>({
   };
   return (
     <div
-      className={`segmented segmented-${size}`}
+      className={`segmented segmented-${size} ${className}`.trim()}
       role="radiogroup"
       aria-label={label}
       onKeyDown={move}
@@ -176,6 +188,8 @@ export function Segmented<T extends string>({
           aria-disabled={option.disabled || undefined}
           tabIndex={option.value === value ? 0 : -1}
           title={option.title}
+          data-tool={option.toolStyle ? option.value : undefined}
+          style={option.toolStyle}
           className="segment"
           onClick={() => !option.disabled && onChange(option.value)}
         >

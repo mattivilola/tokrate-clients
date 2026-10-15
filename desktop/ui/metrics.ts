@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import type { SourceId } from "./store/types";
 
 export interface Metric {
@@ -103,6 +104,37 @@ export const CODING_TOOLS: Record<SourceId, { title: string; chip: string }> = {
   "kimi-code": { title: "Kimi Code", chip: "KC" },
   "t3-code": { title: "T3 Code", chip: "T3" },
 };
+
+export interface ToolBrandColour {
+  background: string;
+  text: string;
+  darkBackground?: string;
+  darkText?: string;
+}
+
+/** Coding-tool chip colours shared by the picker, filters, and model table. */
+export const TOOL_BRAND_COLOURS: Record<SourceId, ToolBrandColour> = {
+  codex: { background: "#10A37F", text: "#FFFFFF" },
+  "claude-code": { background: "#D97757", text: "#FFFFFF" },
+  "grok-build": { background: "#000000", text: "#FFFFFF", darkBackground: "#FFFFFF", darkText: "#000000" },
+  antigravity: { background: "#4285F4", text: "#FFFFFF" },
+  opencode: { background: "#566770", text: "#FFFFFF", darkBackground: "#9DB3BB", darkText: "#0A1A20" },
+  "kimi-code": { background: "#6C47FF", text: "#FFFFFF" },
+  "t3-code": { background: "#319CFC", text: "#071B2E" },
+};
+
+export type ToolChipStyle = CSSProperties & Record<`--${string}`, string | undefined>;
+
+export function toolChipStyle(id: string): ToolChipStyle | undefined {
+  const colour = TOOL_BRAND_COLOURS[id as SourceId];
+  if (!colour) return undefined;
+  return {
+    "--tool-bg": colour.background,
+    "--tool-fg": colour.text,
+    "--tool-bg-dark": colour.darkBackground,
+    "--tool-fg-dark": colour.darkText,
+  };
+}
 const codingTool = (id: string): (typeof CODING_TOOLS)[SourceId] | undefined =>
   CODING_TOOLS[id as SourceId];
 /** Coding-tool name from its id ("claude-code" gives "Claude Code"). */

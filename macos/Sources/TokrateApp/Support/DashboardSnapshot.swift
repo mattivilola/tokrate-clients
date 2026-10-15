@@ -59,7 +59,7 @@ struct CodingTool: Equatable, Sendable {
     let title: String
     let chip: String
 
-    private static let known = [
+    static let known = [
         CodingTool(id: "codex", title: "Codex", chip: "CX"),
         CodingTool(id: "claude-code", title: "Claude Code", chip: "CC"),
         CodingTool(id: "grok-build", title: "Grok Build", chip: "GB"),

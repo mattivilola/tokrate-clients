@@ -628,10 +628,17 @@ time,
   font-weight: 700;
   line-height: 1;
 }
-.tool-chip[data-tool="t3-code"] {
-  border-color: #319CFC;
-  background: #319CFC;
-  color: #071B2E;
+.tool-chip[data-tool] {
+  border-color: var(--tool-bg);
+  background: var(--tool-bg);
+  color: var(--tool-fg);
+}
+@media (prefers-color-scheme: dark) {
+  .tool-chip[data-tool] {
+    border-color: var(--tool-bg-dark, var(--tool-bg));
+    background: var(--tool-bg-dark, var(--tool-bg));
+    color: var(--tool-fg-dark, var(--tool-fg));
+  }
 }
 .chip {
   display: inline-flex;
@@ -653,6 +660,16 @@ time,
 .chip-warn {
   background: var(--warn-tint);
   color: var(--warn);
+}
+.tool-name-chip[data-tool] {
+  background: var(--tool-bg);
+  color: var(--tool-fg);
+}
+@media (prefers-color-scheme: dark) {
+  .tool-name-chip[data-tool] {
+    background: var(--tool-bg-dark, var(--tool-bg));
+    color: var(--tool-fg-dark, var(--tool-fg));
+  }
 }
 
 /* ---- cards and controls --------------------------------------------------- */
@@ -717,6 +734,25 @@ time,
   flex: 1 1 auto;
   padding-inline: 6px;
   white-space: nowrap;
+}
+.tool-filter .segment[data-tool] {
+  color: var(--tool-bg);
+  box-shadow: inset 0 0 0 1px var(--tool-bg);
+}
+.tool-filter .segment[aria-checked="true"][data-tool] {
+  background: var(--tool-bg);
+  color: var(--tool-fg);
+  box-shadow: none;
+}
+@media (prefers-color-scheme: dark) {
+  .tool-filter .segment[data-tool] {
+    color: var(--tool-bg-dark, var(--tool-bg));
+    box-shadow: inset 0 0 0 1px var(--tool-bg-dark, var(--tool-bg));
+  }
+  .tool-filter .segment[aria-checked="true"][data-tool] {
+    background: var(--tool-bg-dark, var(--tool-bg));
+    color: var(--tool-fg-dark, var(--tool-fg));
+  }
 }
 .btn {
   display: inline-flex;

@@ -5,7 +5,6 @@ import {
   GROK_RESPONSE_NOTE,
   communityId,
   measurementTitle,
-  toolLabel,
   parserVersion,
   metricVersion,
   type CohortGroup,
@@ -28,7 +27,7 @@ import type { ModelsView } from "../store/types";
 import type { EfficiencySort } from "../efficiency";
 import { EFFICIENCY_SHORT } from "../metrics";
 import { EfficiencyAbout, EfficiencyList } from "./Efficiency";
-import { Chip, ProviderBadge, Segmented, useAppStore } from "./primitives";
+import { Chip, ProviderBadge, Segmented, ToolNameChip, useAppStore } from "./primitives";
 
 const VIEW_OPTIONS: { value: ModelsView; label: string }[] = [
   { value: "response", label: "Response speed" },
@@ -104,7 +103,7 @@ function ResponseModelRow({
             <ProviderBadge model={row.model.model} provider={row.model.provider} size={16} />
             <span className="model-name-text">{row.model.model ?? "Unknown model"}</span>
             {row.tools.map((id) => (
-              <Chip key={id}>{toolLabel(id)}</Chip>
+              <ToolNameChip key={id} tool={id} />
             ))}
             {row.hasSubagent && <Chip title="Includes Subagent work">Subagent</Chip>}
           </span>
