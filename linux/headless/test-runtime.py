@@ -43,7 +43,11 @@ def main():
         process = subprocess.Popen(command + ["run"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 10
-            while not (data / "status.json").exists():
+            while True:
+                if (data / "status.json").exists():
+                    status = json.loads(run("status").stdout)
+                    if status.get("running") and status.get("monitoring"):
+                        break
                 assert process.poll() is None
                 assert time.monotonic() < deadline
                 time.sleep(.1)
