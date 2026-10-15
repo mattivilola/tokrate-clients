@@ -153,15 +153,17 @@ describe("coding tool table", () => {
       antigravity: "Antigravity",
       opencode: "OpenCode",
       "kimi-code": "Kimi Code",
+      "t3-code": "T3 Code",
     });
     expect(Object.keys(CODING_TOOLS)).toEqual(Object.keys(SOURCE_TITLES));
-    expect(["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code"].map(toolChip)).toEqual([
+    expect(["codex", "claude-code", "grok-build", "antigravity", "opencode", "kimi-code", "t3-code"].map(toolChip)).toEqual([
       "CX",
       "CC",
       "GB",
       "AG",
       "OC",
       "KC",
+      "T3",
     ]);
     expect(toolLabel("claude-code")).toBe("Claude Code");
     expect(toolLabel("other")).toBe("Coding tool");
