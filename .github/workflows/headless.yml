@@ -1,0 +1,98 @@
+name: Debian headless client
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'linux/headless/**'
+      - 'linux/README.md'
+      - 'desktop/core/**'
+      - 'desktop/src-tauri/src/**'
+      - '.github/workflows/headless.yml'
+  pull_request:
+    paths:
+      - 'linux/headless/**'
+      - 'linux/README.md'
+      - 'desktop/core/**'
+      - 'desktop/src-tauri/src/**'
+      - '.github/workflows/headless.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: headless-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  debian:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    container: debian:12
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl dpkg-dev minisign passwd python3 systemd util-linux
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            linux/headless
+            desktop/core
+      - name: Check installer and systemd integration
+        run: python3 linux/headless/test-install.py
+      - name: Test shared Rust core
+        run: cargo test --locked --manifest-path desktop/core/Cargo.toml
+      - name: Test and build headless binary
+        run: |
+          cargo test --locked --manifest-path linux/headless/Cargo.toml
+          cargo build --locked --release --manifest-path linux/headless/Cargo.toml
+          install -D linux/headless/target/release/tokrate-headless /usr/bin/tokrate-headless
+      - name: Verify systemd units and encrypted credential flow
+        run: |
+          systemd-analyze verify linux/headless/tokrate-headless-local@.service linux/headless/tokrate-headless-share@.service
+          python3 linux/headless/test-runtime.py linux/headless/target/release/tokrate-headless
+          TOKRATE_HEADLESS_RUN_INSTALL_TEST=1 TOKRATE_HEADLESS_BINARY=/usr/bin/tokrate-headless python3 linux/headless/test-install.py
+      - name: Build Debian package
+        run: linux/headless/package.sh "$RUNNER_TEMP/tokrate-headless-deb"
+      - name: Prepare bootstrap release archive
+        run: |
+          bundle_root="$RUNNER_TEMP/headless-bundle"
+          install -d -m 0755 "$bundle_root/tokrate-headless"
+          install -m 0755 /usr/bin/tokrate-headless "$bundle_root/tokrate-headless/tokrate-headless"
+          install -m 0755 linux/headless/install.sh "$bundle_root/tokrate-headless/install.sh"
+          install -m 0644 linux/headless/tokrate-headless-local@.service "$bundle_root/tokrate-headless/tokrate-headless-local@.service"
+          install -m 0644 linux/headless/tokrate-headless-share@.service "$bundle_root/tokrate-headless/tokrate-headless-share@.service"
+          architecture=$(dpkg --print-architecture)
+          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.26_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
+      - name: Sign and verify release artifacts
+        if: github.event_name != 'pull_request'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          node -e 'process.stdout.write(Buffer.from(require("./desktop/src-tauri/tauri.conf.json").plugins.updater.pubkey,"base64"))' > "$RUNNER_TEMP/tokrate-public-key.pub"
+          for artifact in "$RUNNER_TEMP"/tokrate-headless-deb/*.deb "$RUNNER_TEMP"/tokrate-headless_*.tar.gz; do
+            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.26 "$artifact"
+            base64 --decode "$artifact.sig" > "$artifact.minisig"
+            minisign -Vm "$artifact" -p "$RUNNER_TEMP/tokrate-public-key.pub" -x "$artifact.minisig"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tokrate-headless-debian12-${{ runner.arch }}
+          path: |
+            ${{ runner.temp }}/tokrate-headless-deb/*.deb*
+            ${{ runner.temp }}/tokrate-headless_*.tar.gz*
+          if-no-files-found: error
+          retention-days: 7

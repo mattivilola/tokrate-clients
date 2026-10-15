@@ -1,0 +1,30 @@
+[Unit]
+Description=Tokrate Headless local monitoring for %i
+Documentation=https://github.com/mattivilola/tokrate-clients/tree/main/linux/headless
+After=local-fs.target
+Conflicts=tokrate-headless-share@%i.service
+ConditionPathExists=!/etc/tokrate-headless/%i/consent-v6.json
+
+[Service]
+Type=simple
+User=%i
+StateDirectory=tokrate-headless/%i
+StateDirectoryMode=0700
+ExecStart=/usr/bin/tokrate-headless --config-dir /etc/tokrate-headless/%i --data-dir /var/lib/tokrate-headless/%i run
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
