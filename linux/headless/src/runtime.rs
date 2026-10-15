@@ -264,6 +264,11 @@ pub async fn run(paths: Paths, share: bool, once: bool) -> Result<()> {
     let settings = paths.load()?;
     let mut host = Host::new(&paths, &settings, share, Utc::now());
     let mut key = host.activate(&paths, credentials::load, Utc::now());
+    if share && key.is_none() {
+        host.status.monitoring = false;
+        host.save(&paths, Utc::now(), false)?;
+        return Err("Sharing mode requires a valid systemd signing credential; repair it and restart the service, or choose local-only mode".into());
+    }
     let transport = if key.is_some() { Some(client()?) } else { None };
     let signal = Arc::new(PollSignal::default());
     let mut watchers = Watchers::default();

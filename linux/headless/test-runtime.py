@@ -38,6 +38,7 @@ def main():
         assert run("run", "--share", check=False).returncode != 0
         run("setup", "--share")
         assert run("sharing-enabled").returncode == 0
+        assert run("run", "--share", check=False).returncode != 0, "Requested sharing must fail clearly with missing credentials"
         # Local run must not touch credentials even when consent was accepted.
         process = subprocess.Popen(command + ["run"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
