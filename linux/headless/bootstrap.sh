@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly TOKRATE_VERSION=0.1.27
+readonly TOKRATE_VERSION=0.1.28
 readonly RELEASE_TAG="v${TOKRATE_VERSION}-headless-alpha.1"
 readonly RELEASE_BASE="https://github.com/mattivilola/tokrate-clients/releases/download/${RELEASE_TAG}"
 # SHA-256 pins for the native Debian release archives.
