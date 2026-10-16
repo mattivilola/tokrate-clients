@@ -1199,20 +1199,20 @@ fn outcomes_are_summed_per_bucket_and_queued_after_its_close_grace() {
         ],
         now,
     );
-    // The first bucket was read late, so it is deferred to the next period boundary.
+    // Both buckets share the 10:10 shifted slot. Their count entries flush one minute later.
     assert_eq!(queue.request_count_len(), 0);
     assert_eq!(
         queue.next_eligible_after(now),
-        Some(time("2026-10-09T10:10:00Z"))
+        Some(time("2026-10-09T10:11:00Z"))
     );
-    assert!(queue.upload_batch(time("2026-10-09T10:09:59Z")).is_empty());
-    // At the bucket's due moment it is queued, and it leaves after the slot's delay.
-    assert!(queue.upload_batch(time("2026-10-09T10:10:00Z")).is_empty());
-    assert_eq!(queue.request_count_len(), 1);
+    assert!(queue.upload_batch(time("2026-10-09T10:10:59Z")).is_empty());
+    // At the flush moment both entries are queued and share the slot's jitter.
+    assert!(queue.upload_batch(time("2026-10-09T10:11:00Z")).is_empty());
+    assert_eq!(queue.request_count_len(), 2);
     assert_eq!(
-        queue.next_eligible_after(time("2026-10-09T10:10:00Z")),
-        Some(time("2026-10-09T10:11:00Z")),
-        "the next bucket's close grace is the next transition"
+        queue.next_eligible_after(time("2026-10-09T10:11:00Z")),
+        Some(time("2026-10-09T10:11:30Z")),
+        "both entries use the shared slot's upload delay"
     );
     assert!(queue.upload_batch(time("2026-10-09T10:11:29Z")).is_empty());
     assert_eq!(
