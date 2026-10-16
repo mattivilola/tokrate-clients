@@ -213,6 +213,26 @@ install lifecycle check against a temporary staged root with a fake
 `systemctl`, a disposable test account, and an encrypted-key roundtrip. It
 does not alter the host's service files or install on a real server.
 
+## Collector dashboard (0.1.29)
+
+`status-monitor` adds monotonic collector uptime and heartbeat age, an estimated
+next upload attempt, and per-tool completed-turn activity. The countdown uses
+the actual queue bucket/grace/jitter eligibility and retry gate. It is not a
+promised delivery or publication time; idle, uploading, sharing OFF and stopped
+states have no invented countdown. A stale/future heartbeat suppresses a live
+countdown. Uptime freezes at the last heartbeat if collection stops.
+
+Activity strips count locally stored completed turns in labeled five-minute
+bins (about 55–60 minutes), with the current bin partial. They are workload
+activity, not a speed or quality comparison. Smaller terminals show fewer
+model/activity rows so the operational status and keyboard controls stay
+visible. Demo values remain explicitly synthetic and never send measurements.
+
+These operational fields stay in the local status file and terminal. Headless
+uses its Cargo package version for installed/update status and contribution
+`appVersion`; the shared serializer and measurement fields are unchanged.
+Desktop packages can therefore keep their separately released version.
+
 ## Upload timing
 
 The terminal monitor shows the latest successful report upload in UTC with its

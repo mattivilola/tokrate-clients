@@ -1,4 +1,8 @@
 //! Read-only terminal dashboard. It never reads a credential or starts the collector.
+mod activity;
+mod render;
+mod state;
+
 use crate::config::{Paths, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
@@ -8,6 +12,9 @@ use std::{
     time::SystemTime,
 };
 use tokrate_core::{read_private_file, History, TurnMetric};
+
+use activity::{spark as activity_spark, tool_activity};
+use state::{format_duration, heartbeat, parse_time, schedule_line, uptime_seconds, Heartbeat};
 
 const RESET: &str = "\x1b[0m\x1b[48;5;234m";
 const TEAL: &str = "\x1b[38;5;80m";
@@ -81,19 +88,6 @@ fn median(values: &mut [f64]) -> Option<f64> {
         values[i]
     })
 }
-fn spark(values: &[f64]) -> String {
-    let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let max = values.iter().copied().fold(1.0f64, f64::max);
-    let min = values.iter().copied().fold(max, f64::min);
-    values
-        .iter()
-        .rev()
-        .take(18)
-        .rev()
-        .map(|v| bars[(((v - min) / (max - min).max(1.0) * 7.0).round() as usize).min(7)])
-        .collect()
-}
-
 fn fit(text: &str, width: usize) -> String {
     let mut result = String::new();
     let mut escape = false;
@@ -119,6 +113,17 @@ fn fit(text: &str, width: usize) -> String {
     result
 }
 
+fn value_spark(values: &[f64]) -> String {
+    let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = values.iter().copied().fold(1.0f64, f64::max);
+    let min = values.iter().copied().fold(max, f64::min);
+    values
+        .iter()
+        .take(18)
+        .map(|value| bars[((value - min) / (max - min).max(1.0) * 7.0).round() as usize])
+        .collect()
+}
+
 fn update_line(status: &Value, demo: bool) -> String {
     if demo {
         return "Updates are unavailable in the offline demo.".into();
@@ -127,7 +132,7 @@ fn update_line(status: &Value, demo: bool) -> String {
     let checks = update["automaticChecks"].as_str().unwrap_or("unknown");
     let installed = update["installedVersion"]
         .as_str()
-        .unwrap_or(tokrate_core::APP_VERSION);
+        .unwrap_or(crate::APP_VERSION);
     match update["state"].as_str().unwrap_or("never-checked") {
         "available" => format!(
             "Update available: {} → {} · automatic checks {} · press U to update",
@@ -178,186 +183,7 @@ pub(crate) fn render(
     rows: usize,
     demo: bool,
 ) -> String {
-    if cols < 68 || rows < 28 {
-        let hero = &status["hero"];
-        let speed = hero["speed"]
-            .as_f64()
-            .map(|v| format!("{v:.1} tok/s"))
-            .unwrap_or("Waiting for data".into());
-        return format!("{TEAL}T O K R A T E{RESET}  {}\r\n\r\n{WHITE}{speed}{RESET}\r\n{}\r\n{} / {}\r\n\r\n{} stored turns / {} queued\r\nSharing {} / sent {} since restart\r\nLast successful upload: {}\r\nLatest upload attempt: {}\r\n{}\r\n{} · [Q] / [ESC] back to shell\r\n",
-            if demo { "DEMO / SYNTHETIC DATA" } else { "SERVER COMPANION" },
-            fit(hero["label"].as_str().unwrap_or("Local monitoring"), cols.saturating_sub(2)),
-            text(hero,"model"), text(hero,"provider"), count(status,"history_turns"), count(status,"pending_samples"),
-            if status["sharing_active"].as_bool() == Some(true) { "ON" } else { "OFF" }, count(status,"uploaded_samples"),
-            if demo { "Unavailable in offline demo".into() } else { last_successful_upload(status, Utc::now()) },
-            latest_upload_attempt(status, Utc::now(), demo), update_line(status, demo),
-            if demo { "Updates disabled in offline demo" } else { "[U] update" });
-    }
-    let width = cols.clamp(48, 110).saturating_sub(2);
-    let inner = width - 4;
-    let mut lines = vec![format!("{TEAL}╭{}╮{RESET}", "─".repeat(width - 2))];
-    let mut line = |content: String| {
-        lines.push(format!(
-            "{TEAL}│{RESET} {}{RESET} {TEAL}│{RESET}",
-            fit(&content, inner)
-        ))
-    };
-    let mode = if demo {
-        "DEMO / SYNTHETIC DATA"
-    } else if status["monitoring"].as_bool() == Some(true) {
-        "LOCAL COLLECTOR / LIVE"
-    } else {
-        "COLLECTOR STOPPED"
-    };
-    line(format!(
-        "{WHITE}\x1b[1mT O K R A T E{RESET}  {MUTED}SERVER COMPANION{RESET}     {TEAL}{mode}"
-    ));
-    line(format!(
-        "{MUTED}{}  /  {}  /  {} UTC",
-        clean(&std::env::var("HOSTNAME").unwrap_or_else(|_| "debian-server".into())),
-        std::env::consts::ARCH,
-        Utc::now().format("%H:%M:%S")
-    ));
-    line(String::new());
-    let hero = &status["hero"];
-    let speed = hero["speed"]
-        .as_f64()
-        .filter(|v| v.is_finite() && *v >= 0.0);
-    let label = hero["label"]
-        .as_str()
-        .unwrap_or("Waiting for a supported coding-tool observation");
-    line(format!("{MUTED}{}", clean(label)));
-    let big = big_number(&speed.map(|n| format!("{n:.1}")).unwrap_or("---".into()));
-    let details = [
-        format!("{WHITE}{}", text(hero, "model")),
-        format!("{MUTED}{} / {}", text(hero, "tool"), text(hero, "provider")),
-        format!("{TEAL}tok/s"),
-        format!("{MUTED}Measured from local logs"),
-        format!("{MUTED}No prompts. No code. No account."),
-    ];
-    for (index, digits) in big.iter().enumerate() {
-        let expanded: String = digits.chars().flat_map(|c| [c, c]).collect();
-        line(format!("{TEAL}{}   {}", fit(&expanded, 36), details[index]));
-    }
-    line(String::new());
-    let recent: Vec<_> = records
-        .iter()
-        .filter(|m| m.completed_at >= Utc::now() - Duration::hours(24))
-        .collect();
-    let tokens: i64 = recent.iter().map(|m| m.output_tokens).sum();
-    line(format!("{WHITE}{} {MUTED}turns / 24h     {WHITE}{:.1}k {MUTED}output tokens     {WHITE}{} {MUTED}stored / 7d",
-        recent.len(), tokens as f64 / 1000.0, count(status,"history_turns")));
-    line(format!("{MUTED}{}", "─".repeat(inner)));
-    line(format!(
-        "{WHITE}YOUR MODELS{RESET}   {MUTED}24h medians · RSP response / TURN whole-turn"
-    ));
-    let mut groups: BTreeMap<String, Vec<&TurnMetric>> = BTreeMap::new();
-    for m in &recent {
-        let key = json!([
-            m.client,
-            m.client_version,
-            m.parser_version,
-            m.metric_version,
-            m.model,
-            m.provider,
-            m.provider_region,
-            m.reasoning_effort,
-            m.source_kind
-        ])
-        .to_string();
-        groups.entry(key).or_default().push(m);
-    }
-    let mut groups: Vec<_> = groups.values().collect();
-    groups.sort_by_key(|g| std::cmp::Reverse(g[0].completed_at));
-    let max_models = if rows >= 34 { 4 } else { 2 };
-    for group in groups.into_iter().take(max_models) {
-        let newest = group[0];
-        let mut rsp: Vec<f64> = group
-            .iter()
-            .filter_map(|m| m.plausible_response_timing().map(|(t, s, _)| t as f64 / s))
-            .collect();
-        let response = !rsp.is_empty();
-        if !response {
-            rsp = group
-                .iter()
-                .filter(|m| m.output_tokens >= 20)
-                .map(|m| m.turn_throughput_tps)
-                .collect();
-        }
-        let trend = spark(&rsp);
-        let value = median(&mut rsp)
-            .map(|v| format!("{v:>6.1}"))
-            .unwrap_or("     —".into());
-        let mut ttft: Vec<_> = group.iter().filter_map(|m| m.codex_ttft_seconds).collect();
-        let first = median(&mut ttft)
-            .map(|v| format!("{v:.2}s"))
-            .unwrap_or("—".into());
-        line(format!(
-            "{TEAL}▸ {WHITE}{:<25} {CORAL}{value} {MUTED}{}  {TEAL}{trend}",
-            clean(newest.model.as_deref().unwrap_or("unknown")),
-            if response { "RSP " } else { "TURN" }
-        ));
-        line(format!(
-            "{MUTED}  {} / {} / {} / {} · {} turns · first token {}",
-            clean(&newest.client),
-            clean(newest.provider.as_deref().unwrap_or("unknown")),
-            clean(
-                newest
-                    .reasoning_effort
-                    .as_deref()
-                    .unwrap_or("unknown effort")
-            ),
-            clean(newest.source_kind.as_deref().unwrap_or("unknown source")),
-            group.len(),
-            first
-        ));
-    }
-    if recent.is_empty() {
-        line(format!(
-            "{MUTED}  Waiting for activity. Run Codex or another supported tool on this server."
-        ));
-    }
-    line(format!("{MUTED}{}", "─".repeat(inner)));
-    let sharing = if status["sharing_active"].as_bool() == Some(true) {
-        "ON"
-    } else {
-        "OFF"
-    };
-    line(format!("{TEAL}● {WHITE}SHARING {sharing}{RESET}   {MUTED}queued {WHITE}{}{MUTED} samples + {WHITE}{}{MUTED} count entries  /  sent {WHITE}{} {MUTED}since restart",
-        count(status,"pending_samples"), count(status,"pending_request_counts"), count(status,"uploaded_samples")));
-    line(format!(
-        "{MUTED}  Last successful upload: {}",
-        if demo {
-            "Unavailable in offline demo".into()
-        } else {
-            last_successful_upload(status, Utc::now())
-        }
-    ));
-    line(format!(
-        "{MUTED}  Latest upload attempt: {}",
-        latest_upload_attempt(status, Utc::now(), demo)
-    ));
-    line(format!(
-        "{MUTED}  Sources: {}{}",
-        text(status, "source_summary"),
-        if status["source_error"].as_bool() == Some(true) {
-            " / READ ERROR"
-        } else {
-            ""
-        }
-    ));
-    line(format!("{MUTED}{}", update_line(status, demo)));
-    line(String::new());
-    line(format!(
-        "{} {CORAL}[Q] / [ESC]{RESET} {MUTED}back to shell · collector keeps running     {TEAL}tokrate.dev",
-        if demo {
-            format!("{MUTED}Updates disabled in offline demo")
-        } else {
-            format!("{CORAL}[U]{RESET} {MUTED}update")
-        }
-    ));
-    lines.push(format!("{TEAL}╰{}╯{RESET}", "─".repeat(width - 2)));
-    lines.join("\r\n") + "\r\n"
+    render::render_at(status, records, cols, rows, demo, Utc::now())
 }
 
 struct Terminal {
@@ -408,6 +234,7 @@ fn size() -> (usize, usize) {
 }
 
 fn demo() -> (Value, Vec<TurnMetric>) {
+    let now = Utc::now();
     let mut records = Vec::new();
     for (model, provider, tool, speed) in [
         ("gpt-6.1-sol", "openai", "codex", 84.7),
@@ -418,7 +245,7 @@ fn demo() -> (Value, Vec<TurnMetric>) {
             let output = (speed * (0.78 + ((i * 7) % 11) as f64 * 0.04) * 10.0) as i64;
             let mut m = TurnMetric::new(
                 format!("demo-{model}-{i}"),
-                Utc::now() - Duration::minutes(i * 3),
+                now - Duration::minutes(i * 3),
                 Some(model.into()),
                 output,
                 if tool == "grok-build" { 10.0 } else { 24.0 },
@@ -442,7 +269,10 @@ fn demo() -> (Value, Vec<TurnMetric>) {
     }
     records.sort_by_key(|m| std::cmp::Reverse(m.completed_at));
     (
-        json!({"monitoring":true, "history_turns":1248, "sharing_active":true, "pending_samples":6,
+        json!({"monitoring":true, "started_at":(now - Duration::seconds(31562)).to_rfc3339(),
+            "updated_at":(now - Duration::seconds(2)).to_rfc3339(), "uptime_seconds":31560,
+            "upload_schedule":{"state":"scheduled", "next_attempt_at":(now + Duration::minutes(3)).to_rfc3339()},
+            "history_turns":1248, "sharing_active":true, "pending_samples":6,
             "pending_request_counts":2, "uploaded_samples":482,
             "source_summary":"Codex + Claude Code + Grok Build",
             "hero":{"speed":84.7, "model":"gpt-6.1-sol", "provider":"openai", "tool":"codex", "label":"Response speed / last 5 responses"}}),
@@ -474,14 +304,6 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<bool> {
                     }
                     cache = modified;
                 }
-                let stale = status["updated_at"]
-                    .as_str()
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .is_none_or(|at| Utc::now().signed_duration_since(at).num_seconds() > 10);
-                if stale {
-                    status["monitoring"] = false.into();
-                    status["sharing_active"] = false.into();
-                }
                 status["source_summary"] = paths
                     .load()
                     .map(|s| {
@@ -494,7 +316,7 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<bool> {
                     })
                     .unwrap_or_else(|_| "Setup required".into())
                     .into();
-                status["update_check"] = crate::updater::status_value(tokrate_core::APP_VERSION);
+                status["update_check"] = crate::updater::status_value(crate::APP_VERSION);
                 (status, history.records().to_vec())
             };
             let (cols, rows) = size();
@@ -555,7 +377,10 @@ mod tests {
     fn unavailable_medians_are_not_zero_and_spark_is_bounded() {
         assert_eq!(median(&mut []), None);
         assert_eq!(median(&mut [2.0, 4.0]), Some(3.0));
-        assert_eq!(spark(&[2.0; 50]).chars().count(), 18);
+        assert_eq!(
+            activity_spark(&[2; activity::BIN_COUNT]).chars().count(),
+            activity::BIN_COUNT
+        );
     }
 
     #[test]
@@ -606,5 +431,100 @@ mod tests {
         assert!(rendered.contains("Latest upload attempt: 2026-10-16 12:04:30 UTC"));
         let empty = render(&json!({"sharing_active":false}), &[], 110, 36, false);
         assert!(empty.contains("No successful upload recorded yet"));
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut output = String::new();
+        let mut escape = false;
+        for character in text.chars() {
+            if character == '\x1b' {
+                escape = true;
+                continue;
+            }
+            if escape {
+                if character == 'm' {
+                    escape = false;
+                }
+                continue;
+            }
+            output.push(character);
+        }
+        output
+    }
+
+    #[test]
+    fn compact_and_full_layouts_stay_inside_terminal_rows_and_columns() {
+        let (status, records) = demo();
+        for (cols, rows) in [(110, 36), (80, 24), (60, 16), (42, 10), (28, 8)] {
+            let rendered = strip_ansi(&render::render_at(
+                &status,
+                &records,
+                cols,
+                rows,
+                true,
+                Utc::now(),
+            ));
+            let visible: Vec<_> = rendered.lines().collect();
+            assert!(
+                visible.len() <= rows,
+                "{cols}×{rows}: {} rows",
+                visible.len()
+            );
+            for (index, line) in visible.iter().enumerate() {
+                assert!(
+                    line.chars().count() <= cols,
+                    "{cols}×{rows}, line {index}: {} columns: {line:?}",
+                    line.chars().count()
+                );
+            }
+            assert!(rendered.contains("T O K R A T E"));
+            assert!(rendered.contains("Updated") || rows < 3);
+            assert!(rendered.contains("[Q]"));
+        }
+    }
+
+    #[test]
+    fn stale_and_future_heartbeats_hide_the_schedule_countdown() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap();
+        for updated_at in ["2026-10-16T11:59:40Z", "2026-10-16T12:00:01Z"] {
+            let status = json!({
+                "monitoring":true,
+                "sharing_active":true,
+                "updated_at":updated_at,
+                "uptime_seconds":60,
+                "upload_schedule":{"state":"scheduled", "next_attempt_at":"2026-10-16T12:05:00Z"}
+            });
+            let rendered = render::render_at(&status, &[], 80, 24, false, now);
+            assert!(rendered.contains("heartbeat stale") || rendered.contains("clock is ahead"));
+            assert!(!rendered.contains("Estimated next attempt in"));
+            assert!(rendered.contains("Last successful upload:"));
+            assert!(rendered.contains("Latest upload attempt:"));
+        }
+    }
+
+    #[test]
+    fn activity_distinguishes_empty_history_from_zero_and_unavailable_collector() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap();
+        let fresh = json!({
+            "monitoring":true,
+            "updated_at":now.to_rfc3339(),
+            "history_turns":0
+        });
+        assert!(render::activity_lines(&fresh, &[], now)[2].contains("No local turn history yet"));
+
+        let measured_zero = json!({
+            "monitoring":true,
+            "updated_at":now.to_rfc3339(),
+            "history_turns":10
+        });
+        assert!(render::activity_lines(&measured_zero, &[], now)[2]
+            .contains("No completed turns in these recent bins"));
+
+        let stopped = json!({"monitoring":false, "history_turns":10});
+        assert!(render::activity_lines(&stopped, &[], now)[2].contains("Collector unavailable"));
+        let unreadable = json!({"monitoring":false, "history_error":true});
+        assert!(
+            render::activity_lines(&unreadable, &[], now)[2].contains("unavailable (read error)")
+        );
     }
 }

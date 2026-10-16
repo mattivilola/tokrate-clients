@@ -83,7 +83,7 @@ jobs:
           install -m 0644 linux/headless/tokrate-update.sysusers "$bundle_root/tokrate-headless/tokrate-update.sysusers"
           install -m 0755 linux/headless/provision-update-user.sh "$bundle_root/tokrate-headless/provision-update-user.sh"
           architecture=$(dpkg --print-architecture)
-          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.28_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
+          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.29_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
       - name: Sign and verify release artifacts
         if: github.event_name != 'pull_request'
         env:
@@ -93,7 +93,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
           node -e 'process.stdout.write(Buffer.from(require("./desktop/src-tauri/tauri.conf.json").plugins.updater.pubkey,"base64"))' > "$RUNNER_TEMP/tokrate-public-key.pub"
           for artifact in "$RUNNER_TEMP"/tokrate-headless-deb/*.deb "$RUNNER_TEMP"/tokrate-headless_*.tar.gz; do
-            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.28 "$artifact"
+            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.29 "$artifact"
             base64 --decode "$artifact.sig" > "$artifact.minisig"
             minisign -Vm "$artifact" -p "$RUNNER_TEMP/tokrate-public-key.pub" -x "$artifact.minisig"
           done
@@ -104,7 +104,7 @@ jobs:
           install -d "$destination"
           cp "$RUNNER_TEMP"/tokrate-headless-deb/*.deb* "$destination/"
           cp "$RUNNER_TEMP"/tokrate-headless_*.tar.gz* "$destination/"
-          test -s "$destination/tokrate-headless_0.1.28_$(dpkg --print-architecture).tar.gz"
+          test -s "$destination/tokrate-headless_0.1.29_$(dpkg --print-architecture).tar.gz"
           echo "path=$destination" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -180,12 +180,12 @@ jobs:
           destination="$RUNNER_TEMP/headless-signed-feed"
           install -d "$destination"
           export SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
-          node release/headless-manifest.mjs create 0.1.28 headless-release-assets "$destination/headless-alpha.payload.json"
-          npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.28 "$destination/headless-alpha.payload.json"
+          node release/headless-manifest.mjs create 0.1.29 headless-release-assets "$destination/headless-alpha.payload.json"
+          npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.29 "$destination/headless-alpha.payload.json"
           node release/headless-manifest.mjs wrap "$destination/headless-alpha.payload.json" "$destination/headless-alpha.payload.json.sig" "$destination/alpha.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tokrate-headless-0.1.28-signed-feed
+          name: tokrate-headless-0.1.29-signed-feed
           path: ${{ runner.temp }}/headless-signed-feed/*
           if-no-files-found: error
           retention-days: 7

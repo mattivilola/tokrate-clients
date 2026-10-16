@@ -2,6 +2,8 @@ mod config;
 mod credentials;
 mod dashboard;
 mod runtime;
+mod runtime_status;
+mod telemetry;
 mod updater;
 // These modules have no Tauri dependency. Share the tested native watcher implementation and
 // change coalescing rather than maintaining a second filesystem observation policy.
@@ -11,6 +13,8 @@ mod schedule;
 #[path = "../../../desktop/src-tauri/src/watcher.rs"]
 #[allow(dead_code, clippy::unnecessary_map_or)]
 mod watcher;
+
+pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use config::{Paths, Result};
 use std::path::PathBuf;
@@ -48,11 +52,11 @@ async fn execute() -> Result<()> {
         return Ok(());
     }
     if args.peek().is_some_and(|arg| arg == "--version") {
-        println!("tokrate-headless {}", tokrate_core::APP_VERSION);
+        println!("tokrate-headless {}", APP_VERSION);
         return Ok(());
     }
     if args.peek().is_some_and(|arg| arg == "example") {
-        println!("{}", tokrate_core::example_request_json());
+        println!("{}", telemetry::example_request_json());
         return Ok(());
     }
     let mut config_override = None;
@@ -148,7 +152,7 @@ async fn execute() -> Result<()> {
             }
         }
         ("example", []) => {
-            println!("{}", tokrate_core::example_request_json());
+            println!("{}", telemetry::example_request_json());
             Ok(())
         }
         ("provision-key", ["--output", output]) => {

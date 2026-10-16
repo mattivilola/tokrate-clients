@@ -1,8 +1,10 @@
 use crate::{
     config::{Paths, Result, Settings},
     credentials,
+    runtime_status::{upload_schedule, UploadSchedule},
     schedule::PollSignal,
     watcher::{WatchTarget, Watchers},
+    APP_VERSION,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,9 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokrate_core::{
-    read_private_file, signed_request, tray_reading, write_private_file, AutoSelector, History,
-    LiveResponses, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TrayReadingKind,
-    UploadBatch, APP_VERSION,
+    read_private_file, tray_reading, write_private_file, AutoSelector, History, LiveResponses,
+    ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TrayReadingKind, UploadBatch,
 };
 use zeroize::Zeroizing;
 
@@ -25,6 +26,8 @@ pub struct Status {
     pub version: String,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    pub uptime_seconds: Option<u64>,
+    pub upload_schedule: UploadSchedule,
     pub monitoring: bool,
     pub sharing_requested: bool,
     pub sharing_active: bool,
@@ -59,6 +62,7 @@ pub struct Host {
     dirty: bool,
     live: LiveResponses,
     auto: AutoSelector,
+    started: Instant,
 }
 
 impl Host {
@@ -104,6 +108,7 @@ impl Host {
             dirty: false,
             live: LiveResponses::new(now),
             auto: AutoSelector::new(),
+            started: Instant::now(),
             status: Status {
                 version: APP_VERSION.into(),
                 started_at: Some(now),
@@ -241,6 +246,7 @@ impl Host {
             });
         self.status.pending_samples = self.queue.len();
         self.status.pending_request_counts = self.queue.request_count_len();
+        self.status.uptime_seconds = Some(self.started.elapsed().as_secs());
         self.status.updated_at = Some(now);
         write_private_file(
             paths.data.join("status.json"),
@@ -394,12 +400,7 @@ pub async fn run(paths: Paths, share: bool, once: bool) -> Result<()> {
             let batch = host.queue.upload_batch(now);
             if !batch.is_empty() {
                 // Fixed HTTPS origin, exact core serializer and signature. No arbitrary endpoint.
-                let request = signed_request(
-                    &batch.samples,
-                    &batch.request_counts,
-                    key.as_ref().unwrap(),
-                    now,
-                )?;
+                let request = crate::telemetry::sign_batch(&batch, key.as_ref().unwrap(), now)?;
                 let transport = transport.as_ref().unwrap().clone();
                 upload = Some((
                     tokio::spawn(async move { transmit(&transport, API, request).await }),
@@ -408,6 +409,20 @@ pub async fn run(paths: Paths, share: bool, once: bool) -> Result<()> {
                 last_attempt = Instant::now();
             }
         }
+        // Inspect the real queue eligibility (including open count buckets) without
+        // inventing a periodic timer when there is no pending work.
+        let ready = host.status.sharing_active
+            && upload.is_none()
+            && !host.queue.upload_batch(now).is_empty();
+        host.status.upload_schedule = upload_schedule(
+            now,
+            host.status.monitoring,
+            host.status.sharing_active,
+            upload.is_some(),
+            Duration::from_secs(30).saturating_sub(last_attempt.elapsed()),
+            ready,
+            host.queue.next_eligible_after(now),
+        );
         let save_history = once || last_save.elapsed() >= Duration::from_secs(10);
         host.save(&paths, now, save_history)?;
         if save_history {
@@ -426,6 +441,8 @@ pub async fn run(paths: Paths, share: bool, once: bool) -> Result<()> {
     host.deactivate();
     key.take();
     host.status.monitoring = false;
+    host.status.upload_schedule =
+        upload_schedule(Utc::now(), false, false, false, Duration::ZERO, false, None);
     host.save(&paths, Utc::now(), true)?;
     Ok(())
 }
@@ -461,6 +478,15 @@ pub fn status(paths: &Paths) -> Result<()> {
     if !running {
         status["monitoring"] = false.into();
         status["sharing_active"] = false.into();
+        status["upload_schedule"] = serde_json::to_value(upload_schedule(
+            Utc::now(),
+            false,
+            false,
+            false,
+            Duration::ZERO,
+            false,
+            None,
+        ))?;
     }
     if let Ok(settings) = paths.load() {
         status["sources"] = settings.roots().iter().map(|(name, path)| {

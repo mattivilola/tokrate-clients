@@ -21,7 +21,7 @@ const SERVICE_UNIT: &str = "tokrate-headless-update-check.service";
 const INSTALLED_BINARY: &str = "/usr/bin/tokrate-headless";
 
 fn installed_version() -> &'static str {
-    tokrate_core::APP_VERSION
+    crate::APP_VERSION
 }
 
 pub async fn run_check_service() -> Result<()> {

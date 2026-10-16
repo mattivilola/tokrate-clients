@@ -55,6 +55,10 @@ def main():
             assert run("scan", check=False).returncode != 0, "Only one state writer"
             status = json.loads(run("status").stdout)
             assert status["running"] and status["monitoring"] and not status["sharing_active"]
+            assert status["version"] == subprocess.check_output([binary, "--version"], text=True).strip().split()[-1]
+            assert isinstance(status["uptime_seconds"], int) and status["uptime_seconds"] >= 0
+            assert status["upload_schedule"] == {"state": "off", "next_attempt_at": None}
+            assert status.get("updated_at"), "Collector heartbeat must be present"
 
             # A viewer is read-only: Q, Escape and SIGTERM restore the terminal and leave
             # the separate collector running. Use a PTY so raw-mode handling is real.
@@ -125,6 +129,7 @@ def main():
             assert "SENTINEL" not in (data / "history.json").read_text()
             status = json.loads(run("status").stdout)
             assert not status["running"] and not status["monitoring"]
+            assert status["upload_schedule"] == {"state": "stopped", "next_attempt_at": None}
             run("scan")
             assert json.loads(run("status").stdout)["history_turns"] == 1
             run("setup", "--local-only")
