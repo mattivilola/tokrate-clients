@@ -139,8 +139,14 @@ jobs:
             --env container=docker \
             tokrate-headless-runtime-test:debian12
           trap 'docker rm --force "$name" >/dev/null 2>&1 || true' EXIT
-          docker cp "$deb" "$name:/tmp/tokrate-headless.deb"
-          docker exec "$name" python3 /work/linux/headless/test-systemd-runtime.py /tmp/tokrate-headless.deb /work/linux/headless
+          # Wait for boot-time tmpfiles cleanup before staging test inputs.
+          docker exec "$name" systemctl is-system-running --wait || {
+            state=$(docker exec "$name" systemctl is-system-running || true)
+            test "$state" = degraded
+          }
+          docker cp "$deb" "$name:/root/tokrate-headless.deb"
+          docker exec "$name" test -f /root/tokrate-headless.deb
+          docker exec "$name" python3 /work/linux/headless/test-systemd-runtime.py /root/tokrate-headless.deb /work/linux/headless
   signed-feed:
     needs: debian
     if: github.event_name != 'pull_request'
