@@ -140,10 +140,17 @@ jobs:
             tokrate-headless-runtime-test:debian12
           trap 'docker rm --force "$name" >/dev/null 2>&1 || true' EXIT
           # Wait for boot-time tmpfiles cleanup before staging test inputs.
-          docker exec "$name" systemctl is-system-running --wait || {
-            state=$(docker exec "$name" systemctl is-system-running || true)
-            test "$state" = degraded
-          }
+          booted=false
+          for attempt in $(seq 1 60); do
+            state=$(docker exec "$name" systemctl is-system-running 2>/dev/null || true)
+            case "$state" in running|degraded) booted=true; break;; esac
+            sleep 1
+          done
+          if test "$booted" != true; then
+            docker logs "$name"
+            docker inspect --format '{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}' "$name"
+            exit 1
+          fi
           docker cp "$deb" "$name:/root/tokrate-headless.deb"
           docker exec "$name" test -f /root/tokrate-headless.deb
           docker exec "$name" python3 /work/linux/headless/test-systemd-runtime.py /root/tokrate-headless.deb /work/linux/headless
