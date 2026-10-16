@@ -15,7 +15,7 @@ export function UpdatesSection() {
       : null;
   const modeMessage =
     mode === "manual"
-      ? "This Debian package uses manual updates. Download the signed package and install it with your package manager."
+      ? "This Debian package checks for updates automatically when enabled. Download the .deb package and install it with your package manager."
       : mode === "unavailable"
         ? "Automatic updates are available in the signed Windows installer and Linux AppImage."
         : "Update checks use Tokrate’s fixed alpha feed. Checks never install an update by themselves.";
@@ -29,7 +29,7 @@ export function UpdatesSection() {
           {prefs.settingsWarning}
         </p>
       )}
-      {mode === "native" && !smoke && (
+      {(mode === "native" || mode === "manual") && !smoke && (
         <div className="switch-row">
           <p className="switch-label" id="auto-updates-label">
             Check automatically on launch and at most once every 24 hours
@@ -67,18 +67,29 @@ export function UpdatesSection() {
             <strong>Tokrate {available.version} is available.</strong>
             {available.body ? ` ${available.body.slice(0, 400)}` : ""}
           </p>
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            disabled={update.installInFlight}
-            onClick={() => void store.installAvailableUpdate()}
-          >
-            {update.installInFlight ? "Installing update…" : "Download and install"}
-          </button>
+          {mode === "manual" ? (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => store.openWebsite("desktop-downloads")}
+            >
+              Download update
+              <ArrowUpRight size={16} aria-hidden="true" />
+            </button>
+          ) : mode === "native" ? (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={update.installInFlight}
+              onClick={() => void store.installAvailableUpdate()}
+            >
+              {update.installInFlight ? "Installing update…" : "Download and install"}
+            </button>
+          ) : null}
         </div>
       )}
       <p className="fine">{modeMessage}</p>
-      {mode === "native" && !smoke && (
+      {(mode === "native" || mode === "manual") && !smoke && (
         <div className="row-actions">
           <button
             type="button"
@@ -110,22 +121,38 @@ export function UpdatesSection() {
 export function UpdateBanner() {
   const store = useAppStore();
   const update = useStore(store, (s) => s.update);
-  if (!update.available) return null;
+  if (!update.available || update.preferences?.mode === "unavailable") return null;
+  const manual = update.preferences?.mode === "manual";
   return (
     <section className="banner banner-accent update-banner" role="status">
       <div>
         <strong>Tokrate {update.available.version} is available.</strong>
-        <span>Install when you’re ready. Updates never install automatically.</span>
+        <span>
+          {manual
+            ? "Download the .deb package and install it with your package manager."
+            : "Install when you’re ready. Updates never install automatically."}
+        </span>
       </div>
       <div className="banner-actions">
-        <button
-          type="button"
-          className="btn btn-primary btn-sm"
-          disabled={update.installInFlight}
-          onClick={() => void store.installAvailableUpdate()}
-        >
-          {update.installInFlight ? "Installing…" : "Install update"}
-        </button>
+        {manual ? (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => store.openWebsite("desktop-downloads")}
+          >
+            Download update
+            <ArrowUpRight size={16} aria-hidden="true" />
+          </button>
+        ) : update.preferences?.mode === "native" ? (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={update.installInFlight}
+            onClick={() => void store.installAvailableUpdate()}
+          >
+            {update.installInFlight ? "Installing…" : "Install update"}
+          </button>
+        ) : null}
         <button
           type="button"
           className="btn btn-secondary btn-sm"

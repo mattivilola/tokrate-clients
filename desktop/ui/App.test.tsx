@@ -93,6 +93,64 @@ describe("a render error in data views", () => {
   });
 });
 
+describe("Debian update settings", () => {
+  it("checks manually and links to the validated package without offering installation", async () => {
+    const preview = createPreviewBridge({ scenario: "empty", view: "home" });
+    const openWebsite = vi.fn(async () => {});
+    const checkUpdate = vi.fn(async () => ({
+      started: true,
+      update: {
+        version: "0.1.28",
+        body: "Debian release notes",
+      },
+    }));
+    const installUpdate = vi.fn(async () => {});
+    const bridge: Bridge = {
+      ...preview,
+      updatePreferences: async () => ({
+        automaticChecks: false,
+        mode: "manual",
+        settingsWarning: null,
+        currentVersion: "0.1.27",
+      }),
+      openWebsite,
+      checkUpdate,
+      installUpdate,
+    };
+    const store = new AppStore(bridge, {});
+
+    await show(store);
+    await act(async () => store.openSettings());
+    await vi.waitFor(() =>
+      expect(host.textContent).toContain("Check for updates"),
+    );
+
+    const checkButton = [...host.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Check for updates"),
+    );
+    expect(checkButton).toBeDefined();
+    await act(async () => {
+      checkButton?.click();
+      await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledWith(false));
+    });
+    await vi.waitFor(() =>
+      expect(host.textContent).toContain("Tokrate 0.1.28 is available."),
+    );
+
+    const downloadButton = [...host.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Download update"),
+    );
+    expect(downloadButton).toBeDefined();
+    await act(async () => downloadButton?.click());
+    expect(openWebsite).toHaveBeenCalledWith("desktop-downloads");
+    expect(host.textContent).not.toContain("Install update");
+    expect(host.textContent).not.toContain("Download and install");
+
+    await act(async () => store.installAvailableUpdate());
+    expect(installUpdate).not.toHaveBeenCalled();
+  });
+});
+
 describe("Kimi Code", () => {
   it("is listed as a source in settings", async () => {
     const store = new AppStore(createPreviewBridge({ scenario: "default", view: "home" }), {});

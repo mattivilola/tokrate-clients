@@ -70,9 +70,107 @@ beforeEach(() => {
   vi.stubGlobal("document", { hidden: false, addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal("window", { addEventListener() {}, removeEventListener() {} });
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+function captureIntervals() {
+  const intervals: { callback: () => void; delay: number | undefined }[] = [];
+  vi.spyOn(globalThis, "setInterval").mockImplementation(((
+    handler: TimerHandler,
+    timeout?: number,
+  ) => {
+    if (typeof handler === "function")
+      intervals.push({ callback: handler as () => void, delay: timeout });
+    return 0;
+  }) as typeof globalThis.setInterval);
+  return intervals;
+}
 
 describe("AppStore", () => {
+  it("describes Debian metadata checks without claiming package signatures were verified", async () => {
+    let finishCheck!: (result: { started: boolean; update: null }) => void;
+    const pendingCheck = new Promise<{ started: boolean; update: null }>((resolve) => {
+      finishCheck = resolve;
+    });
+    const store = new AppStore(
+      bridge({
+        updatePreferences: async () => ({
+          automaticChecks: false,
+          mode: "manual",
+          settingsWarning: null,
+          currentVersion: "0.1.27",
+        }),
+        checkUpdate: async () => pendingCheck,
+      }),
+    );
+    await store.loadUpdatePreferences();
+
+    const checking = store.checkForUpdates(false);
+    expect(store.getState().update.status).toBe(
+      "Checking Tokrate’s Debian update feed…",
+    );
+    finishCheck({ started: true, update: null });
+    await checking;
+  });
+
+  it("checks Debian updates at startup and on revisit while sharing is off", async () => {
+    const intervals = captureIntervals();
+    const checkUpdate = vi.fn(async () => ({ started: true, update: null }));
+    const store = new AppStore(
+      bridge({
+        updatePreferences: async () => ({
+          automaticChecks: true,
+          mode: "manual",
+          settingsWarning: null,
+          currentVersion: "0.1.27",
+        }),
+        checkUpdate,
+      }),
+    );
+
+    store.start();
+    await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(store.getState().update.checkInFlight).toBe(false));
+    expect(store.getState().snapshot.settings.sharing).toBe(false);
+    expect(checkUpdate).toHaveBeenNthCalledWith(1, true);
+
+    const revisit = intervals.find((interval) => interval.delay === 60 * 60 * 1000);
+    expect(revisit).toBeDefined();
+    revisit?.callback();
+    await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledTimes(2));
+    expect(checkUpdate).toHaveBeenNthCalledWith(2, true);
+    store.stop();
+  });
+
+  it("keeps startup and periodic update networking disabled in native smoke mode", async () => {
+    const intervals = captureIntervals();
+    const checkUpdate = vi.fn(async () => ({ started: true, update: null }));
+    const smokeSnapshot = snapshot({ smoke: true });
+    const store = new AppStore(
+      bridge({
+        snapshot: async () => smokeSnapshot,
+        updatePreferences: async () => ({
+          automaticChecks: true,
+          mode: "native",
+          settingsWarning: null,
+          currentVersion: "0.1.27",
+        }),
+        checkUpdate,
+      }),
+    );
+
+    store.start();
+    await vi.waitFor(() => expect(store.getState().update.loaded).toBe(true));
+    const revisit = intervals.find((interval) => interval.delay === 60 * 60 * 1000);
+    expect(revisit).toBeDefined();
+    revisit?.callback();
+    await Promise.resolve();
+    expect(checkUpdate).not.toHaveBeenCalled();
+    store.stop();
+  });
+
   it("keeps the same snapshot object when a poll returns nothing new", async () => {
     const store = new AppStore(bridge());
     await store.refresh();

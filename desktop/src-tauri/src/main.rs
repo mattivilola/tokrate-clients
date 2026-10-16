@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod badge;
 mod board;
+mod deb_updates;
 mod flyout;
 mod notifier;
 mod runtime;
@@ -96,9 +97,13 @@ async fn perform_update_check(
     state: State<'_, UpdateShared>,
     automatic: bool,
 ) -> Result<UpdateCheckResult, String> {
-    let started = {
+    let (started, manual_mode) = {
         let mut state = state.lock().unwrap();
-        state.begin_check(automatic, chrono::Utc::now().timestamp())?
+        let manual_mode = state.is_manual_mode();
+        (
+            state.begin_check(automatic, chrono::Utc::now().timestamp())?,
+            manual_mode,
+        )
     };
     if !started {
         return Ok(UpdateCheckResult {
@@ -107,6 +112,9 @@ async fn perform_update_check(
         });
     }
     let result = async {
+        if manual_mode {
+            return deb_updates::check().await;
+        }
         let update = app
             .updater_builder()
             .timeout(Duration::from_secs(30))

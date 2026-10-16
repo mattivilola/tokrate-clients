@@ -1411,7 +1411,7 @@ fn a_kimi_sample_is_shared_only_for_moonshot_or_unknown_without_a_cache_write() 
         assert_eq!(sample.client, "kimi-code");
         assert_eq!(sample.parser_version, "kimi-wire-v1");
         assert_eq!(sample.metric_version, "kimi-observed-turn-v1");
-        assert_eq!(sample.app_version, "0.1.27");
+        assert_eq!(sample.app_version, "0.1.28");
         assert_eq!(sample.model, "k2d8-preview");
         assert_eq!(sample.input_tokens, Some(1_000));
         assert_eq!(sample.cache_read_input_tokens, Some(800));

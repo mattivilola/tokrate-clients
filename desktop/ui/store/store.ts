@@ -158,7 +158,8 @@ export class AppStore {
         const { update, snapshot } = this.state;
         if (
           !snapshot.smoke &&
-          update.preferences?.mode === "native" &&
+          update.preferences &&
+          update.preferences.mode !== "unavailable" &&
           update.preferences.automaticChecks
         )
           void this.checkForUpdates(true);
@@ -327,14 +328,20 @@ export class AppStore {
       const status = smoke
         ? "Updater networking is disabled in native smoke runs."
         : preferences.mode === "manual"
-          ? "Debian package updates are installed manually."
+          ? preferences.automaticChecks
+            ? "Automatic checks are on. Debian package installs remain manual."
+            : "Automatic checks are off. You can still check manually."
           : preferences.mode === "unavailable"
             ? "This installation does not support in-app updates."
             : preferences.automaticChecks
               ? "Automatic checks are on. Updates require your click to install."
               : "Automatic checks are off. You can still check manually.";
       this.setUpdate({ preferences, status });
-      if (!smoke && preferences.mode === "native" && preferences.automaticChecks)
+      if (
+        !smoke &&
+        preferences.mode !== "unavailable" &&
+        preferences.automaticChecks
+      )
         void this.checkForUpdates(true);
     } catch {
       this.setUpdate({ status: "Update preferences could not be loaded." });
@@ -346,9 +353,12 @@ export class AppStore {
       const preferences = await this.bridge.setAutomaticUpdateChecks(enabled);
       this.setUpdate({
         preferences,
-        status: enabled
-          ? "Automatic checks are on. Updates require your click to install."
-          : "Automatic checks are off. You can still check manually.",
+        status:
+          preferences.mode === "manual" && enabled
+            ? "Automatic checks are on. Debian package installs remain manual."
+            : enabled
+              ? "Automatic checks are on. Updates require your click to install."
+              : "Automatic checks are off. You can still check manually.",
       });
       if (enabled) void this.checkForUpdates(true);
     } catch {
@@ -362,12 +372,15 @@ export class AppStore {
       !update.preferences ||
       update.checkInFlight ||
       update.installInFlight ||
-      update.preferences.mode !== "native"
+      update.preferences.mode === "unavailable"
     )
       return;
     this.setUpdate({
       checkInFlight: true,
-      status: "Checking Tokrate’s signed update feed…",
+      status:
+        update.preferences.mode === "manual"
+          ? "Checking Tokrate’s Debian update feed…"
+          : "Checking Tokrate’s signed update feed…",
     });
     try {
       const result = await this.bridge.checkUpdate(automatic);
@@ -382,7 +395,9 @@ export class AppStore {
       this.setUpdate({
         available: result.update,
         status: result.update
-          ? `Version ${result.update.version} is ready if you choose to install it.`
+          ? update.preferences.mode === "manual"
+            ? `Version ${result.update.version} is available. Download it and install it with your package manager.`
+            : `Version ${result.update.version} is ready if you choose to install it.`
           : `Tokrate ${update.preferences.currentVersion} is up to date.`,
       });
     } catch {
@@ -398,6 +413,7 @@ export class AppStore {
     if (
       snapshot.smoke ||
       !update.available ||
+      update.preferences?.mode !== "native" ||
       update.installInFlight ||
       update.checkInFlight
     )

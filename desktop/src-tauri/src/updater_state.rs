@@ -153,7 +153,7 @@ impl UpdateState {
     }
 
     pub fn begin_check(&mut self, automatic: bool, now_unix_seconds: i64) -> Result<bool, String> {
-        if self.smoke || self.mode != UpdateMode::Native {
+        if self.smoke || self.mode == UpdateMode::Unavailable {
             return Err("Updater checks are unavailable for this installation".into());
         }
         if self.check_in_flight {
@@ -187,6 +187,10 @@ impl UpdateState {
 
     pub fn can_use_native_updater(&self) -> bool {
         !self.smoke && self.mode == UpdateMode::Native
+    }
+
+    pub fn is_manual_mode(&self) -> bool {
+        !self.smoke && self.mode == UpdateMode::Manual
     }
 
     pub fn store_pending_update(&mut self, update: Option<Update>) -> Option<UpdateSummary> {
@@ -321,12 +325,19 @@ mod tests {
     }
 
     #[test]
-    fn deb_and_unknown_installers_do_not_use_the_privileged_native_updater() {
+    fn deb_can_check_but_never_use_the_privileged_native_updater() {
         let dir = temporary();
-        for mode in [UpdateMode::Manual, UpdateMode::Unavailable] {
-            let mut state = UpdateState::load_with_mode(dir.clone(), false, mode).unwrap();
-            assert!(state.begin_check(false, 1_000_000).is_err());
-        }
+        let mut deb = UpdateState::load_with_mode(dir.clone(), false, UpdateMode::Manual).unwrap();
+        assert!(deb.begin_check(true, 1_000_000).unwrap());
+        assert!(!deb.can_use_native_updater());
+        deb.finish_check();
+        assert!(!deb.begin_check(true, 1_000_001).unwrap());
+        assert!(deb.begin_check(false, 1_000_001).unwrap());
+        deb.finish_check();
+
+        let mut unknown =
+            UpdateState::load_with_mode(dir.clone(), false, UpdateMode::Unavailable).unwrap();
+        assert!(unknown.begin_check(false, 1_000_002).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 

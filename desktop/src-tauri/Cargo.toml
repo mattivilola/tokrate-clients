@@ -1,6 +1,6 @@
 [package]
 name = "tokrate-desktop"
-version = "0.1.27"
+version = "0.1.28"
 edition = "2021"
 [features]
 custom-protocol = ["tauri/custom-protocol"]
@@ -15,6 +15,7 @@ notify = "=8.2.0"
 tokrate-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
