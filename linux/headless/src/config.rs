@@ -96,6 +96,7 @@ impl Paths {
         {
             return Err("Unsupported settings or non-absolute source path".into());
         }
+        crate::source_config::codex_roots(&settings.codex, &settings.additional_codex_roots)?;
         Ok(settings)
     }
     pub fn lock(&self) -> Result<File> {
@@ -174,6 +175,8 @@ struct Consent {
 pub struct Settings {
     schema_version: u8,
     pub codex: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_codex_roots: Vec<PathBuf>,
     pub claude: PathBuf,
     pub grok: PathBuf,
     pub antigravity: PathBuf,
@@ -188,6 +191,7 @@ impl Settings {
         Ok(Self {
             schema_version: 1,
             codex: env_path("CODEX_HOME", home.join(".codex")).join("sessions"),
+            additional_codex_roots: Vec::new(),
             claude: env_path("CLAUDE_CONFIG_DIR", home.join(".claude")).join("projects"),
             grok: env_path("GROK_HOME", home.join(".grok")).join("sessions"),
             antigravity: home.join(".gemini"),
@@ -199,7 +203,7 @@ impl Settings {
         })
     }
     pub fn roots(&self) -> Vec<(&str, &Path)> {
-        vec![
+        let mut roots: Vec<(&str, &Path)> = vec![
             ("codex", &self.codex),
             ("claude-code", &self.claude),
             ("grok-build", &self.grok),
@@ -208,11 +212,51 @@ impl Settings {
             ("kimi-code", &self.kimi),
             ("kimi-desktop", &self.kimi_desktop),
             ("t3-code", &self.t3),
-        ]
+        ];
+        roots.extend(
+            self.additional_codex_roots
+                .iter()
+                .map(|root| ("codex", root.as_path())),
+        );
+        roots
     }
-    pub fn monitor(&self) -> SourceMonitor {
-        SourceMonitor::new_with_t3_roots(
-            self.codex.clone(),
+    pub fn source_summary(&self) -> String {
+        let mut tools = std::collections::BTreeMap::<&str, (usize, usize)>::new();
+        for (name, path) in self.roots() {
+            let count = tools.entry(name).or_default();
+            count.0 += 1;
+            count.1 += usize::from(path.is_dir());
+        }
+        let summary = tools
+            .into_iter()
+            .filter_map(|(name, (total, present))| {
+                if name == "codex" && total > 1 {
+                    Some(if present == total {
+                        format!("codex ({total} profiles)")
+                    } else {
+                        format!("codex ({present}/{total} profiles present)")
+                    })
+                } else if present > 0 {
+                    Some(name.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" + ");
+        if summary.is_empty() {
+            "No source directories found; check status paths".into()
+        } else {
+            summary
+        }
+    }
+
+    pub fn monitor(&self) -> Result<SourceMonitor> {
+        let mut codex =
+            crate::source_config::codex_roots(&self.codex, &self.additional_codex_roots)?
+                .into_iter();
+        Ok(SourceMonitor::new_with_t3_roots(
+            codex.next().expect("default Codex root is always present"),
             self.claude.clone(),
             self.grok.clone(),
             self.antigravity.clone(),
@@ -222,6 +266,7 @@ impl Settings {
             Some(self.t3.clone()),
             Some(self.t3.join("providers/antigravity")),
         )
+        .with_additional_codex_roots(codex.collect())?)
     }
 }
 

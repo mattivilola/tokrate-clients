@@ -63,7 +63,7 @@ fn metric(id: &str, at: chrono::DateTime<Utc>) -> TurnMetric {
 fn off_and_obsolete_consent_never_call_identity_loader() {
     let (_dir, paths, settings) = configured(false);
     let now = Utc::now();
-    let mut host = Host::new(&paths, &settings, true, now);
+    let mut host = Host::new(&paths, &settings, true, now).unwrap();
     assert!(host
         .activate(&paths, |_| panic!("OFF read a credential"), now)
         .is_none());
@@ -84,7 +84,7 @@ fn off_and_obsolete_consent_never_call_identity_loader() {
     assert!(!paths.consent_valid());
     // Even accepted consent cannot grant credentials to a local-only runtime.
     config::setup(&paths, Some(true)).unwrap();
-    let mut local = Host::new(&paths, &settings, false, now);
+    let mut local = Host::new(&paths, &settings, false, now).unwrap();
     assert!(local
         .activate(&paths, |_| panic!("Local runtime read a credential"), now)
         .is_none());
@@ -108,7 +108,7 @@ fn single_writer_lock_and_custom_roots_survive_setup() {
 fn restart_retry_and_withdrawal_have_future_only_cutoffs() {
     let (_dir, paths, settings) = configured(true);
     let now = Utc::now();
-    let mut host = Host::new(&paths, &settings, true, now);
+    let mut host = Host::new(&paths, &settings, true, now).unwrap();
     host.activate(&paths, |_| Ok(Zeroizing::new([7; 32])), now)
         .unwrap();
     host.queue.enqueue(
@@ -126,7 +126,7 @@ fn restart_retry_and_withdrawal_have_future_only_cutoffs() {
         .unwrap();
     host.queue.enqueue(&[metric("new", now)], later);
     assert!(host.queue.is_empty());
-    let mut restarted = Host::new(&paths, &settings, true, later);
+    let mut restarted = Host::new(&paths, &settings, true, later).unwrap();
     restarted
         .activate(&paths, |_| Ok(Zeroizing::new([7; 32])), later)
         .unwrap();
@@ -138,7 +138,7 @@ fn restart_retry_and_withdrawal_have_future_only_cutoffs() {
 fn upload_results_retry_drop_ack_and_stop_without_regenerating() {
     let (_dir, paths, settings) = configured(true);
     let now = Utc::now();
-    let mut host = Host::new(&paths, &settings, true, now);
+    let mut host = Host::new(&paths, &settings, true, now).unwrap();
     host.activate(&paths, |_| Ok(Zeroizing::new([7; 32])), now)
         .unwrap();
     host.queue.enqueue(&[metric("new", now)], now);
@@ -172,7 +172,7 @@ fn upload_results_retry_drop_ack_and_stop_without_regenerating() {
         &serde_json::to_vec(&host.status).unwrap(),
     )
     .unwrap();
-    let restarted = Host::new(&paths, &settings, true, due + Duration::minutes(5));
+    let restarted = Host::new(&paths, &settings, true, due + Duration::minutes(5)).unwrap();
     assert_eq!(
         restarted.status.last_upload_successful_at,
         Some(due + Duration::minutes(2))
@@ -206,7 +206,7 @@ fn legacy_accepted_upload_status_migrates_to_success_timestamp() {
     )
     .unwrap();
 
-    let restarted = Host::new(&paths, &settings, false, Utc::now());
+    let restarted = Host::new(&paths, &settings, false, Utc::now()).unwrap();
     assert_eq!(restarted.status.last_upload_successful_at, Some(timestamp));
     assert_eq!(
         restarted.status.last_upload_attempt_result.as_deref(),
@@ -261,7 +261,7 @@ fn real_core_poll_saves_only_metrics_and_resumes_checkpoints() {
     let (_dir, paths, settings) = configured(false);
     let now = Utc::now();
     fixture(&settings.codex, now - Duration::seconds(60));
-    let mut host = Host::new(&paths, &settings, false, now);
+    let mut host = Host::new(&paths, &settings, false, now).unwrap();
     host.poll(now).unwrap();
     host.poll(now + Duration::seconds(60)).unwrap();
     assert_eq!(host.history.records().len(), 1);
@@ -270,7 +270,7 @@ fn real_core_poll_saves_only_metrics_and_resumes_checkpoints() {
     let bytes = fs::read_to_string(paths.data.join("history.json")).unwrap();
     assert!(!bytes.contains("SENSITIVE"));
     assert!(!bytes.contains(&settings.codex.to_string_lossy().into_owned()));
-    let mut restarted = Host::new(&paths, &settings, false, now + Duration::seconds(120));
+    let mut restarted = Host::new(&paths, &settings, false, now + Duration::seconds(120)).unwrap();
     restarted.poll(now + Duration::seconds(120)).unwrap();
     assert_eq!(restarted.history.records().len(), 1);
 }
@@ -280,7 +280,7 @@ fn credential_failure_keeps_local_monitoring_and_history_corruption_is_preserved
     let (_dir, paths, settings) = configured(true);
     fs::write(paths.data.join("history.json"), b"unreadable old state").unwrap();
     let now = Utc::now();
-    let mut host = Host::new(&paths, &settings, true, now);
+    let mut host = Host::new(&paths, &settings, true, now).unwrap();
     assert!(host
         .activate(&paths, |_| Err("bad credential".into()), now)
         .is_none());
@@ -385,4 +385,97 @@ async fn real_http_transport_sends_exact_signed_body_and_never_follows_redirects
         .send()
         .await
         .is_err());
+}
+
+#[test]
+fn additional_codex_profiles_are_explicit_and_preserved_by_setup() {
+    let (dir, paths, mut settings) = configured(false);
+    let original = settings.codex.clone();
+    assert!(!fs::read_to_string(paths.config.join("settings.json"))
+        .unwrap()
+        .contains("additional_codex_roots"));
+    let pm = dir.path().join("pm/sessions");
+    fs::create_dir_all(&pm).unwrap();
+    settings.additional_codex_roots.push(pm.clone());
+    write_private_file(
+        paths.config.join("settings.json"),
+        &serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+    config::setup(&paths, Some(false)).unwrap();
+    let loaded = paths.load().unwrap();
+    assert_eq!(loaded.codex, original);
+    assert_eq!(loaded.additional_codex_roots, vec![pm.clone()]);
+    assert!(loaded
+        .source_summary()
+        .contains("codex (1/2 profiles present)"));
+    assert_eq!(
+        loaded
+            .roots()
+            .iter()
+            .filter(|(name, _)| *name == "codex")
+            .count(),
+        2
+    );
+    settings.additional_codex_roots.push(original);
+    write_private_file(
+        paths.config.join("settings.json"),
+        &serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+    assert!(paths.load().is_err());
+}
+
+#[test]
+fn both_codex_profiles_collect_without_backfilling_pre_activation_history() {
+    let (dir, paths, mut settings) = configured(true);
+    let pm = dir.path().join("pm/sessions");
+    settings.additional_codex_roots.push(pm.clone());
+    // Keep the entire synthetic timeline in the past; parsers reject future log timestamps.
+    let now = Utc::now() - Duration::minutes(10);
+    fixture(&settings.codex, now - Duration::minutes(2));
+    fixture(&pm, now - Duration::minutes(2));
+    let file = pm.join("rollout.jsonl");
+    fs::write(
+        &file,
+        fs::read_to_string(&file)
+            .unwrap()
+            .replace("SENSITIVE-TURN", "SENSITIVE-PM-TURN")
+            .replace("SENSITIVE-SESSION", "SENSITIVE-PM-SESSION"),
+    )
+    .unwrap();
+    let mut host = Host::new(&paths, &settings, true, now).unwrap();
+    host.activate(&paths, |_| Ok(Zeroizing::new([7; 32])), now)
+        .unwrap();
+    for seconds in [0, 2, 40, 80] {
+        host.poll(now + Duration::seconds(seconds)).unwrap();
+    }
+    assert_eq!(host.history.records().len(), 2);
+    assert!(
+        host.queue.is_empty(),
+        "Newly configured profiles never backfill older turns"
+    );
+    let fresh_file = pm.join("fresh-session/rollout.jsonl");
+    fixture(fresh_file.parent().unwrap(), now + Duration::minutes(2));
+    fs::write(
+        &fresh_file,
+        fs::read_to_string(&fresh_file)
+            .unwrap()
+            .replace("SENSITIVE-TURN", "SENSITIVE-PM-FRESH")
+            .replace("SENSITIVE-SESSION", "SENSITIVE-PM-FRESH-SESSION"),
+    )
+    .unwrap();
+    host.note_changes(&tokrate_core::SourceChange {
+        paths: [fresh_file.canonicalize().unwrap()].into_iter().collect(),
+        must_rescan: false,
+    });
+    for seconds in [140, 180, 220] {
+        host.poll(now + Duration::seconds(seconds)).unwrap();
+    }
+    assert_eq!(host.history.records().len(), 3);
+    assert_eq!(
+        host.queue.len(),
+        1,
+        "Only a newly completed turn enters sharing"
+    );
 }

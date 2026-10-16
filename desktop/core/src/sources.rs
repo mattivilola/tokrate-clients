@@ -7,9 +7,9 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// Local history keeps what it needs for seven days; so do checkpoints.
@@ -17,6 +17,9 @@ const CHECKPOINT_RETENTION_DAYS: i64 = 7;
 
 const TOTAL_POLL_BUDGET: usize = 1_048_576;
 const CODEX_BUDGET: usize = 294_912;
+const MAX_ADDITIONAL_CODEX_ROOTS: usize = 3;
+const CODEX_SOURCE_NAMES: [&str; MAX_ADDITIONAL_CODEX_ROOTS + 1] =
+    ["codex", "codex-extra-1", "codex-extra-2", "codex-extra-3"];
 const CLAUDE_TOTAL_BUDGET: usize = 294_912;
 // Subagent transcripts get a reserved quarter of Claude's share so primary sessions and
 // subagents each keep service while the other is catching up.
@@ -245,9 +248,103 @@ fn merged_checkpoints(
     Some([first?, second?].concat())
 }
 
-/// Polls the local data roots (Kimi Code has two) under one aggregate content-read limit.
+/// Combines checkpoints for Codex profiles under the existing per-source cap. If any monitor
+/// cannot provide a consistent view, callers keep the previous combined list instead.
+fn merged_codex_checkpoints(
+    lists: impl IntoIterator<Item = Option<Vec<SourceFileCheckpoint>>>,
+) -> Option<Vec<SourceFileCheckpoint>> {
+    let mut checkpoints = Vec::new();
+    for list in lists {
+        checkpoints.extend(list?);
+    }
+    checkpoints.sort_by(|left, right| {
+        right
+            .modified_at
+            .cmp(&left.modified_at)
+            .then_with(|| left.path_digest.cmp(&right.path_digest))
+    });
+    let mut seen = HashSet::new();
+    checkpoints.retain(|checkpoint| seen.insert(checkpoint.path_digest.clone()));
+    checkpoints.truncate(MAX_FILES);
+    Some(checkpoints)
+}
+
+/// A Codex profile owns its own discovery/read cursors, while sharing the source budget and
+/// checkpoint list with the other configured profiles.
+struct CodexProfile {
+    root: PathBuf,
+    monitor: Monitor,
+    checkpoint_available: bool,
+}
+
+impl CodexProfile {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            monitor: Monitor::new(root.clone()),
+            root,
+            checkpoint_available: false,
+        }
+    }
+}
+
+/// Normalizes path components without touching the filesystem so overlapping roots are rejected
+/// even when a configured path contains `.` or `..`. Hosts may additionally canonicalize paths
+/// that already exist to catch symlink aliases.
+fn normalized_components(path: &Path) -> Vec<std::ffi::OsString> {
+    let mut values = Vec::new();
+    let mut kinds = Vec::new();
+    let mut rooted = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                values.push(prefix.as_os_str().to_os_string());
+                kinds.push(0u8);
+            }
+            Component::RootDir => {
+                values.push(component.as_os_str().to_os_string());
+                kinds.push(1u8);
+                rooted = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if kinds.last() == Some(&2) {
+                    values.pop();
+                    kinds.pop();
+                } else if !rooted {
+                    values.push("..".into());
+                    kinds.push(3u8);
+                }
+            }
+            Component::Normal(name) => {
+                values.push(name.to_os_string());
+                kinds.push(2u8);
+            }
+        }
+    }
+    values
+}
+
+fn codex_roots_overlap(left: &Path, right: &Path) -> bool {
+    let left = normalized_components(left);
+    let right = normalized_components(right);
+    let is_prefix = |short: &[std::ffi::OsString], long: &[std::ffi::OsString]| {
+        short.len() <= long.len() && short.iter().zip(long).all(|(a, b)| a == b)
+    };
+    is_prefix(&left, &right) || is_prefix(&right, &left)
+}
+
+fn codex_profile_index(source: &str) -> Option<usize> {
+    CODEX_SOURCE_NAMES.iter().position(|name| *name == source)
+}
+
+fn codex_profile_budget(profile_count: usize, index: usize) -> usize {
+    let base = CODEX_BUDGET / profile_count;
+    let remainder = CODEX_BUDGET % profile_count;
+    base + usize::from(index < remainder)
+}
+
+/// Polls the local data roots under one aggregate content-read limit.
 pub struct SourceMonitor {
-    codex_root: PathBuf,
     claude_root: PathBuf,
     grok_root: PathBuf,
     antigravity_root: PathBuf,
@@ -257,7 +354,7 @@ pub struct SourceMonitor {
     antigravity_t3_profiles_root: Option<PathBuf>,
     t3_root: Option<PathBuf>,
     t3_identity: Arc<T3ClaudeIdentityIndex>,
-    codex: Monitor,
+    codex_profiles: Vec<CodexProfile>,
     claude: DelegatedSource,
     kimi_cli: DelegatedSource,
     kimi_desktop: DelegatedSource,
@@ -333,7 +430,7 @@ impl SourceMonitor {
     ) -> Self {
         let t3_identity = Arc::new(T3ClaudeIdentityIndex::default());
         Self {
-            codex: Monitor::new(codex_root.clone()),
+            codex_profiles: vec![CodexProfile::new(codex_root.clone())],
             claude: DelegatedSource::claude(claude_root.clone(), t3_identity.clone()),
             kimi_cli: DelegatedSource::kimi(kimi_cli_root.clone(), ToolSurface::Cli),
             kimi_desktop: DelegatedSource::kimi(kimi_desktop_root.clone(), ToolSurface::Desktop),
@@ -343,7 +440,6 @@ impl SourceMonitor {
                 antigravity_t3_profiles_root.clone(),
             ),
             opencode: OpenCodeMonitor::new(opencode_root.clone()),
-            codex_root,
             claude_root,
             grok_root,
             antigravity_root,
@@ -358,11 +454,58 @@ impl SourceMonitor {
         }
     }
 
+    /// Adds up to three explicit Codex profile roots. Each profile gets its own reader cursors and
+    /// watcher identity, while all profiles together keep Codex's existing share of the poll byte
+    /// budget. Roots that are equal or contain one another are rejected to avoid duplicate scans.
+    pub fn with_additional_codex_roots(
+        mut self,
+        roots: Vec<PathBuf>,
+    ) -> Result<Self, crate::CoreError> {
+        if roots.len() > MAX_ADDITIONAL_CODEX_ROOTS
+            || self.codex_profiles.len() + roots.len() > CODEX_SOURCE_NAMES.len()
+        {
+            return Err(crate::CoreError::InvalidRequest(
+                "at most three additional Codex roots are supported",
+            ));
+        }
+        let mut configured: Vec<PathBuf> = self
+            .codex_profiles
+            .iter()
+            .map(|profile| profile.root.clone())
+            .collect();
+        for root in roots {
+            if configured
+                .iter()
+                .any(|existing| codex_roots_overlap(existing, &root))
+            {
+                return Err(crate::CoreError::InvalidRequest(
+                    "Codex roots must be distinct and non-overlapping",
+                ));
+            }
+            configured.push(root.clone());
+            self.codex_profiles.push(CodexProfile::new(root));
+        }
+        Ok(self)
+    }
+
     pub fn set_root(&mut self, source: &str, root: PathBuf) -> io::Result<()> {
         match source {
             "codex" => {
-                self.codex_root = root.clone();
-                self.codex = Monitor::new(root);
+                if self
+                    .codex_profiles
+                    .iter()
+                    .skip(1)
+                    .any(|profile| codex_roots_overlap(&profile.root, &root))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Codex roots must be distinct and non-overlapping",
+                    ));
+                }
+                let profile = &mut self.codex_profiles[0];
+                profile.root = root.clone();
+                profile.monitor = Monitor::new(root);
+                profile.checkpoint_available = false;
             }
             "claude-code" => {
                 self.claude_root = root.clone();
@@ -411,8 +554,10 @@ impl SourceMonitor {
     }
 
     pub fn root(&self, source: &str) -> Option<&PathBuf> {
+        if let Some(index) = codex_profile_index(source) {
+            return self.codex_profiles.get(index).map(|profile| &profile.root);
+        }
         match source {
-            "codex" => Some(&self.codex_root),
             "claude-code" => Some(&self.claude_root),
             "grok-build" => Some(&self.grok_root),
             "antigravity" => Some(&self.antigravity_root),
@@ -434,12 +579,26 @@ impl SourceMonitor {
 
         // Each monitor notices a root that is missing or has just appeared; a missing one costs a
         // stat per poll.
-        match self.codex.poll_with_budget(now, CODEX_BUDGET) {
-            Ok(found) => records.extend(found),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => self.had_source_error = true,
+        let codex_profile_count = self.codex_profiles.len();
+        for (index, profile) in self.codex_profiles.iter_mut().enumerate() {
+            match profile
+                .monitor
+                .poll_with_budget(now, codex_profile_budget(codex_profile_count, index))
+            {
+                Ok(found) => {
+                    profile.checkpoint_available = true;
+                    records.extend(found);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    profile.checkpoint_available = false;
+                }
+                Err(_) => {
+                    profile.checkpoint_available = false;
+                    self.had_source_error = true;
+                }
+            }
+            self.bytes_read_last_poll += profile.monitor.bytes_read_last_poll();
         }
-        self.bytes_read_last_poll += self.codex.bytes_read_last_poll();
         for (source, primary_budget, subagent_budget) in [
             (&mut self.claude, CLAUDE_BUDGET, CLAUDE_SUBAGENT_BUDGET),
             (
@@ -504,7 +663,10 @@ impl SourceMonitor {
     /// Live responses completed since the last call, oldest first (Grok has no per-response
     /// timing and contributes none).
     pub fn take_live_responses(&mut self) -> Vec<ResponseMetric> {
-        let mut responses = self.codex.take_live_responses();
+        let mut responses = Vec::new();
+        for profile in &mut self.codex_profiles {
+            responses.extend(profile.monitor.take_live_responses());
+        }
         responses.extend(self.claude.take_live_responses());
         responses.extend(self.kimi_cli.take_live_responses());
         responses.extend(self.kimi_desktop.take_live_responses());
@@ -522,7 +684,10 @@ impl SourceMonitor {
     /// request failed (Claude Code, Codex, OpenCode and Kimi Code; Grok Build and Antigravity
     /// contribute none). Memory only, in no particular order.
     pub fn take_request_outcomes(&mut self) -> Vec<RequestOutcome> {
-        let mut outcomes = self.codex.take_request_outcomes();
+        let mut outcomes = Vec::new();
+        for profile in &mut self.codex_profiles {
+            outcomes.extend(profile.monitor.take_request_outcomes());
+        }
         outcomes.extend(self.claude.take_request_outcomes());
         outcomes.extend(self.kimi_cli.take_request_outcomes());
         outcomes.extend(self.kimi_desktop.take_request_outcomes());
@@ -543,7 +708,11 @@ impl SourceMonitor {
                 .collect(),
             must_rescan: change.must_rescan,
         };
-        let codex = within(&self.codex_root);
+        let mut noted_codex = false;
+        for profile in &mut self.codex_profiles {
+            let profile_change = within(&profile.root);
+            noted_codex |= profile.monitor.note_changes(&profile_change);
+        }
         let claude = within(&self.claude_root);
         let kimi_cli = within(&self.kimi_cli_root);
         let kimi_desktop = within(&self.kimi_desktop_root);
@@ -578,7 +747,6 @@ impl SourceMonitor {
         if noted_t3_state {
             self.t3_identity.invalidate();
         }
-        let noted_codex = self.codex.note_changes(&codex);
         let noted_claude = self.claude.note_changes(&claude);
         let noted_kimi_cli = self.kimi_cli.note_changes(&kimi_cli);
         let noted_kimi_desktop = self.kimi_desktop.note_changes(&kimi_desktop);
@@ -604,25 +772,34 @@ impl SourceMonitor {
     /// left to read or discovery waiting, else the earliest delegation settle or parser flush,
     /// else `None` (only a watcher note or the host's idle cadence needs to wake the poll).
     pub fn next_poll_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        [
-            self.codex.next_poll_deadline(now),
-            self.claude.next_poll_deadline(now),
-            self.kimi_cli.next_poll_deadline(now),
-            self.kimi_desktop.next_poll_deadline(now),
-            self.grok.next_poll_deadline(now),
-            self.antigravity.next_poll_deadline(now),
-            self.opencode.next_poll_deadline(now),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
+        self.codex_profiles
+            .iter()
+            .filter_map(|profile| profile.monitor.next_poll_deadline(now))
+            .chain(
+                [
+                    self.claude.next_poll_deadline(now),
+                    self.kimi_cli.next_poll_deadline(now),
+                    self.kimi_desktop.next_poll_deadline(now),
+                    self.grok.next_poll_deadline(now),
+                    self.antigravity.next_poll_deadline(now),
+                    self.opencode.next_poll_deadline(now),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .min()
     }
 
     /// Whether a source's root folder exists now, so a host whose watcher could not start can
     /// retry once it does. `None` for an unknown source.
     pub fn root_exists(&self, source: &str) -> Option<bool> {
+        if let Some(index) = codex_profile_index(source) {
+            return self
+                .codex_profiles
+                .get(index)
+                .map(|profile| profile.monitor.root_exists());
+        }
         match source {
-            "codex" => Some(self.codex.root_exists()),
             "claude-code" => Some(self.claude.primary.root_exists()),
             "t3-code" => Some(self.t3_root.as_deref().is_some_and(Path::is_dir)),
             "kimi-code" => Some(self.kimi_cli.primary.root_exists()),
@@ -648,7 +825,17 @@ impl SourceMonitor {
             }]
         };
         match source {
-            "codex" => whole("codex", &self.codex_root),
+            "codex" => self
+                .codex_profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| WatchFolder {
+                    name: CODEX_SOURCE_NAMES[index],
+                    path: profile.root.clone(),
+                    exists: profile.root.is_dir(),
+                    recursive: true,
+                })
+                .collect(),
             "claude-code" => whole("claude-code", &self.claude_root),
             "t3-code" => self
                 .t3_root
@@ -693,7 +880,10 @@ impl SourceMonitor {
 
     /// Hands the monitors the checkpoints a previous run saved. Call before the first poll.
     pub fn set_checkpoints(&mut self, checkpoints: SourceCheckpoints) {
-        self.codex.set_checkpoints(checkpoints.codex);
+        for profile in &mut self.codex_profiles {
+            profile.monitor.set_checkpoints(checkpoints.codex.clone());
+            profile.checkpoint_available = false;
+        }
         self.claude
             .set_checkpoints(checkpoints.claude_primary, checkpoints.claude_subagents);
         // Both Kimi Code homes get the whole list: a checkpoint applies only to its own path.
@@ -714,10 +904,20 @@ impl SourceMonitor {
         let (cli_primary, cli_subagents) = self.kimi_cli.checkpoints();
         let (desktop_primary, desktop_subagents) = self.kimi_desktop.checkpoints();
         SourceCheckpoints {
-            codex: self
-                .codex
-                .checkpoints()
-                .unwrap_or_else(|| previous.codex.clone()),
+            codex: if self
+                .codex_profiles
+                .iter()
+                .all(|profile| profile.checkpoint_available)
+            {
+                merged_codex_checkpoints(
+                    self.codex_profiles
+                        .iter()
+                        .map(|profile| profile.monitor.checkpoints()),
+                )
+                .unwrap_or_else(|| previous.codex.clone())
+            } else {
+                previous.codex.clone()
+            },
             claude_primary: claude_primary.unwrap_or_else(|| previous.claude_primary.clone()),
             claude_subagents: claude_subagents.unwrap_or_else(|| previous.claude_subagents.clone()),
             kimi_primary: merged_checkpoints([cli_primary, desktop_primary])

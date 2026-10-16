@@ -99,7 +99,7 @@ pub(crate) fn schedule_line(
         "off" => "Sharing off · no upload countdown".into(),
         "stopped" => "Collector stopped · no upload countdown".into(),
         "uploading" => "Upload in progress".into(),
-        "idle" => "No uploads queued · schedule idle".into(),
+        "idle" => "Queue empty · waiting for new shareable turns (check sources in status)".into(),
         "scheduled" => {
             let Some(at) = parse_time(&schedule["next_attempt_at"]) else {
                 return "Estimated next attempt unavailable".into();

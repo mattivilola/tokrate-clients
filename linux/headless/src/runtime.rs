@@ -66,7 +66,12 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(paths: &Paths, settings: &Settings, sharing: bool, now: DateTime<Utc>) -> Self {
+    pub fn new(
+        paths: &Paths,
+        settings: &Settings,
+        sharing: bool,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
         let previous_status = read_private_file(paths.data.join("status.json"), 1_048_576)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Status>(&bytes).ok());
@@ -98,9 +103,9 @@ impl Host {
         let loaded = History::load(paths.data.join("history.json"), now);
         let history_readable = loaded.is_ok();
         let history = loaded.unwrap_or_default();
-        let mut monitor = settings.monitor();
+        let mut monitor = settings.monitor()?;
         monitor.set_checkpoints(history.checkpoints().clone());
-        Self {
+        Ok(Self {
             monitor,
             history,
             queue: SharingQueue::new(),
@@ -122,7 +127,10 @@ impl Host {
                 last_upload_result,
                 ..Status::default()
             },
-        }
+        })
+    }
+    pub(crate) fn note_changes(&mut self, change: &tokrate_core::SourceChange) -> bool {
+        self.monitor.note_changes(change)
     }
     pub fn poll(&mut self, now: DateTime<Utc>) -> Result<()> {
         let found = self.monitor.poll(now)?;
@@ -324,7 +332,7 @@ pub async fn run(paths: Paths, share: bool, once: bool) -> Result<()> {
     }
     let _lock = paths.lock()?;
     let settings = paths.load()?;
-    let mut host = Host::new(&paths, &settings, share, Utc::now());
+    let mut host = Host::new(&paths, &settings, share, Utc::now())?;
     let mut key = host.activate(&paths, credentials::load, Utc::now());
     if share && key.is_none() {
         host.status.monitoring = false;
@@ -379,7 +387,7 @@ pub async fn run(paths: Paths, share: bool, once: bool) -> Result<()> {
         watchers.sync(&host.targets(), &signal);
         let mut wake = signal.take();
         wake.change.must_rescan |= watchers.fallback_rescan_due();
-        let changed = host.monitor.note_changes(&wake.change);
+        let changed = host.note_changes(&wake.change);
         let deadline = host.monitor.next_poll_deadline(now);
         if once
             || changed

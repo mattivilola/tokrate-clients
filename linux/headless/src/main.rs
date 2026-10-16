@@ -3,6 +3,7 @@ mod credentials;
 mod dashboard;
 mod runtime;
 mod runtime_status;
+mod source_config;
 mod telemetry;
 mod updater;
 // These modules have no Tauri dependency. Share the tested native watcher implementation and

@@ -42,6 +42,8 @@ mod outcome_tests;
 #[cfg(test)]
 mod provider_errors_tests;
 #[cfg(test)]
+mod source_profile_tests;
+#[cfg(test)]
 mod tests;
 
 pub use antigravity::AntigravityMonitor;

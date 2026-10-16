@@ -213,6 +213,39 @@ install lifecycle check against a temporary staged root with a fake
 `systemctl`, a disposable test account, and an encrypted-key roundtrip. It
 does not alter the host's service files or install on a real server.
 
+## Additional Codex profiles (0.1.29)
+
+The default Codex session root is chosen at first setup. Rerunning setup
+preserves that saved root; a later `CODEX_HOME` used by another agent process
+does not automatically change Tokrate's scope. `status` lists every configured
+root and the monitor dates its newest local completed turn. A live collector
+heartbeat does not mean the displayed turn happened recently.
+
+To monitor another explicit profile while keeping the original, stop the
+selected collector service and use `sudoedit` on
+`/etc/tokrate-headless/alice/settings.json`. Preserve every existing setting
+and add this optional property (replace the path with that profile's actual
+`sessions` directory):
+
+```json
+"additional_codex_roots": ["/home/alice/.agents/codex-home/pm/sessions"]
+```
+
+Keep the JSON commas valid, then start the same local or sharing service and
+inspect `tokrate-headless status`. Settings stay root-owned; do not chmod or
+chown them to make an editor or ordinary user command write them. The list
+allows at most three extra roots (four total), rejects overlapping/duplicate
+roots including existing symlink aliases, and shares the existing Codex read
+budget. No process inspection, broad home scan or automatic profile discovery
+is introduced. The monitor shows a profile count when more than one Codex
+root exists.
+
+A newly configured profile can populate local history, but only new eligible
+completions after sharing starts enter uploads. An empty queue has nothing to
+flush; neither adding a root nor restarting backfills old turns. Earlier
+binaries do not understand a nonempty additional-root list; remove that
+property before an intentional downgrade below 0.1.29.
+
 ## Collector dashboard (0.1.29)
 
 `status-monitor` adds monotonic collector uptime and heartbeat age, an estimated

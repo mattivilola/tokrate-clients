@@ -306,14 +306,7 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<bool> {
                 }
                 status["source_summary"] = paths
                     .load()
-                    .map(|s| {
-                        s.roots()
-                            .into_iter()
-                            .filter(|(_, p)| p.exists())
-                            .map(|(name, _)| name.to_owned())
-                            .collect::<Vec<_>>()
-                            .join(" + ")
-                    })
+                    .map(|settings| settings.source_summary())
                     .unwrap_or_else(|_| "Setup required".into())
                     .into();
                 status["update_check"] = crate::updater::status_value(crate::APP_VERSION);
@@ -373,6 +366,24 @@ mod tests {
         assert!(rendered.contains("RSP response / TURN whole-turn"));
         assert!(rendered.contains("[Q] / [ESC]"));
     }
+    #[test]
+    fn old_local_turn_is_dated_even_when_the_collector_is_live() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 16, 14, 0, 0).unwrap();
+        let status = json!({
+            "monitoring":true, "sharing_active":true,
+            "updated_at":now, "uptime_seconds":600,
+            "latest_turn":{"completed_at":"2026-10-15T16:16:40Z"},
+            "upload_schedule":{"state":"idle", "next_attempt_at":null}
+        });
+        for (cols, rows) in [(110, 36), (110, 34), (80, 24)] {
+            let output = render::render_at(&status, &[], cols, rows, false, now);
+            assert!(output.contains("Latest local turn: 2026-10-15 16:16:40 UTC"));
+            assert!(output.contains("Queue empty"));
+            assert!(output.contains("[ESC]"));
+            assert!(output.lines().count() <= rows);
+        }
+    }
+
     #[test]
     fn unavailable_medians_are_not_zero_and_spark_is_bounded() {
         assert_eq!(median(&mut []), None);

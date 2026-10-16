@@ -72,6 +72,36 @@ fn heartbeat_line(status: &Value, heartbeat: Heartbeat) -> String {
     }
 }
 
+fn latest_turn_line(
+    status: &Value,
+    records: &[TurnMetric],
+    now: DateTime<Utc>,
+    demo: bool,
+) -> String {
+    let at = parse_time(&status["latest_turn"]["completed_at"])
+        .filter(|at| *at <= now)
+        .or_else(|| {
+            records
+                .iter()
+                .map(|record| record.completed_at)
+                .filter(|at| *at <= now)
+                .max()
+        });
+    let label = if demo {
+        "Demo local turn"
+    } else {
+        "Latest local turn"
+    };
+    at.map(|at| {
+        format!(
+            "{label}: {} UTC · {}",
+            at.format("%Y-%m-%d %H:%M:%S"),
+            relative_age(at, now)
+        )
+    })
+    .unwrap_or_else(|| format!("{label}: no completed turns recorded"))
+}
+
 fn hero_line(status: &Value) -> String {
     let hero = &status["hero"];
     let label = clean(
@@ -313,6 +343,10 @@ fn render_full(
         format!("{MUTED}{}{RESET}", heartbeat_line(status, heartbeat)),
         format!(
             "{MUTED}{}{RESET}",
+            latest_turn_line(status, records, now, demo)
+        ),
+        format!(
+            "{MUTED}{}{RESET}",
             clean(
                 hero["label"]
                     .as_str()
@@ -390,13 +424,14 @@ fn render_full(
             .iter()
             .position(|line| line.contains("COMPLETED TURN ACTIVITY"));
         if let Some(start) = activity_start {
-            let activity_end = content[start..]
+            let mut activity_end = content[start..]
                 .iter()
                 .position(|line| line.contains("────"))
                 .map(|offset| start + offset)
                 .unwrap_or(content.len());
             while content.len() > body_capacity && activity_end > start + 3 {
                 content.remove(activity_end - 1);
+                activity_end -= 1;
             }
         }
         content.truncate(body_capacity);
@@ -423,8 +458,15 @@ fn render_compact(
         format!("{CORAL}{}{RESET}", hero_line(status)),
     ];
 
+    if rows >= 12 {
+        lines.push(format!(
+            "{MUTED}{}{RESET}",
+            latest_turn_line(status, records, now, demo)
+        ));
+    }
     let mut optional = activity_lines(status, records, now);
-    let remaining = rows.saturating_sub(9);
+    let fixed_rows = lines.len() + if rows >= 9 { 6 } else { 5 } + usize::from(rows >= 17);
+    let remaining = rows.saturating_sub(fixed_rows);
     if remaining >= 3 {
         let max_tool_rows = remaining
             .saturating_sub(2)
