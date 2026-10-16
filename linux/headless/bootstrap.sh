@@ -93,6 +93,65 @@ case "$architecture" in
 esac
 [[ "$expected_sha" =~ ^[[:xdigit:]]{64}$ ]] || fail "the pinned ${architecture} release hash has not been configured"
 
+find_current_service() {
+  running_unit=
+  active_unit=
+  for service_mode in local share; do
+    unit="tokrate-headless-${service_mode}@${target_user}.service"
+    if systemctl is-active --quiet "$unit"; then
+      active_unit=$unit
+      service_pid=$(systemctl show --property=MainPID --value "$unit") || service_pid=
+      if [[ "$service_pid" =~ ^[1-9][0-9]*$ && "/proc/$service_pid/exe" -ef "$installed_binary" ]]; then
+        running_unit=$unit
+        return
+      fi
+    fi
+  done
+}
+
+installed_version=
+installed_binary=/usr/bin/tokrate-headless
+if [[ -f "$installed_binary" && ! -L "$installed_binary" && -x "$installed_binary" ]] \
+  && [[ $(stat -c %u "$installed_binary") == 0 ]]; then
+  installed_mode=$(stat -c %a "$installed_binary")
+  if [[ "$installed_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$installed_mode & 0022) == 0 )); then
+    installed_output=$("$installed_binary" --version) || installed_output=
+    if [[ "$installed_output" =~ ^tokrate-headless\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+      installed_version=${BASH_REMATCH[1]}
+    fi
+  fi
+fi
+if [[ -n "$installed_version" ]] && dpkg --compare-versions "$installed_version" gt "$TOKRATE_VERSION"; then
+  printf 'Installed Tokrate Headless %s is newer than this installer (%s). No changes made.\n' "$installed_version" "$TOKRATE_VERSION"
+  exit 0
+fi
+checker_setup_needed=
+if dpkg --compare-versions "$TOKRATE_VERSION" ge 0.1.28 && [[ ! -f /etc/tokrate-headless/update-checks ]]; then
+  checker_setup_needed=1
+fi
+if [[ "$installed_version" == "$TOKRATE_VERSION" && -z "$mode$checker_setup_needed" \
+  && -f "/etc/tokrate-headless/$target_user/setup-complete" \
+  && -f "/etc/tokrate-headless/$target_user/settings.json" ]]; then
+  find_current_service
+  if [[ -n "$running_unit" ]]; then
+    printf 'Already up to date: Tokrate Headless %s. No download or restart needed.\n' "$installed_version"
+    printf 'Service is running the installed version: %s.\n' "$running_unit"
+    exit 0
+  elif [[ -z "$active_unit" ]]; then
+    printf 'Already up to date: Tokrate Headless %s. No changes made.\n' "$installed_version"
+    printf 'No collector service is running for %s. Check systemctl status before collecting.\n' "$target_user"
+    exit 0
+  fi
+  printf 'Tokrate Headless %s is installed, but the service is using an older binary. Repairing the service.\n' "$installed_version"
+fi
+if [[ "$installed_version" == "$TOKRATE_VERSION" ]]; then
+  printf 'Applying service configuration for installed Tokrate Headless %s.\n' "$TOKRATE_VERSION"
+elif [[ -n "$installed_version" ]]; then
+  printf 'Updating Tokrate Headless %s → %s for %s.\n' "$installed_version" "$TOKRATE_VERSION" "$target_user"
+else
+  printf 'Installing Tokrate Headless %s for %s.\n' "$TOKRATE_VERSION" "$target_user"
+fi
+
 if [[ -z "$mode" && ( ! -r /dev/tty || ! -w /dev/tty ) ]]; then
   fail 'an interactive terminal is required unless --share or --local-only is supplied'
 fi
@@ -167,3 +226,20 @@ else
     sudo env "${source_env[@]}" "${install_command[@]}" </dev/null
   fi
 fi
+
+verified_version=$("$installed_binary" --version) || fail 'Installer finished, but the installed binary could not report its version'
+[[ "$verified_version" == "tokrate-headless $TOKRATE_VERSION" ]] || fail "Installer finished, but version $TOKRATE_VERSION was not installed"
+for attempt in {1..10}; do
+  find_current_service
+  [[ -z "$running_unit" ]] || break
+  sleep 0.5
+done
+[[ -n "$running_unit" ]] || fail "Version $TOKRATE_VERSION is installed, but the service could not be verified running that binary; check systemctl status"
+if [[ -z "$installed_version" ]]; then
+  printf 'Installed Tokrate Headless %s; service started and running: %s.\n' "$TOKRATE_VERSION" "$running_unit"
+elif [[ "$installed_version" == "$TOKRATE_VERSION" ]]; then
+  printf 'Tokrate Headless %s confirmed; service restarted and running: %s.\n' "$TOKRATE_VERSION" "$running_unit"
+else
+  printf 'Updated Tokrate Headless %s → %s; service restarted and running: %s.\n' "$installed_version" "$TOKRATE_VERSION" "$running_unit"
+fi
+
