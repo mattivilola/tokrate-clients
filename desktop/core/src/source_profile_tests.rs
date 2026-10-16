@@ -2,7 +2,7 @@ use crate::{SourceChange, SourceCheckpoints, SourceMonitor, TurnMetric, CODEX_CL
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs::{self, File, FileTimes, OpenOptions};
+use std::fs::{self, FileTimes, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, SystemTime};
@@ -131,7 +131,9 @@ fn write_turn(
     }
     fs::write(&path, contents).unwrap();
     if let Some(modified_at) = modified_at {
-        File::open(&path)
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_times(FileTimes::new().set_modified(modified_at))
             .unwrap();
