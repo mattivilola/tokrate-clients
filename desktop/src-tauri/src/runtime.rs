@@ -1395,6 +1395,7 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
     };
     // Wall-clock time of the last board fetch: the board follows its own cadence, not uploads.
     let mut last_board: Option<DateTime<Utc>> = None;
+    let mut last_upload_attempt: Option<DateTime<Utc>> = None;
     loop {
         let batch = {
             let mut s = shared.lock().unwrap();
@@ -1403,9 +1404,11 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
             }
             s.queue.upload_batch(Utc::now())
         };
-        if !batch.is_empty() {
+        if !batch.is_empty() && schedule::upload_attempt_due(Utc::now(), last_upload_attempt) {
+            let attempt_at = Utc::now();
+            last_upload_attempt = Some(attempt_at);
             if let Ok(request) =
-                signed_request(&batch.samples, &batch.request_counts, &key, Utc::now())
+                signed_request(&batch.samples, &batch.request_counts, &key, attempt_at)
             {
                 let upload = {
                     let s = shared.lock().unwrap();
@@ -1460,13 +1463,17 @@ async fn sharing_loop(shared: Arc<Mutex<Runtime>>, generation: u64) {
         }
         // Samples whose five-minute period has not ended wait in the queue; the loop wakes when the
         // next one becomes eligible, or for the board, whichever is first.
-        let next_upload = {
-            let s = shared.lock().unwrap();
+        let now = Utc::now();
+        let (next_eligible, has_ready_batch) = {
+            let mut s = shared.lock().unwrap();
             if !s.valid(generation) {
                 return;
             }
-            s.queue.next_eligible_after(Utc::now())
+            let has_ready_batch = !s.queue.upload_batch(now).is_empty();
+            (s.queue.next_eligible_after(now), has_ready_batch)
         };
+        let next_upload =
+            schedule::next_upload_attempt(now, last_upload_attempt, next_eligible, has_ready_batch);
         tokio::time::sleep(schedule::sharing_delay(Utc::now(), last_board, next_upload)).await;
     }
 }

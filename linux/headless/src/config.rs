@@ -25,7 +25,7 @@ The server derives a continent from the connection through Cloudflare; it stores
 country nor IP in measurements. Public regional data requires at least three contributors;\n\
 other early aggregates may have one. Hosting/network providers still process connection data.\n\
 Only new observations after sharing starts are eligible; no historical backfill. Uploads are\n\
-delayed to five-minute slots with random jitter. Pending reports stay in bounded memory.\n\
+grouped after five-minute buckets close, with a one-minute wait plus up to one minute of shared random jitter (normally about 1–7 minutes after completion; offline or delayed collection can take longer). Pending reports stay in bounded memory.\n\
 Local normalized history lasts seven days (up to 50,000 turns); server samples expire after\n\
 30 days via asynchronous TTL. Stopping sharing clears pending reports, not received reports\n\
 or backups. No automatic updates. Privacy: https://tokrate.dev/privacy\n\

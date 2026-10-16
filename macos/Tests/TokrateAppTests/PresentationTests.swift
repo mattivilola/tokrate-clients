@@ -326,7 +326,7 @@ final class PresentationTests: XCTestCase {
         let sample = try XCTUnwrap((object["samples"] as? [[String: Any]])?.first)
         let expected: Set<String> = ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"]
         XCTAssertEqual(Set(sample.keys), expected)
-        XCTAssertEqual(sample["appVersion"] as? String, "0.1.26")
+        XCTAssertEqual(sample["appVersion"] as? String, "0.1.27")
         XCTAssertEqual(sample["surface"] as? String, "cli")
         XCTAssertEqual(sample["inputTokens"] as? Int, 48_000)
         XCTAssertEqual(sample["cacheReadInputTokens"] as? Int, 36_000)
@@ -342,7 +342,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(counts.count, 1)
         let count = try XCTUnwrap(counts.first)
         XCTAssertEqual(Set(count.keys), ["countId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "succeeded", "overloaded", "serverError", "throttled"])
-        XCTAssertEqual(count["appVersion"] as? String, "0.1.26")
+        XCTAssertEqual(count["appVersion"] as? String, "0.1.27")
         XCTAssertEqual(count["metricVersion"] as? String, "request-outcome-v1")
         XCTAssertEqual(count["model"] as? String, "example-model")
         XCTAssertEqual(count["succeeded"] as? Int, 41)

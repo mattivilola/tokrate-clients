@@ -14,6 +14,8 @@ pub const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// The community board is fetched this often while sharing is on, whether or not anything was
 /// uploaded.
 pub const BOARD_INTERVAL: Duration = Duration::from_secs(30);
+/// Minimum spacing between upload attempts in this host, including failed retries.
+pub const UPLOAD_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// More changed paths than this are dropped in favour of a request to rescan.
 pub const MAX_PENDING_PATHS: usize = 4_096;
 
@@ -47,10 +49,37 @@ pub fn board_due(now: DateTime<Utc>, last_board: Option<DateTime<Utc>>) -> bool 
     })
 }
 
+/// Whether a queued upload may be attempted now. A backwards wall-clock jump permits an attempt,
+/// matching the other time-based gates without holding a retry indefinitely.
+pub fn upload_attempt_due(now: DateTime<Utc>, last_attempt: Option<DateTime<Utc>>) -> bool {
+    last_attempt.map_or(true, |last| {
+        now < last || now - last >= span(UPLOAD_RETRY_INTERVAL)
+    })
+}
+
+/// The next time a queued upload may be attempted. A ready batch waits for the retry gate; a
+/// future batch waits for both its slot and the retry gate. Board reads use their independent clock.
+pub fn next_upload_attempt(
+    now: DateTime<Utc>,
+    last_attempt: Option<DateTime<Utc>>,
+    next_eligible: Option<DateTime<Utc>>,
+    has_ready_batch: bool,
+) -> Option<DateTime<Utc>> {
+    let retry_at = last_attempt
+        .filter(|last| now >= *last)
+        .map(|last| last + span(UPLOAD_RETRY_INTERVAL))
+        .filter(|retry| now < *retry);
+    if has_ready_batch {
+        Some(retry_at.map_or(now, |retry| retry.max(now)))
+    } else {
+        next_eligible.map(|eligible| retry_at.map_or(eligible, |retry| eligible.max(retry)))
+    }
+}
+
 /// How long the sharing loop sleeps after its work at `now`: until the next board fetch, or until
-/// `next_upload` (the next time a waiting sample becomes eligible; `None` when none waits) when
-/// that comes first. Never longer than the board interval, so an upload that failed is retried at
-/// that cadence and the loop never polls faster than the next thing that can happen.
+/// `next_upload` (the next time a waiting sample may be attempted; `None` when none waits) when
+/// that comes first. Never longer than the board interval, so uploads respect their own retry gate
+/// while board reads continue at their independent cadence.
 pub fn sharing_delay(
     now: DateTime<Utc>,
     last_board: Option<DateTime<Utc>>,
@@ -258,6 +287,49 @@ mod tests {
         assert!(!board_due(at(29), Some(at(0))));
         assert!(board_due(at(30), Some(at(0))));
         assert!(board_due(at(-5), Some(at(0))), "a clock that went back");
+    }
+
+    #[test]
+    fn upload_retries_have_an_independent_thirty_second_gate() {
+        let last = at(0);
+        assert!(!upload_attempt_due(at(29), Some(last)));
+        assert!(upload_attempt_due(at(30), Some(last)));
+        assert!(
+            upload_attempt_due(at(-1), Some(last)),
+            "a backwards clock does not stall retries"
+        );
+        assert_eq!(
+            next_upload_attempt(at(5), Some(last), None, true),
+            Some(at(30))
+        );
+        assert_eq!(
+            next_upload_attempt(at(-1), Some(last), None, true),
+            Some(at(-1)),
+            "a backwards clock permits the next attempt immediately"
+        );
+        assert_eq!(
+            next_upload_attempt(at(5), Some(last), Some(at(20)), false),
+            Some(at(30)),
+            "a future slot still respects the attempt gate"
+        );
+    }
+
+    #[test]
+    fn a_retry_gate_does_not_delay_an_independent_board_read() {
+        let last_attempt = at(0);
+        let last_board = at(-10);
+        let now = at(10);
+        assert!(!upload_attempt_due(now, Some(last_attempt)));
+        assert!(!board_due(now, Some(last_board)));
+        let retry = next_upload_attempt(now, Some(last_attempt), None, true);
+        assert_eq!(retry, Some(at(30)));
+        assert_eq!(
+            sharing_delay(now, Some(last_board), retry),
+            Duration::from_secs(10),
+            "the loop wakes for the board before retrying upload"
+        );
+        assert!(board_due(at(20), Some(last_board)));
+        assert!(!upload_attempt_due(at(20), Some(last_attempt)));
     }
 
     #[test]

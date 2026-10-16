@@ -8,9 +8,9 @@ import Foundation
 ///   not in the future, and a dedupe key already seen is ignored, so re-reading a file never counts
 ///   twice. The key set is bounded.
 /// - Totals are summed per (bucket of the outcome's own timestamp, client, client version, parser
-///   version, model, provider). A bucket's totals are due one full period after the bucket closes
-///   (bucket start + 600 s), the moment its samples become uploadable. An outcome for a bucket that is
-///   already due starts a new group, due at the next period boundary.
+///   version, model, provider). A bucket's totals are due one minute after the bucket closes
+///   (bucket start + 360 s), when they enter the shared upload schedule. An outcome for a bucket that is
+///   already due starts a new group, due at the next shifted slot plus its one-minute grace.
 struct RequestOutcomeAggregator {
     static let bucketSeconds: TimeInterval = 300
     /// Dedupe keys remembered; the oldest are forgotten first.
@@ -88,10 +88,10 @@ struct RequestOutcomeAggregator {
         groups.removeAll()
     }
 
-    /// Bucket start + 600 s, or the next period boundary when that has passed already.
+    /// The same shifted five-minute assignment as samples, at the earliest release before jitter.
     private static func dueDate(bucketStart: TimeInterval, firstSeenAt now: Date) -> Date {
-        let onTime = bucketStart + 2 * bucketSeconds
-        guard now.timeIntervalSince1970 >= onTime else { return Date(timeIntervalSince1970: onTime) }
-        return Date(timeIntervalSince1970: (now.timeIntervalSince1970 / bucketSeconds).rounded(.up) * bucketSeconds)
+        let readySlot = ((now.timeIntervalSince1970 - 60) / bucketSeconds).rounded(.up) * bucketSeconds
+        let slot = max(bucketStart + bucketSeconds, readySlot)
+        return Date(timeIntervalSince1970: slot + 60)
     }
 }

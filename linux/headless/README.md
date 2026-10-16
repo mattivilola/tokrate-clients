@@ -6,7 +6,7 @@ dependencies. Local monitoring is the default mode and makes no community
 network requests. Community sharing runs as a separate service and requires
 current consent plus a host-encrypted signing credential.
 
-This is an [initial Debian server alpha](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.26-headless-alpha.1), with native amd64 and arm64 packages. It has no automatic
+This is an [initial Debian server alpha](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.27-headless-alpha.1), with native amd64 and arm64 packages. It has no automatic
 updater or stable-support promise. Read the project privacy information and
 the [shared metrics contract](../../docs/metrics-contract.md) before enabling
 sharing or distributing a build.
@@ -166,3 +166,7 @@ The Debian CI run also executes a root-only install lifecycle check against a
 temporary staged root with a fake `systemctl`, a disposable test account, and
 an encrypted-key roundtrip. It does not alter the host's service files or
 install on a real server.
+
+## Upload timing
+
+Version 0.1.27 shares the desktop core's faster grouped schedule: five-minute buckets, a one-minute wait after closure and up to one extra minute of shared random delay. Completed turns normally arrive about 1–7 minutes later; sleep, offline collection and pending subagent work can take longer. Completion timestamps remain rounded to five minutes. No new telemetry fields or consent version are introduced.

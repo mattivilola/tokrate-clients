@@ -74,7 +74,7 @@ jobs:
           install -m 0644 linux/headless/tokrate-headless-local@.service "$bundle_root/tokrate-headless/tokrate-headless-local@.service"
           install -m 0644 linux/headless/tokrate-headless-share@.service "$bundle_root/tokrate-headless/tokrate-headless-share@.service"
           architecture=$(dpkg --print-architecture)
-          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.26_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
+          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.27_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
       - name: Sign and verify release artifacts
         if: github.event_name != 'pull_request'
         env:
@@ -84,7 +84,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
           node -e 'process.stdout.write(Buffer.from(require("./desktop/src-tauri/tauri.conf.json").plugins.updater.pubkey,"base64"))' > "$RUNNER_TEMP/tokrate-public-key.pub"
           for artifact in "$RUNNER_TEMP"/tokrate-headless-deb/*.deb "$RUNNER_TEMP"/tokrate-headless_*.tar.gz; do
-            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.26 "$artifact"
+            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.27 "$artifact"
             base64 --decode "$artifact.sig" > "$artifact.minisig"
             minisign -Vm "$artifact" -p "$RUNNER_TEMP/tokrate-public-key.pub" -x "$artifact.minisig"
           done
@@ -95,7 +95,7 @@ jobs:
           install -d "$destination"
           cp "$RUNNER_TEMP"/tokrate-headless-deb/*.deb* "$destination/"
           cp "$RUNNER_TEMP"/tokrate-headless_*.tar.gz* "$destination/"
-          test -s "$destination/tokrate-headless_0.1.26_$(dpkg --print-architecture).tar.gz"
+          test -s "$destination/tokrate-headless_0.1.27_$(dpkg --print-architecture).tar.gz"
           echo "path=$destination" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

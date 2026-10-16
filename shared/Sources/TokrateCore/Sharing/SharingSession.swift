@@ -3,19 +3,12 @@ import Observation
 
 /// Owns the active sharing lifetime. Every await is followed by a generation check.
 ///
-/// Uploads leave in slots: the 5-minute UTC boundaries (epoch seconds divisible by 300), each plus a
-/// random delay drawn once per slot. A sample is assigned the first slot at or after both the moment
-/// it was queued and one full period after the end of its own observation bucket
-/// (`SharedSample.observedAt` + 600 s), and waits in the memory queue until that slot's time. So the
-/// upload time says nothing more about when a turn finished than its bucket does: every turn of a
-/// bucket that is ready within one period after it closes (a primary turn waits about 30 s for its
-/// delegated total) leaves in the same slot whenever inside the bucket it finished, a turn queued
-/// much later leaves in the first slot after it was queued, and samples of different buckets queued
-/// in the same period share a slot.
-///
-/// Request counts (contract "Request outcomes (0.1.22)") ride the same slots: a bucket's totals are
-/// queued one full period after the bucket closes, the moment its samples are uploadable, and leave in
-/// the same batches. Both queues are memory only and cleared when sharing stops.
+/// Observation timestamps are five-minute UTC buckets. A normally settled bucket waits one minute
+/// after it closes, then shares a single random delay of up to one minute: usually about 1–7 minutes
+/// after completion. Late-ready records join fixed five-minute slots shifted by the one-minute grace,
+/// never a timer relative to an individual completion or queue time. Samples and request counts share
+/// the same slot jitter; the draw survives acknowledgement for 24 hours. Offline retries, sleep and
+/// outstanding delegated work can take longer. Both queues are memory only and cleared when sharing stops.
 @MainActor @Observable
 public final class SharingSession {
     /// The length of an observation bucket and of an upload slot (contract "Privacy").
@@ -237,13 +230,14 @@ public final class SharingSession {
         countQueue.removeAll { counts.contains($0.entry.countId) }
     }
 
-    /// When a sample or request count of the bucket starting at `observedAt` may leave: its slot's
-    /// boundary plus the slot's random delay. The slot is the first 5-minute UTC boundary at or after both
-    /// the moment of queueing and the end of the bucket plus one full period; its delay is drawn the first
-    /// time the slot is needed.
+    /// When a sample or request count of the bucket starting at `observedAt` may leave. Ordinary
+    /// records use the bucket's next boundary, then wait one minute plus shared slot jitter. Late
+    /// records use five-minute slots shifted one minute earlier, so a queue time up to one minute
+    /// after a slot boundary can still share that slot. The slot jitter is drawn only once.
     private func uploadableAt(observedAt: Date, queuedAt: Date) -> Date {
-        let earliest = max(queuedAt.timeIntervalSince1970, observedAt.timeIntervalSince1970 + 2 * Self.bucketSeconds)
-        let slot = Date(timeIntervalSince1970: (earliest / Self.bucketSeconds).rounded(.up) * Self.bucketSeconds)
+        let queuedSlot = ((queuedAt.timeIntervalSince1970 - 60) / Self.bucketSeconds).rounded(.up) * Self.bucketSeconds
+        let minimumSlot = observedAt.timeIntervalSince1970 + Self.bucketSeconds
+        let slot = Date(timeIntervalSince1970: max(minimumSlot, queuedSlot))
         let jitter: TimeInterval
         if let known = slotJitter[slot] {
             jitter = known
@@ -251,7 +245,7 @@ public final class SharingSession {
             jitter = min(max(0, jitterSource()), Self.maximumJitterSeconds)
             slotJitter[slot] = jitter
         }
-        return slot.addingTimeInterval(jitter)
+        return slot.addingTimeInterval(60 + jitter)
     }
 
     private func stopForRequiredUpdate() {

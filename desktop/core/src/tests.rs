@@ -1164,7 +1164,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.26");
+    assert_eq!(sample.app_version, "0.1.27");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1958,7 +1958,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::minutes(12));
     let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.26");
+    assert_eq!(first[0].app_version, "0.1.27");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2301,7 +2301,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.26-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.27-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2309,7 +2309,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.26-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.27-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2326,7 +2326,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts.len(), 5);
     assert_eq!(counts[0]["client"], "claude-code");
     assert_eq!(counts[0]["overloaded"], 3);
-    assert_eq!(counts[0]["appVersion"], "0.1.26");
+    assert_eq!(counts[0]["appVersion"], "0.1.27");
     assert_eq!(counts[0]["metricVersion"], "request-outcome-v1");
     assert_eq!(counts[1]["serverError"], 1);
     // Throttled is always sent, 0 when there is none.
@@ -2339,12 +2339,12 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts[3]["clientVersion"], "0.159.2");
     assert_eq!(counts[3]["parserVersion"], "codex-rollout-v2");
     assert_eq!(counts[3]["provider"], "openai");
-    assert_eq!(counts[3]["appVersion"], "0.1.26");
+    assert_eq!(counts[3]["appVersion"], "0.1.27");
     assert_eq!(counts[4]["client"], "t3-code");
     assert_eq!(counts[4]["clientVersion"], "2.1.295");
     assert_eq!(counts[4]["parserVersion"], "claude-transcript-v4");
     assert_eq!(counts[4]["provider"], "anthropic");
-    assert_eq!(counts[4]["appVersion"], "0.1.26");
+    assert_eq!(counts[4]["appVersion"], "0.1.27");
     assert_eq!(actual["samples"][0]["client"], "claude-code");
     assert_eq!(actual["samples"][0]["provider"], "anthropic");
     assert_eq!(actual["samples"][0]["ttftMs"], Value::Null);
@@ -2357,7 +2357,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.26");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.27");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2417,7 +2417,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][4]["inputTokens"], 36_590);
     assert_eq!(actual["samples"][4]["cacheReadInputTokens"], 30_976);
     assert_eq!(actual["samples"][4]["cacheWriteInputTokens"], Value::Null);
-    assert_eq!(actual["samples"][4]["appVersion"], "0.1.26");
+    assert_eq!(actual["samples"][4]["appVersion"], "0.1.27");
     assert_eq!(actual["samples"][5]["client"], "t3-code");
     assert_eq!(actual["samples"][5]["clientVersion"], "0.159.2");
     assert_eq!(actual["samples"][5]["parserVersion"], "codex-rollout-v2");
@@ -2425,7 +2425,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][5]["provider"], "openai");
     assert_eq!(actual["samples"][5]["surface"], "other");
     assert_eq!(actual["samples"][5]["ttftMs"], 250.0);
-    assert_eq!(actual["samples"][5]["appVersion"], "0.1.26");
+    assert_eq!(actual["samples"][5]["appVersion"], "0.1.27");
     assert_eq!(actual["samples"][6]["client"], "t3-code");
     assert_eq!(
         actual["samples"][6]["parserVersion"],
@@ -2438,7 +2438,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][6]["provider"], "anthropic");
     assert_eq!(actual["samples"][6]["surface"], "sdk");
     assert_eq!(actual["samples"][6]["cacheWriteInputTokens"], 1_000);
-    assert_eq!(actual["samples"][6]["appVersion"], "0.1.26");
+    assert_eq!(actual["samples"][6]["appVersion"], "0.1.27");
     assert_eq!(actual["samples"][7]["client"], "t3-code");
     assert_eq!(
         actual["samples"][7]["metricVersion"],
@@ -2458,7 +2458,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][8]["provider"], "google");
     assert_eq!(actual["samples"][8]["surface"], "other");
     assert_eq!(actual["samples"][8]["ttftMs"], Value::Null);
-    assert_eq!(actual["samples"][8]["appVersion"], "0.1.26");
+    assert_eq!(actual["samples"][8]["appVersion"], "0.1.27");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2939,7 +2939,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.26");
+    assert_eq!(crate::APP_VERSION, "0.1.27");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -8994,28 +8994,28 @@ fn queue_with_jitter(
 }
 
 #[test]
-fn a_sample_is_not_uploaded_before_a_full_period_after_its_own_plus_its_delay() {
+fn a_sample_waits_for_post_close_grace_and_its_slot_delay() {
     let (mut queue, _) = queue_with_jitter(30);
     queue.enable(time("2026-10-03T09:59:00Z"));
     // Completed in the period 10:00:00 to 10:05:00 and queued at once.
     let completed = time("2026-10-03T10:03:47Z");
     queue.enqueue(&[metric("turn", completed)], completed);
     assert_eq!(queue.len(), 1);
-    let eligible = time("2026-10-03T10:10:30Z");
+    let eligible = time("2026-10-03T10:06:30Z");
     assert_eq!(queue.next_eligible_after(completed), Some(eligible));
     // Neither the period's own end, the next boundary nor the second before the delay.
     for early in [
         "2026-10-03T10:03:48Z",
         "2026-10-03T10:05:00Z",
         "2026-10-03T10:05:30Z",
-        "2026-10-03T10:10:00Z",
-        "2026-10-03T10:10:29Z",
+        "2026-10-03T10:06:00Z",
+        "2026-10-03T10:06:29Z",
     ] {
         assert!(queue.batch(time(early)).is_empty(), "{early}");
     }
     assert_eq!(queue.len(), 1, "waiting samples stay queued");
     assert_eq!(
-        queue.next_eligible_after(time("2026-10-03T10:10:29Z")),
+        queue.next_eligible_after(time("2026-10-03T10:06:29Z")),
         Some(eligible)
     );
     // From the eligible instant on it leaves, and an unacknowledged one is offered again.
@@ -9060,7 +9060,7 @@ fn every_normally_settled_turn_of_a_period_leaves_in_the_same_slot() {
     queue.enqueue(&[metric("next", at)], at);
     assert_eq!(draws_so_far(), 2, "one draw per slot");
 
-    let first_slot = time("2026-10-03T10:10:17Z");
+    let first_slot = time("2026-10-03T10:06:17Z");
     assert!(queue.batch(first_slot - Duration::seconds(1)).is_empty());
     let batch = queue.batch(first_slot);
     assert_eq!(batch.len(), 4, "the whole period leaves together");
@@ -9069,7 +9069,7 @@ fn every_normally_settled_turn_of_a_period_leaves_in_the_same_slot() {
         .all(|sample| sample.observed_at == "2026-10-03T10:00:00Z"));
     assert_eq!(
         queue.next_eligible_after(first_slot),
-        Some(time("2026-10-03T10:15:17Z"))
+        Some(time("2026-10-03T10:11:17Z"))
     );
     queue.ack(
         &batch
@@ -9077,7 +9077,7 @@ fn every_normally_settled_turn_of_a_period_leaves_in_the_same_slot() {
             .map(|sample| sample.sample_id)
             .collect::<Vec<_>>(),
     );
-    let later = queue.batch(time("2026-10-03T10:15:17Z"));
+    let later = queue.batch(time("2026-10-03T10:11:17Z"));
     assert_eq!(later.len(), 1);
     assert_eq!(later[0].observed_at, "2026-10-03T10:05:00Z");
 
@@ -9085,6 +9085,32 @@ fn every_normally_settled_turn_of_a_period_leaves_in_the_same_slot() {
     let at = time("2026-10-03T10:08:30Z");
     queue.enqueue(&[metric("e", at)], at);
     assert_eq!(draws_so_far(), 2);
+}
+
+#[test]
+fn an_acknowledged_slot_keeps_its_jitter_for_later_samples() {
+    let (mut queue, draws) = queue_with_jitter(0);
+    queue.enable(time("2026-10-03T09:59:00Z"));
+    let first_at = time("2026-10-03T10:01:00Z");
+    queue.enqueue(&[metric("first", first_at)], first_at);
+    let first = queue.batch(time("2026-10-03T10:06:00Z"));
+    assert_eq!(first.len(), 1);
+    queue.ack(&[first[0].sample_id]);
+
+    // A later sample from the same observed bucket can still join the acknowledged slot.
+    let queued_at = time("2026-10-03T10:06:00Z");
+    queue.enqueue(
+        &[metric("settled-late", time("2026-10-03T10:04:30Z"))],
+        queued_at,
+    );
+    assert_eq!(
+        draws.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the slot's jitter survives acknowledgement"
+    );
+    let later = queue.batch(queued_at);
+    assert_eq!(later.len(), 1);
+    assert_eq!(later[0].observed_at, "2026-10-03T10:00:00Z");
 }
 
 #[test]
@@ -9097,7 +9123,7 @@ fn a_sample_queued_long_after_its_period_leaves_at_the_next_boundary_plus_the_de
     let queued = time("2026-10-03T10:33:47Z");
     queue.enqueue(&[metric("turn", completed)], queued);
     assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let eligible = time("2026-10-03T10:35:30Z");
+    let eligible = time("2026-10-03T10:36:30Z");
     assert_eq!(queue.next_eligible_after(queued), Some(eligible));
     // Not when its period's own slot would have passed, and not within seconds of being queued.
     for early in [
@@ -9132,10 +9158,10 @@ fn samples_of_different_periods_queued_in_one_window_share_a_slot_and_its_delay(
     assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
         queue.next_eligible_after(queued),
-        Some(time("2026-10-03T10:35:12Z"))
+        Some(time("2026-10-03T10:36:12Z"))
     );
-    assert!(queue.batch(time("2026-10-03T10:35:11Z")).is_empty());
-    let batch = queue.batch(time("2026-10-03T10:35:12Z"));
+    assert!(queue.batch(time("2026-10-03T10:36:11Z")).is_empty());
+    let batch = queue.batch(time("2026-10-03T10:36:12Z"));
     let mut periods: Vec<&str> = batch.iter().map(|s| s.observed_at.as_str()).collect();
     periods.sort();
     assert_eq!(
@@ -9161,48 +9187,48 @@ fn a_sample_queued_exactly_on_a_boundary_takes_that_boundary() {
     let completed = "2026-10-03T10:03:00Z";
     // Queued after the slot of its period: the boundary itself when exactly on it, else the next.
     assert_eq!(
-        slot_of(completed, "2026-10-03T10:20:00Z"),
-        time("2026-10-03T10:20:00Z")
+        slot_of(completed, "2026-10-03T10:21:00Z"),
+        time("2026-10-03T10:21:00Z")
     );
     assert_eq!(
-        slot_of(completed, "2026-10-03T10:19:59Z"),
-        time("2026-10-03T10:20:00Z")
+        slot_of(completed, "2026-10-03T10:20:59Z"),
+        time("2026-10-03T10:21:00Z")
     );
     assert_eq!(
-        slot_of(completed, "2026-10-03T10:20:01Z"),
-        time("2026-10-03T10:25:00Z")
+        slot_of(completed, "2026-10-03T10:21:01Z"),
+        time("2026-10-03T10:26:00Z")
     );
-    // Queued exactly when the slot of its period comes, or earlier: that slot, B + 600.
+    // The period's next slot is never earlier than B + 300.
     assert_eq!(
-        slot_of(completed, "2026-10-03T10:10:00Z"),
-        time("2026-10-03T10:10:00Z")
+        slot_of(completed, "2026-10-03T10:11:00Z"),
+        time("2026-10-03T10:11:00Z")
     );
     assert_eq!(
-        slot_of(completed, "2026-10-03T10:05:00Z"),
-        time("2026-10-03T10:10:00Z")
+        slot_of(completed, "2026-10-03T10:06:00Z"),
+        time("2026-10-03T10:06:00Z")
     );
     assert_eq!(
         slot_of(completed, "2026-10-03T10:04:00Z"),
-        time("2026-10-03T10:10:00Z")
+        time("2026-10-03T10:06:00Z")
     );
     // A turn finishing 10 s into its period and one 295 s into it, each queued 30 s later.
     assert_eq!(
         slot_of("2026-10-03T10:00:10Z", "2026-10-03T10:00:40Z"),
-        time("2026-10-03T10:10:00Z")
+        time("2026-10-03T10:06:00Z")
     );
     assert_eq!(
         slot_of("2026-10-03T10:04:55Z", "2026-10-03T10:05:25Z"),
-        time("2026-10-03T10:10:00Z")
+        time("2026-10-03T10:06:00Z")
     );
 
     // A fraction of a second past a boundary belongs to the next slot.
     let (mut queue, _) = queue_with_jitter(0);
     queue.enable(time("2026-10-03T09:59:00Z"));
-    let queued = time("2026-10-03T10:20:00Z") + Duration::milliseconds(500);
+    let queued = time("2026-10-03T10:21:00Z") + Duration::milliseconds(500);
     queue.enqueue(&[metric("turn", time("2026-10-03T10:03:00Z"))], queued);
     assert_eq!(
         queue.next_eligible_after(time("2026-10-03T09:00:00Z")),
-        Some(time("2026-10-03T10:25:00Z"))
+        Some(time("2026-10-03T10:26:00Z"))
     );
 }
 
@@ -9215,7 +9241,7 @@ fn more_than_fifty_samples_of_one_period_follow_in_the_next_batch() {
         .map(|index| metric(format!("turn-{index}"), time("2026-10-03T10:01:00Z")))
         .collect();
     queue.enqueue(&turns, now);
-    let eligible = time("2026-10-03T10:10:00Z");
+    let eligible = time("2026-10-03T10:06:00Z");
     let first = queue.batch(eligible);
     assert_eq!(first.len(), 50);
     queue.ack(
@@ -9236,7 +9262,7 @@ fn the_upload_delay_is_between_zero_and_sixty_seconds_whatever_the_source_says()
         queue.enqueue(&[metric("turn", completed)], completed);
         assert_eq!(
             queue.next_eligible_after(completed),
-            Some(time("2026-10-03T10:10:00Z") + Duration::seconds(expected)),
+            Some(time("2026-10-03T10:06:00Z") + Duration::seconds(expected)),
             "{drawn}"
         );
     }
@@ -9245,7 +9271,7 @@ fn the_upload_delay_is_between_zero_and_sixty_seconds_whatever_the_source_says()
 #[test]
 fn the_default_upload_delay_is_random_within_a_minute() {
     let completed = time("2026-10-03T10:01:00Z");
-    let slot = time("2026-10-03T10:10:00Z");
+    let slot = time("2026-10-03T10:06:00Z");
     let mut delays = HashSet::new();
     for _ in 0..40 {
         let mut queue = SharingQueue::new();

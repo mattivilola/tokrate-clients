@@ -1186,7 +1186,7 @@ fn drain(queue: &mut SharingQueue, now: DateTime<Utc>) -> Vec<SharedRequestCount
 }
 
 #[test]
-fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
+fn outcomes_are_summed_per_bucket_and_queued_after_its_close_grace() {
     let mut queue = queue(30);
     queue.enable(time("2026-10-09T09:59:00Z"));
     let now = time("2026-10-09T10:07:00Z");
@@ -1199,7 +1199,7 @@ fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
         ],
         now,
     );
-    // Nothing is queued before its bucket's start plus 600 s, and the host is told when to look.
+    // The first bucket was read late, so it is deferred to the next period boundary.
     assert_eq!(queue.request_count_len(), 0);
     assert_eq!(
         queue.next_eligible_after(now),
@@ -1211,13 +1211,23 @@ fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
     assert_eq!(queue.request_count_len(), 1);
     assert_eq!(
         queue.next_eligible_after(time("2026-10-09T10:10:00Z")),
-        Some(time("2026-10-09T10:10:30Z"))
+        Some(time("2026-10-09T10:11:00Z")),
+        "the next bucket's close grace is the next transition"
     );
-    assert!(queue.upload_batch(time("2026-10-09T10:10:29Z")).is_empty());
-    let first = queue.upload_batch(time("2026-10-09T10:10:30Z"));
+    assert!(queue.upload_batch(time("2026-10-09T10:11:29Z")).is_empty());
+    assert_eq!(
+        queue.request_count_len(),
+        2,
+        "both buckets are queued in one shifted slot"
+    );
+    assert_eq!(
+        queue.next_eligible_after(time("2026-10-09T10:11:29Z")),
+        Some(time("2026-10-09T10:11:30Z"))
+    );
+    let first = queue.upload_batch(time("2026-10-09T10:11:30Z"));
     assert!(first.samples.is_empty());
     let entry = &first.request_counts[0];
-    assert_eq!(first.request_counts.len(), 1);
+    assert_eq!(first.request_counts.len(), 2);
     assert_eq!(entry.observed_at, "2026-10-09T10:00:00Z");
     assert_eq!(
         (entry.succeeded, entry.overloaded, entry.server_error),
@@ -1225,25 +1235,50 @@ fn outcomes_are_summed_per_bucket_and_queued_one_period_after_it() {
     );
     assert_eq!(entry.client, "codex");
     assert_eq!(entry.client_version, "1.2.3");
-    assert_eq!(entry.app_version, "0.1.26");
+    assert_eq!(entry.app_version, "0.1.27");
     assert_eq!(entry.parser_version, "codex-rollout-v2");
     assert_eq!(entry.metric_version, "request-outcome-v1");
     assert_eq!(entry.model, "gpt-5");
     assert_eq!(entry.provider, "openai");
     // Unacknowledged, it is offered again with the same id; acknowledged, it is gone.
-    let retry = queue.upload_batch(time("2026-10-09T10:11:00Z"));
+    let retry = queue.upload_batch(time("2026-10-09T10:12:00Z"));
     assert_eq!(retry.request_counts[0].count_id, entry.count_id);
-    // The next bucket follows five minutes later.
-    queue.upload_batch(time("2026-10-09T10:15:00Z"));
-    let second = queue.upload_batch(time("2026-10-09T10:15:30Z"));
-    assert_eq!(second.request_counts.len(), 2);
-    assert_eq!(second.request_counts[1].observed_at, "2026-10-09T10:05:00Z");
-    assert_eq!(second.request_counts[1].server_error, 1);
-    queue.ack_batch(&second);
+    assert_eq!(first.request_counts[1].observed_at, "2026-10-09T10:05:00Z");
+    assert_eq!(first.request_counts[1].server_error, 1);
+    queue.ack_batch(&first);
     assert_eq!(queue.request_count_len(), 0);
     assert_eq!(
-        queue.next_eligible_after(time("2026-10-09T10:16:00Z")),
+        queue.next_eligible_after(time("2026-10-09T10:12:00Z")),
         None
+    );
+}
+
+#[test]
+fn an_outcome_first_seen_exactly_at_close_grace_keeps_its_original_due_time() {
+    let mut queue = queue(30);
+    queue.enable(time("2026-10-09T09:59:00Z"));
+    queue.enqueue_outcomes(
+        &[outcome("at-grace", "2026-10-09T10:04:59Z", Succeeded)],
+        time("2026-10-09T10:06:00Z"),
+    );
+    assert_eq!(
+        queue.next_eligible_after(time("2026-10-09T10:05:59Z")),
+        Some(time("2026-10-09T10:06:00Z"))
+    );
+    assert!(queue.upload_batch(time("2026-10-09T10:06:00Z")).is_empty());
+    assert_eq!(queue.request_count_len(), 1);
+    assert_eq!(
+        queue.next_eligible_after(time("2026-10-09T10:06:00Z")),
+        Some(time("2026-10-09T10:06:30Z")),
+        "the entry uses its bucket's next slot plus one-minute grace and jitter"
+    );
+    assert!(queue.upload_batch(time("2026-10-09T10:06:29Z")).is_empty());
+    assert_eq!(
+        queue
+            .upload_batch(time("2026-10-09T10:06:30Z"))
+            .request_counts
+            .len(),
+        1
     );
 }
 
@@ -1277,9 +1312,9 @@ fn request_counts_and_samples_of_one_slot_share_one_delay_and_one_request() {
         &[outcome("a", "2026-10-09T10:03:00Z", Succeeded)],
         time("2026-10-09T10:03:10Z"),
     );
-    assert!(queue.upload_batch(time("2026-10-09T10:10:00Z")).is_empty());
-    assert!(queue.upload_batch(time("2026-10-09T10:10:16Z")).is_empty());
-    let batch = queue.upload_batch(time("2026-10-09T10:10:17Z"));
+    assert!(queue.upload_batch(time("2026-10-09T10:06:00Z")).is_empty());
+    assert!(queue.upload_batch(time("2026-10-09T10:06:16Z")).is_empty());
+    let batch = queue.upload_batch(time("2026-10-09T10:06:17Z"));
     assert_eq!(batch.samples.len(), 1);
     assert_eq!(batch.request_counts.len(), 1);
     assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1340,7 +1375,7 @@ fn only_outcomes_after_the_consent_started_and_not_in_the_future_count() {
 }
 
 #[test]
-fn a_late_outcome_starts_a_new_entry_for_its_bucket_at_the_next_boundary() {
+fn a_late_outcome_starts_a_new_entry_in_its_shifted_slot() {
     let mut queue = queue(0);
     queue.enable(time("2026-10-09T09:59:00Z"));
     queue.enqueue_outcomes(
@@ -1350,7 +1385,8 @@ fn a_late_outcome_starts_a_new_entry_for_its_bucket_at_the_next_boundary() {
     let sent = queue.upload_batch(time("2026-10-09T10:10:00Z"));
     assert_eq!(sent.request_counts.len(), 1);
     queue.ack_batch(&sent);
-    // The bucket was queued at 10:10; an outcome of it read at 10:12:30 waits for 10:15.
+    // The bucket was queued at 10:10; an outcome read at 10:12:30 joins the 10:15 slot,
+    // which flushes one minute later.
     let late_at = time("2026-10-09T10:12:30Z");
     queue.enqueue_outcomes(
         &[outcome("late", "2026-10-09T10:02:00Z", Overloaded)],
@@ -1358,7 +1394,7 @@ fn a_late_outcome_starts_a_new_entry_for_its_bucket_at_the_next_boundary() {
     );
     assert_eq!(
         queue.next_eligible_after(late_at),
-        Some(time("2026-10-09T10:15:00Z"))
+        Some(time("2026-10-09T10:16:00Z"))
     );
     assert!(queue.upload_batch(time("2026-10-09T10:14:59Z")).is_empty());
     // A second late one before that boundary joins it.
@@ -1366,12 +1402,71 @@ fn a_late_outcome_starts_a_new_entry_for_its_bucket_at_the_next_boundary() {
         &[outcome("late-2", "2026-10-09T10:04:00Z", Overloaded)],
         time("2026-10-09T10:13:30Z"),
     );
-    let batch = queue.upload_batch(time("2026-10-09T10:15:00Z"));
+    assert!(queue.upload_batch(time("2026-10-09T10:15:59Z")).is_empty());
+    let batch = queue.upload_batch(time("2026-10-09T10:16:00Z"));
     assert_eq!(batch.request_counts.len(), 1);
     let entry = &batch.request_counts[0];
     assert_eq!(entry.observed_at, "2026-10-09T10:00:00Z");
     assert_eq!((entry.succeeded, entry.overloaded), (0, 2));
     assert_ne!(entry.count_id, sent.request_counts[0].count_id);
+}
+
+#[test]
+fn late_outcomes_aggregate_until_their_shifted_slot_flushes() {
+    let mut queue = queue(0);
+    queue.enable(time("2026-10-09T09:59:00Z"));
+
+    // At E=360, the bucket's slot is 300 and its outcome flushes at 360.
+    queue.enqueue_outcomes(
+        &[outcome("on-time", "2026-10-09T10:00:30Z", Succeeded)],
+        time("2026-10-09T10:06:00Z"),
+    );
+    let first = queue.upload_batch(time("2026-10-09T10:06:00Z"));
+    assert_eq!(first.request_counts.len(), 1);
+    assert_eq!(first.request_counts[0].succeeded, 1);
+    queue.ack_batch(&first);
+
+    // E=360.001 shifts the same bucket to slot 600. E=650 joins it; both flush at 660.
+    queue.enqueue_outcomes(
+        &[outcome("late-a", "2026-10-09T10:01:00Z", Succeeded)],
+        time("2026-10-09T10:06:00.001Z"),
+    );
+    queue.enqueue_outcomes(
+        &[outcome("late-b", "2026-10-09T10:02:00Z", Overloaded)],
+        time("2026-10-09T10:10:50Z"),
+    );
+    assert_eq!(queue.request_count_len(), 0);
+    assert_eq!(
+        queue.next_eligible_after(time("2026-10-09T10:10:50Z")),
+        Some(time("2026-10-09T10:11:00Z"))
+    );
+
+    // At E=660.001 the slot-600 group settles and the new outcome shifts to slot 900.
+    queue.enqueue_outcomes(
+        &[outcome("later", "2026-10-09T10:03:00Z", ServerError)],
+        time("2026-10-09T10:11:00.001Z"),
+    );
+    let second = queue.upload_batch(time("2026-10-09T10:11:00Z"));
+    assert_eq!(second.request_counts.len(), 1);
+    assert_eq!(
+        (
+            second.request_counts[0].succeeded,
+            second.request_counts[0].overloaded,
+            second.request_counts[0].server_error,
+        ),
+        (1, 1, 0),
+        "the slot-600 entry aggregates both outcomes first seen before its flush"
+    );
+    queue.ack_batch(&second);
+    assert_eq!(queue.request_count_len(), 0);
+    assert_eq!(
+        queue.next_eligible_after(time("2026-10-09T10:11:00.001Z")),
+        Some(time("2026-10-09T10:16:00Z"))
+    );
+    assert!(queue.upload_batch(time("2026-10-09T10:15:59Z")).is_empty());
+    let third = queue.upload_batch(time("2026-10-09T10:16:00Z"));
+    assert_eq!(third.request_counts.len(), 1);
+    assert_eq!(third.request_counts[0].server_error, 1);
 }
 
 #[test]
@@ -1844,7 +1939,7 @@ fn a_request_with_only_counts_is_a_signed_version_2_envelope_with_both_lists() {
     assert_eq!(body["requestCounts"].as_array().unwrap().len(), 1);
     // Keys are sorted, like the samples' keys.
     let text = String::from_utf8(request.body.clone()).unwrap();
-    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.26\",\"client\":\"codex\""));
+    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.27\",\"client\":\"codex\""));
     assert!(text.contains("\"overloaded\":9999,\"parserVersion\""));
     assert!(text.contains("\"serverError\":9999,\"succeeded\":9999,\"throttled\":9999}"));
     assert!(text.ends_with("\"sentAt\":\"2026-10-09T12:05:00Z\"}"));
@@ -1990,7 +2085,7 @@ fn a_group_looked_at_late_still_leaves_in_the_slot_of_its_due_time() {
         &[outcome("a", "2026-10-09T10:01:00Z", Succeeded)],
         time("2026-10-09T10:02:00Z"),
     );
-    // The host only looks at 10:12: the group is due since 10:10 and leaves at 10:10:30 + nothing.
+    // The host only looks at 10:12: the group is due since 10:06 and is already eligible.
     let batch = queue.upload_batch(time("2026-10-09T10:12:00Z"));
     assert_eq!(batch.request_counts.len(), 1);
     // The same for a late group: its due time is the boundary it was read before.

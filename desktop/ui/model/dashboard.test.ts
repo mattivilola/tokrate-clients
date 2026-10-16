@@ -538,7 +538,7 @@ describe("sharing notice", () => {
   });
   it("describes the example's fields, the model name and the upload timing", () => {
     expect(FIELD_DESCRIPTION).toBe(
-      "Region is derived by the server, not sent by the app. The Amazon Bedrock region (providerRegion) is the one the model id itself names and is null for every other route. Model names are sent as your coding tool reports them, so a custom deployment name is shared as is; a name with unusual characters is sent as “unknown”. Uploads leave after each five-minute period ends, so the time of a turn is not sent more precisely than its five-minute period.",
+      "Region is derived by the server, not sent by the app. The Amazon Bedrock region (providerRegion) is the one the model id itself names and is null for every other route. Model names are sent as your coding tool reports them, so a custom deployment name is shared as is; a name with unusual characters is sent as “unknown”. Uploads are grouped after each five-minute period closes, with a one-minute wait and up to one extra minute of random delay shared by the group. Completed turns normally arrive about 1–7 minutes later; offline or unusually delayed collection can take longer. The completion time remains rounded to five minutes.",
     );
   });
   it("lists every kind of field a turn carries", () => {

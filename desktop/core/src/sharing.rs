@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.26";
+pub const APP_VERSION: &str = "0.1.27";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 /// The request-count entries wait in a queue of their own with the same cap.
 pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
@@ -35,8 +35,7 @@ const QUEUE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 /// Samples are timed to this period (`observedAt` is floored to it), and uploads leave at the
 /// boundaries between periods.
 const OBSERVED_PERIOD_SECONDS: i64 = 300;
-/// The samples of an upload slot leave this much longer after its boundary, at most, so the moment
-/// a request is sent says no more than the slot does.
+/// Additional random delay after the one-minute grace period; all records in one slot share it.
 const MAX_UPLOAD_JITTER_MS: i64 = 60_000;
 const MAX_SEEN_LOCAL_IDS: usize = 50_000;
 /// The upper bound the service accepts for delegated subagent output of one turn.
@@ -441,16 +440,13 @@ pub fn example_request_json() -> String {
 type JitterSource = Box<dyn FnMut() -> Duration + Send>;
 
 /// Memory-only queue for post-consent turns. No key material or account identity is stored here.
-/// Uploads leave in slots: the five-minute UTC boundaries (seconds since the epoch divisible by
-/// 300), each with one random delay of up to a minute that all of its samples share. A sample is
-/// given the first boundary at or after both its queueing time and one full period after the end
-/// of its own five-minute period (`observedAt`), and leaves at that boundary plus the slot's
-/// delay. So every normally settled turn of a period leaves in the same slot, whenever inside
-/// the period it finished, and a turn queued long after it ended (one waiting for its subagent
-/// work to settle) leaves at a time that says nothing about when it ended.
+/// Uploads use five-minute slots, with one shared random delay of up to a minute and an additional
+/// one-minute grace after each slot. A sample's slot is
+/// `max(bucket + 300, ceil((queuedAt - 60) / 300) * 300)`, so normally settled turns leave shortly
+/// after their bucket closes and late turns map to shifted five-minute windows.
 ///
 /// Request outcomes are counted per five-minute bucket and enter their own queue of request-count
-/// entries when the bucket is one full period over; see [`SharingQueue::enqueue_outcomes`].
+/// entries one minute after the bucket closes; see [`SharingQueue::enqueue_outcomes`].
 pub struct SharingQueue {
     enabled_since: Option<DateTime<Utc>>,
     pending: VecDeque<PendingSample>,
@@ -460,7 +456,7 @@ pub struct SharingQueue {
     pending_counts: VecDeque<PendingCount>,
     seen_outcomes: HashSet<String>,
     seen_outcome_order: VecDeque<String>,
-    /// The delay drawn for each slot that has queued samples or entries, by the slot's boundary.
+    /// The delay drawn for each slot, retained for up to 24 hours after the slot even after ack.
     jitters: HashMap<i64, Duration>,
     jitter_source: JitterSource,
     /// The most samples the queue ever held at once.
@@ -569,7 +565,7 @@ impl SharingQueue {
                 self.peak_len = self.peak_len.max(self.pending.len());
             }
         }
-        self.forget_unused_jitters();
+        self.forget_unused_jitters(now);
         if self.seen_local_ids.len() > MAX_SEEN_LOCAL_IDS {
             self.seen_local_ids = self
                 .pending
@@ -579,14 +575,16 @@ impl SharingQueue {
         }
     }
 
-    /// When something queued for `slot` may leave: the slot's boundary plus the delay drawn for it.
+    /// When something queued for `slot` may leave: one minute after the slot plus its delay.
     fn slot_eligible_at(&self, slot: i64) -> DateTime<Utc> {
         let jitter = self
             .jitters
             .get(&slot)
             .copied()
             .unwrap_or_else(Duration::zero);
-        DateTime::<Utc>::from_timestamp(slot, 0).unwrap_or(DateTime::<Utc>::MAX_UTC) + jitter
+        DateTime::<Utc>::from_timestamp(slot, 0).unwrap_or(DateTime::<Utc>::MAX_UTC)
+            + Duration::seconds(60)
+            + jitter
     }
 
     /// When a pending sample may leave.
@@ -677,15 +675,13 @@ impl SharingQueue {
     /// and when its model, version and provider are shareable for its client; the same outcome
     /// (by its key) is counted once however often it is read. Outcomes are summed per
     /// (five-minute bucket of their time, client, client version, parser version, model,
-    /// provider). A bucket's sums become one queued entry one full period after the bucket
-    /// started; an outcome for a bucket that already did starts a new entry, queued at the next
-    /// period boundary.
+    /// provider). A bucket's sums become one queued entry one minute after the selected sample
+    /// slot; outcomes first read after that flush start the next shifted sample slot.
     pub fn enqueue_outcomes(&mut self, outcomes: &[RequestOutcome], now: DateTime<Utc>) {
         let Some(enabled_since) = self.enabled_since else {
             return;
         };
         self.settle(now);
-        let now_seconds = now.timestamp() + i64::from(now.timestamp_subsec_nanos() > 0);
         for outcome in outcomes {
             if outcome.occurred_at < enabled_since
                 || outcome.occurred_at > now
@@ -698,11 +694,11 @@ impl SharingQueue {
                 continue;
             };
             self.remember_outcome(outcome.dedupe_key.clone());
-            // A bucket is queued one full period after it ended (its start plus two periods), or at
-            // the next period boundary when that has passed already.
-            let due = key.bucket + 2 * OBSERVED_PERIOD_SECONDS;
+            // Keep outcomes in the same shifted sample slot. Open groups stay together until
+            // that slot's one-minute grace has elapsed, including when discovered late.
+            let flush_at = slot_after(key.bucket, now) + 60;
             let open = self.open_counts.entry(key).or_insert_with(|| OpenCount {
-                flush_at: due.max(next_boundary(now_seconds)),
+                flush_at,
                 ..OpenCount::default()
             });
             match outcome.kind {
@@ -744,9 +740,9 @@ impl SharingQueue {
             if now.timestamp() - key.bucket > QUEUE_RETENTION_SECONDS {
                 continue;
             }
-            // The slot comes from the due time, not from when the host happened to look: the
-            // group shares the slot, and so the delay, of the samples of its bucket.
-            let slot = open.flush_at;
+            // The due time is one minute after the selected slot. Preserve that slot directly,
+            // rather than deriving it from when the host happened to look.
+            let slot = open.flush_at - 60;
             let source = &mut self.jitter_source;
             self.jitters.entry(slot).or_insert_with(|| source());
             for entry in key.entries(&open, Uuid::new_v4) {
@@ -757,7 +753,7 @@ impl SharingQueue {
                 self.pending_counts.push_back(PendingCount { entry, slot });
             }
         }
-        self.forget_unused_jitters();
+        self.forget_unused_jitters(now);
     }
 
     /// Request-count entries waiting to be uploaded.
@@ -789,17 +785,15 @@ impl SharingQueue {
             .retain(|pending| fresh(&pending.sample.observed_at));
         self.pending_counts
             .retain(|pending| fresh(&pending.entry.observed_at));
-        self.forget_unused_jitters();
+        self.forget_unused_jitters(now);
     }
 
-    fn forget_unused_jitters(&mut self) {
-        let slots: HashSet<i64> = self
-            .pending
-            .iter()
-            .map(|pending| pending.slot)
-            .chain(self.pending_counts.iter().map(|pending| pending.slot))
-            .collect();
-        self.jitters.retain(|slot, _| slots.contains(slot));
+    fn forget_unused_jitters(&mut self, now: DateTime<Utc>) {
+        let now = now.timestamp();
+        self.jitters.retain(|slot, _| {
+            let age = now - *slot;
+            (-OBSERVED_PERIOD_SECONDS..=QUEUE_RETENTION_SECONDS).contains(&age)
+        });
     }
 }
 
@@ -1147,10 +1141,8 @@ fn safe_identifier(value: &str, maximum: usize, plus_allowed: bool) -> bool {
         })
 }
 
-/// The upload slot of a sample queued at `queued_at`: the first five-minute UTC boundary at or
-/// after both `queued_at` and the end of the period after the sample's own (`observedAt` + two
-/// periods). The extra period keeps a turn that only settled after its period ended, a delegated
-/// turn waits about 30 s, in the same slot as the turns that finished earlier in that period.
+/// The upload slot for a sample queued at `queued_at`. Slots use five-minute UTC boundaries and
+/// the queue time is shifted back one minute so records arriving within a slot map together.
 fn upload_slot(sample: &SharedSample, queued_at: DateTime<Utc>) -> Option<i64> {
     let period_start = DateTime::parse_from_rfc3339(&sample.observed_at)
         .ok()?
@@ -1159,20 +1151,18 @@ fn upload_slot(sample: &SharedSample, queued_at: DateTime<Utc>) -> Option<i64> {
 }
 
 /// The slot of something queued at `queued_at` that belongs to the period starting at
-/// `period_start`: the first boundary at or after both `queued_at` and the end of the next period.
+/// `period_start`: max(bucket + 300, ceil((queued_at - 60) / 300) * 300), preserving fractions.
 fn slot_after(period_start: i64, queued_at: DateTime<Utc>) -> i64 {
-    let queued = queued_at.timestamp() + i64::from(queued_at.timestamp_subsec_nanos() > 0);
-    next_boundary(queued.max(period_start + 2 * OBSERVED_PERIOD_SECONDS))
-}
-
-/// The first five-minute boundary at or after `seconds`.
-fn next_boundary(seconds: i64) -> i64 {
-    seconds.div_euclid(OBSERVED_PERIOD_SECONDS) * OBSERVED_PERIOD_SECONDS
-        + if seconds.rem_euclid(OBSERVED_PERIOD_SECONDS) == 0 {
-            0
-        } else {
-            OBSERVED_PERIOD_SECONDS
-        }
+    let shifted_seconds = queued_at.timestamp() - 60;
+    let floor = shifted_seconds.div_euclid(OBSERVED_PERIOD_SECONDS) * OBSERVED_PERIOD_SECONDS;
+    let exactly_on_boundary = shifted_seconds.rem_euclid(OBSERVED_PERIOD_SECONDS) == 0
+        && queued_at.timestamp_subsec_nanos() == 0;
+    let queued_slot = if exactly_on_boundary {
+        floor
+    } else {
+        floor + OBSERVED_PERIOD_SECONDS
+    };
+    queued_slot.max(period_start + OBSERVED_PERIOD_SECONDS)
 }
 
 fn format_date(date: DateTime<Utc>) -> String {

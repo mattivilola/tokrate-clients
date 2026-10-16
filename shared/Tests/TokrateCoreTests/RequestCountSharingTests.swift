@@ -39,7 +39,7 @@ private struct Upload: Sendable {
 
 @MainActor
 final class RequestCountSharingTests: XCTestCase {
-    /// A five-minute UTC boundary; its bucket closes at +300 and its totals are due at +600.
+    /// A five-minute UTC boundary; its bucket closes at +300 and its totals are due at +360.
     private let bucket = Date(timeIntervalSince1970: 1_791_020_400)
     private var consent: Date { bucket.addingTimeInterval(5) }
 
@@ -85,7 +85,7 @@ final class RequestCountSharingTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), ["countId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "succeeded", "overloaded", "serverError", "throttled"])
         XCTAssertEqual(object["countId"] as? String, "00000000-0000-4000-8000-000000000001")
         XCTAssertEqual(object["observedAt"] as? String, ISO8601DateFormatter().string(from: bucket), "floored to its five-minute period")
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.26")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.27")
         XCTAssertEqual(object["metricVersion"] as? String, "request-outcome-v1")
         XCTAssertEqual(object["succeeded"] as? Int, 41)
         XCTAssertEqual(object["overloaded"] as? Int, 3)
@@ -100,7 +100,7 @@ final class RequestCountSharingTests: XCTestCase {
         ))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: SampleEnvelope.makeEncoder().encode(entry)) as? [String: Any])
         XCTAssertEqual(object["throttled"] as? Int, 0)
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.26")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.27")
     }
 
     func testAnEntryIsRefusedOnEveryRuleTheServerEnforces() {
@@ -162,7 +162,46 @@ final class RequestCountSharingTests: XCTestCase {
 
     // MARK: Collection
 
-    func testTotalsLeaveOnePeriodAfterTheirBucketClosesAsOneEntryPerIdentity() async throws {
+    func testOutcomeFirstSeenExactlyAtCloseGraceKeepsItsOriginalDueTime() async throws {
+        let transport = CountTransport(), session = makeSession(transport)
+        session.enable(now: consent, startPolling: false)
+        session.enqueueOutcomes([outcome(.succeeded, at: 299)], now: at(360))
+        await session.refresh(now: at(360))
+        let uploads = await transport.uploads()
+        XCTAssertEqual(uploads.count, 1, "the exact grace boundary is still on time")
+        XCTAssertEqual(counts(try XCTUnwrap(uploads.first)).first?["succeeded"] as? Int, 1)
+    }
+
+    func testLateOutcomeDiscoveryKeepsTheWholeShiftedGroupOpenUntilItsRelease() async throws {
+        let transport = CountTransport(), session = makeSession(transport)
+        session.enable(now: consent, startPolling: false)
+        session.enqueueOutcomes([outcome(.succeeded, at: 299)], now: at(360.001))
+        await session.refresh(now: at(600))
+        let early = await transport.uploads()
+        XCTAssertTrue(early.isEmpty)
+        XCTAssertEqual(session.pendingRequestCountEntries, 0, "counts still accumulate until their release grace")
+        session.enqueueOutcomes([outcome(.overloaded, at: 298)], now: at(650))
+        await session.refresh(now: at(660))
+        let uploads = await transport.uploads()
+        XCTAssertEqual(uploads.count, 1)
+        let entry = try XCTUnwrap(counts(try XCTUnwrap(uploads.first)).first)
+        XCTAssertEqual(entry["succeeded"] as? Int, 1)
+        XCTAssertEqual(entry["overloaded"] as? Int, 1)
+    }
+
+    func testAnOutcomeJustAfterAShiftedGraceJoinsTheFollowingSlot() async {
+        let transport = CountTransport(), session = makeSession(transport)
+        session.enable(now: consent, startPolling: false)
+        session.enqueueOutcomes([outcome(.succeeded, at: 299)], now: at(660.001))
+        await session.refresh(now: at(959.999))
+        let early = await transport.uploads()
+        XCTAssertTrue(early.isEmpty)
+        await session.refresh(now: at(960))
+        let uploads = await transport.uploads()
+        XCTAssertEqual(uploads.count, 1)
+    }
+
+    func testTotalsLeaveOneMinuteAfterTheirBucketClosesAsOneEntryPerIdentity() async throws {
         let transport = CountTransport(), session = makeSession(transport)
         session.enable(now: consent, startPolling: false)
         session.enqueueOutcomes([
@@ -173,11 +212,11 @@ final class RequestCountSharingTests: XCTestCase {
             // The next bucket is a different entry.
             outcome(.succeeded, at: 301)
         ], now: at(310))
-        await session.refresh(now: at(599))
+        await session.refresh(now: at(359.9))
         var uploads = await transport.uploads()
-        XCTAssertTrue(uploads.isEmpty, "nothing leaves before one full period after the bucket closed")
+        XCTAssertTrue(uploads.isEmpty, "the one-minute post-close grace has not elapsed")
 
-        await session.refresh(now: at(601))
+        await session.refresh(now: at(360))
         uploads = await transport.uploads()
         XCTAssertEqual(uploads.count, 1)
         let entries = counts(try XCTUnwrap(uploads.first))
@@ -193,7 +232,7 @@ final class RequestCountSharingTests: XCTestCase {
         XCTAssertEqual(main["provider"] as? String, "anthropic")
         XCTAssertEqual(entries.compactMap { $0["clientVersion"] as? String }.sorted(), ["2.1.295", "2.1.295", "2.1.300"])
 
-        await session.refresh(now: at(901))
+        await session.refresh(now: at(660))
         uploads = await transport.uploads()
         XCTAssertEqual(uploads.count, 2)
         XCTAssertEqual(counts(uploads[1]).count, 1)
@@ -249,10 +288,10 @@ final class RequestCountSharingTests: XCTestCase {
 
         // The bucket was already sent: this is a new entry, queued at the next boundary (T+900).
         session.enqueueOutcomes([outcome(.overloaded, at: 20), outcome(.succeeded, at: 30)], now: at(700))
-        await session.refresh(now: at(899))
+        await session.refresh(now: at(959.9))
         uploads = await transport.uploads()
         XCTAssertEqual(uploads.count, 1)
-        await session.refresh(now: at(901))
+        await session.refresh(now: at(960))
         uploads = await transport.uploads()
         XCTAssertEqual(uploads.count, 2)
         let late = try XCTUnwrap(counts(uploads[1]).first)
@@ -366,10 +405,10 @@ final class RequestCountSharingTests: XCTestCase {
         session.enable(now: consent, startPolling: false)
         session.enqueue([metric(completedAt: 10)], now: at(280))
         session.enqueueOutcomes([outcome(at: 15)], now: at(290))
-        await session.refresh(now: at(610))
+        await session.refresh(now: at(379.9))
         var uploads = await transport.uploads()
-        XCTAssertTrue(uploads.isEmpty, "the slot's delay has not passed")
-        await session.refresh(now: at(625))
+        XCTAssertTrue(uploads.isEmpty, "the one-minute grace and shared jitter have not passed")
+        await session.refresh(now: at(380))
         uploads = await transport.uploads()
         XCTAssertEqual(uploads.count, 1)
         XCTAssertEqual((uploads[0].json["samples"] as? [Any])?.count, 1)
@@ -479,13 +518,13 @@ final class RequestCountSharingTests: XCTestCase {
         let session = SharingSession(identity: CountIdentity(), transport: transport, jitter: { 5 })
         session.enable(now: consent, startPolling: false)
         session.enqueueOutcomes([outcome(at: 10)], now: at(100))
-        await session.refresh(now: at(590))
-        XCTAssertEqual(session.secondsUntilNextRefresh(now: at(595)), 5, accuracy: 0.001, "the bucket's totals become due at T+600")
-        await session.refresh(now: at(601))
+        await session.refresh(now: at(350))
+        XCTAssertEqual(session.secondsUntilNextRefresh(now: at(355)), 5, accuracy: 0.001, "the bucket's totals become due at T+360")
+        await session.refresh(now: at(361))
         let early = await transport.uploads()
         XCTAssertTrue(early.isEmpty, "the slot's 5 s delay has not passed")
         XCTAssertEqual(session.pendingRequestCountEntries, 1)
-        XCTAssertEqual(session.secondsUntilNextRefresh(now: at(602)), 3, accuracy: 0.001, "a queued entry wakes the loop at its upload time, before the board is due")
+        XCTAssertEqual(session.secondsUntilNextRefresh(now: at(362)), 3, accuracy: 0.001, "a queued entry wakes the loop at its upload time, before the board is due")
     }
 
     // MARK: Nothing reaches the history
