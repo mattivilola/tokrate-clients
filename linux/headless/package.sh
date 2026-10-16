@@ -55,6 +55,8 @@ install -d -m 0755 "$stage/DEBIAN" "$stage/usr/bin" "$stage/lib/systemd/system"
 install -m 0755 "$binary" "$stage/usr/bin/tokrate-headless"
 install -m 0644 "$script_dir/tokrate-headless-local@.service" "$stage/lib/systemd/system/tokrate-headless-local@.service"
 install -m 0644 "$script_dir/tokrate-headless-share@.service" "$stage/lib/systemd/system/tokrate-headless-share@.service"
+install -m 0644 "$script_dir/tokrate-headless-update-check.service" "$stage/lib/systemd/system/tokrate-headless-update-check.service"
+install -m 0644 "$script_dir/tokrate-headless-update-check.timer" "$stage/lib/systemd/system/tokrate-headless-update-check.timer"
 cat >"$stage/DEBIAN/control" <<EOF
 Package: tokrate-headless
 Version: $version

@@ -7,7 +7,7 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use std::{fs, path::Path};
 use tempfile::TempDir;
-use tokrate_core::TurnMetric;
+use tokrate_core::{write_private_file, TurnMetric};
 use zeroize::Zeroizing;
 
 fn configured(share: bool) -> (TempDir, Paths, Settings) {
@@ -147,18 +147,71 @@ fn upload_results_retry_drop_ack_and_stop_without_regenerating() {
     assert_eq!(batch.samples.len(), 1);
     host.finish_upload(Some(503), &batch, due);
     assert_eq!(host.queue.len(), 1);
-    host.finish_upload(None, &batch, due);
+    assert_eq!(host.status.last_upload_at, Some(due));
+    assert_eq!(host.status.last_upload_failed_at, Some(due));
+    assert_eq!(host.status.last_upload_successful_at, None);
+    host.finish_upload(None, &batch, due + Duration::minutes(1));
     assert_eq!(host.queue.len(), 1);
-    host.finish_upload(Some(201), &batch, due);
+    host.finish_upload(Some(201), &batch, due + Duration::minutes(2));
     assert!(host.queue.is_empty());
     assert_eq!(host.status.uploaded_samples, 1);
+    assert_eq!(
+        host.status.last_upload_successful_at,
+        Some(due + Duration::minutes(2))
+    );
     host.queue.enqueue(&[metric("next", due)], due);
     let next = host.queue.upload_batch(due + Duration::minutes(20));
     assert!(!next.is_empty());
-    host.finish_upload(Some(422), &next, due);
+    host.finish_upload(Some(422), &next, due + Duration::minutes(3));
     assert!(host.queue.is_empty());
-    assert!(!host.finish_upload(Some(426), &next, due));
+    assert!(!host.finish_upload(Some(426), &next, due + Duration::minutes(4)));
     assert!(!host.status.sharing_active);
+
+    write_private_file(
+        paths.data.join("status.json"),
+        &serde_json::to_vec(&host.status).unwrap(),
+    )
+    .unwrap();
+    let restarted = Host::new(&paths, &settings, true, due + Duration::minutes(5));
+    assert_eq!(
+        restarted.status.last_upload_successful_at,
+        Some(due + Duration::minutes(2))
+    );
+    assert_eq!(restarted.status.uploaded_samples, 0);
+    assert_eq!(
+        restarted.status.last_upload_at,
+        Some(due + Duration::minutes(4))
+    );
+    assert_eq!(
+        restarted.status.last_upload_failed_at,
+        Some(due + Duration::minutes(4))
+    );
+    assert_eq!(
+        restarted.status.last_upload_attempt_result.as_deref(),
+        Some("upgrade-required; sharing stopped")
+    );
+}
+
+#[test]
+fn legacy_accepted_upload_status_migrates_to_success_timestamp() {
+    let (_dir, paths, settings) = configured(false);
+    let timestamp = Utc::now() - Duration::hours(2);
+    write_private_file(
+        paths.data.join("status.json"),
+        &serde_json::to_vec(&json!({
+            "last_upload_at":timestamp,
+            "last_upload_result":"accepted"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let restarted = Host::new(&paths, &settings, false, Utc::now());
+    assert_eq!(restarted.status.last_upload_successful_at, Some(timestamp));
+    assert_eq!(
+        restarted.status.last_upload_attempt_result.as_deref(),
+        Some("accepted")
+    );
 }
 
 fn fixture(root: &Path, start: chrono::DateTime<Utc>) {

@@ -8,6 +8,7 @@ on:
       - 'desktop/core/**'
       - 'desktop/src-tauri/src/**'
       - '.github/workflows/headless.yml'
+      - 'release/**'
   pull_request:
     paths:
       - 'linux/headless/**'
@@ -15,6 +16,7 @@ on:
       - 'desktop/core/**'
       - 'desktop/src-tauri/src/**'
       - '.github/workflows/headless.yml'
+      - 'release/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -60,7 +62,7 @@ jobs:
           install -D linux/headless/target/release/tokrate-headless /usr/bin/tokrate-headless
       - name: Verify systemd units and encrypted credential flow
         run: |
-          systemd-analyze verify linux/headless/tokrate-headless-local@.service linux/headless/tokrate-headless-share@.service
+          systemd-analyze verify linux/headless/tokrate-headless-local@.service linux/headless/tokrate-headless-share@.service linux/headless/tokrate-headless-update-check.service linux/headless/tokrate-headless-update-check.timer
           python3 linux/headless/test-runtime.py linux/headless/target/release/tokrate-headless
           TOKRATE_HEADLESS_RUN_INSTALL_TEST=1 TOKRATE_HEADLESS_BINARY=/usr/bin/tokrate-headless python3 linux/headless/test-install.py
       - name: Build Debian package
@@ -73,8 +75,10 @@ jobs:
           install -m 0755 linux/headless/install.sh "$bundle_root/tokrate-headless/install.sh"
           install -m 0644 linux/headless/tokrate-headless-local@.service "$bundle_root/tokrate-headless/tokrate-headless-local@.service"
           install -m 0644 linux/headless/tokrate-headless-share@.service "$bundle_root/tokrate-headless/tokrate-headless-share@.service"
+          install -m 0644 linux/headless/tokrate-headless-update-check.service "$bundle_root/tokrate-headless/tokrate-headless-update-check.service"
+          install -m 0644 linux/headless/tokrate-headless-update-check.timer "$bundle_root/tokrate-headless/tokrate-headless-update-check.timer"
           architecture=$(dpkg --print-architecture)
-          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.27_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
+          tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.28_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
       - name: Sign and verify release artifacts
         if: github.event_name != 'pull_request'
         env:
@@ -84,7 +88,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
           node -e 'process.stdout.write(Buffer.from(require("./desktop/src-tauri/tauri.conf.json").plugins.updater.pubkey,"base64"))' > "$RUNNER_TEMP/tokrate-public-key.pub"
           for artifact in "$RUNNER_TEMP"/tokrate-headless-deb/*.deb "$RUNNER_TEMP"/tokrate-headless_*.tar.gz; do
-            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.27 "$artifact"
+            npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.28 "$artifact"
             base64 --decode "$artifact.sig" > "$artifact.minisig"
             minisign -Vm "$artifact" -p "$RUNNER_TEMP/tokrate-public-key.pub" -x "$artifact.minisig"
           done
@@ -95,11 +99,46 @@ jobs:
           install -d "$destination"
           cp "$RUNNER_TEMP"/tokrate-headless-deb/*.deb* "$destination/"
           cp "$RUNNER_TEMP"/tokrate-headless_*.tar.gz* "$destination/"
-          test -s "$destination/tokrate-headless_0.1.27_$(dpkg --print-architecture).tar.gz"
+          test -s "$destination/tokrate-headless_0.1.28_$(dpkg --print-architecture).tar.gz"
           echo "path=$destination" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tokrate-headless-debian12-${{ runner.arch }}
           path: ${{ steps.release_assets.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+  signed-feed:
+    needs: debian
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: tokrate-headless-debian12-*
+          path: headless-release-assets
+          merge-multiple: true
+      - name: Validate release manifest generation
+        run: node --test release/*.test.mjs
+      - name: Bind both native packages and sign the update feed
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          destination="$RUNNER_TEMP/headless-signed-feed"
+          install -d "$destination"
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+          node release/headless-manifest.mjs create 0.1.28 headless-release-assets "$destination/headless-alpha.payload.json"
+          npm exec --yes --package @tauri-apps/cli@2.12.1 -- tauri signer sign --app-version 0.1.28 "$destination/headless-alpha.payload.json"
+          node release/headless-manifest.mjs wrap "$destination/headless-alpha.payload.json" "$destination/headless-alpha.payload.json.sig" "$destination/alpha.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tokrate-headless-0.1.28-signed-feed
+          path: ${{ runner.temp }}/headless-signed-feed/*
           if-no-files-found: error
           retention-days: 7

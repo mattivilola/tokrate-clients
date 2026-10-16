@@ -1,6 +1,6 @@
 [package]
 name = "tokrate-headless"
-version = "0.1.27"
+version = "0.1.28"
 edition = "2021"
 license = "MIT"
 description = "Headless Tokrate monitor for Linux servers"
@@ -10,6 +10,11 @@ tokrate-core = { path = "../../desktop/core" }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+minisign-verify = "0.2"
+sha2 = "0.10"
+hex = "0.4"
+semver = "1"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 notify = "=8.2.0"

@@ -11,15 +11,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tokrate_core::{
-    signed_request, tray_reading, write_private_file, AutoSelector, History, LiveResponses,
-    ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TrayReadingKind, UploadBatch,
-    APP_VERSION,
+    read_private_file, signed_request, tray_reading, write_private_file, AutoSelector, History,
+    LiveResponses, ResponseMetric, SelectionMode, SharingQueue, SourceMonitor, TrayReadingKind,
+    UploadBatch, APP_VERSION,
 };
 use zeroize::Zeroizing;
 
 const API: &str = "https://tokrate.dev/api/public/v1/samples";
 
 #[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Status {
     pub version: String,
     pub started_at: Option<DateTime<Utc>>,
@@ -32,7 +33,14 @@ pub struct Status {
     pub pending_request_counts: usize,
     pub uploaded_samples: usize,
     pub uploaded_request_count_entries: usize,
+    /// Most recent upload attempt, regardless of outcome.
     pub last_upload_at: Option<DateTime<Utc>>,
+    /// Last successful upload is carried forward from the prior status file on restart.
+    pub last_upload_successful_at: Option<DateTime<Utc>>,
+    /// Most recent non-successful upload attempt.
+    pub last_upload_failed_at: Option<DateTime<Utc>>,
+    /// Outcome paired with `last_upload_at`; distinct from later consent/credential notices.
+    pub last_upload_attempt_result: Option<String>,
     pub last_upload_result: Option<String>,
     pub source_error: bool,
     pub history_error: bool,
@@ -55,6 +63,34 @@ pub struct Host {
 
 impl Host {
     pub fn new(paths: &Paths, settings: &Settings, sharing: bool, now: DateTime<Utc>) -> Self {
+        let previous_status = read_private_file(paths.data.join("status.json"), 1_048_576)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Status>(&bytes).ok());
+        let last_upload_successful_at = previous_status.as_ref().and_then(|status| {
+            status.last_upload_successful_at.or_else(|| {
+                (status.last_upload_result.as_deref() == Some("accepted"))
+                    .then_some(status.last_upload_at)
+                    .flatten()
+            })
+        });
+        let last_upload_at = previous_status
+            .as_ref()
+            .and_then(|status| status.last_upload_at);
+        let last_upload_failed_at = previous_status
+            .as_ref()
+            .and_then(|status| status.last_upload_failed_at);
+        let last_upload_attempt_result = previous_status.as_ref().and_then(|status| {
+            status.last_upload_attempt_result.clone().or_else(|| {
+                status
+                    .last_upload_result
+                    .as_deref()
+                    .filter(|result| is_upload_attempt_result(result))
+                    .map(str::to_owned)
+            })
+        });
+        let last_upload_result = previous_status
+            .as_ref()
+            .and_then(|status| status.last_upload_result.clone());
         let loaded = History::load(paths.data.join("history.json"), now);
         let history_readable = loaded.is_ok();
         let history = loaded.unwrap_or_default();
@@ -74,6 +110,11 @@ impl Host {
                 monitoring: true,
                 sharing_requested: sharing,
                 history_error: !history_readable,
+                last_upload_at,
+                last_upload_successful_at,
+                last_upload_failed_at,
+                last_upload_attempt_result,
+                last_upload_result,
                 ..Status::default()
             },
         }
@@ -131,7 +172,12 @@ impl Host {
         now: DateTime<Utc>,
     ) -> bool {
         self.status.last_upload_at = Some(now);
-        self.status.last_upload_result = Some(match code {
+        if matches!(code, Some(200..=299)) {
+            self.status.last_upload_successful_at = Some(now);
+        } else {
+            self.status.last_upload_failed_at = Some(now);
+        }
+        let result = match code {
             Some(200..=299) => {
                 self.queue.ack_batch(batch);
                 self.status.uploaded_samples += batch.samples.len();
@@ -148,7 +194,9 @@ impl Host {
             }
             Some(status) => format!("http-{status}; retry pending"),
             None => "network-error; retry pending".into(),
-        });
+        };
+        self.status.last_upload_attempt_result = Some(result.clone());
+        self.status.last_upload_result = Some(result);
         self.status.sharing_active
     }
     fn save(&mut self, paths: &Paths, now: DateTime<Utc>, save_history: bool) -> Result<()> {
@@ -221,6 +269,14 @@ impl Host {
         })
         .collect()
     }
+}
+
+fn is_upload_attempt_result(result: &str) -> bool {
+    result == "accepted"
+        || result.starts_with("rejected;")
+        || result.starts_with("upgrade-required;")
+        || result.starts_with("http-")
+        || result.starts_with("network-error;")
 }
 
 pub(crate) fn client() -> Result<reqwest::Client> {
@@ -411,6 +467,7 @@ pub fn status(paths: &Paths) -> Result<()> {
             serde_json::json!({"tool": name, "path": path, "exists": path.exists()})
         }).collect::<Vec<_>>().into();
     }
+    status["update_check"] = crate::updater::status_value(APP_VERSION);
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
 }

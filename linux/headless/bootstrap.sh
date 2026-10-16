@@ -242,4 +242,3 @@ elif [[ "$installed_version" == "$TOKRATE_VERSION" ]]; then
 else
   printf 'Updated Tokrate Headless %s → %s; service restarted and running: %s.\n' "$installed_version" "$TOKRATE_VERSION" "$running_unit"
 fi
-

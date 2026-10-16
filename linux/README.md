@@ -5,6 +5,11 @@ and optional consent-gated community sharing, see the
 [Tokrate Headless guide](headless/README.md). The desktop client below remains
 the graphical Linux application.
 
+Tokrate Headless checks its signed update feed independently of sharing and
+installs updates only after an explicit command or **U** in its live monitor.
+Its README explains the machine-wide check setting, package behavior, and
+service health confirmation.
+
 The Linux client is implemented in [`../desktop`](../desktop), sharing its Rust core and dashboard with Windows. An [alpha with installable packages and signed updates](https://github.com/mattivilola/tokrate-clients/releases/tag/v0.1.11-desktop-alpha.1) is available. Automated native checks passed; manual desktop acceptance is pending. No stable Linux release is published yet.
 
 Initial target: x64 Ubuntu 22.04-compatible systems, `.deb` and AppImage. The application uses WebKitGTK 4.1 and Ayatana AppIndicator; community sharing additionally requires a running, unlocked Secret Service (for example GNOME Keyring or compatible KDE service). Missing/locked credential storage shows a recoverable error; no private signing key is saved as plaintext. Local monitoring still works.

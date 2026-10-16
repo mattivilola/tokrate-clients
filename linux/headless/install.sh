@@ -4,10 +4,14 @@ set -Eeuo pipefail
 readonly APP=tokrate-headless
 readonly LOCAL_TEMPLATE=tokrate-headless-local@.service
 readonly SHARE_TEMPLATE=tokrate-headless-share@.service
+readonly UPDATE_CHECK_SERVICE=tokrate-headless-update-check.service
+readonly UPDATE_CHECK_TIMER=tokrate-headless-update-check.timer
 TEST_ROOT=${TOKRATE_HEADLESS_TEST_ROOT:-}
 CONFIG_ROOT=/etc/tokrate-headless
+UPDATE_SETTING=/etc/tokrate-headless/update-checks
 CREDENTIAL_ROOT=/etc/credstore.encrypted
 UNIT_DIR=/usr/lib/systemd/system
+UPDATE_LOCK=/run/tokrate-headless/update.lock
 
 usage() {
   cat <<'EOF'
@@ -15,8 +19,9 @@ Install Tokrate Headless on a Debian 12+ system.
 
 Usage: install.sh --user USER [--binary PATH] [--share | --local-only]
 
-Without a mode flag, setup shows the sharing notice and asks once. For
-unattended use, pass exactly one of --share or --local-only.
+Without a mode flag, first-time setup shows the sharing notice and asks once;
+reruns reuse the saved sharing choice. For unattended use, pass exactly one of
+--share or --local-only.
 The target account must be a non-root local account.
 EOF
 }
@@ -31,8 +36,10 @@ if [[ -n "$TEST_ROOT" ]]; then
   [[ "$TEST_ROOT" == /tmp/tokrate-headless-install-test-*/root ]] || fail 'staged install root must be the test script temporary root under /tmp'
   [[ -d "$TEST_ROOT" && ! -L "$TEST_ROOT" ]] || fail 'staged install root must be an existing real directory'
   CONFIG_ROOT="$TEST_ROOT/etc/tokrate-headless"
+  UPDATE_SETTING="$CONFIG_ROOT/update-checks"
   CREDENTIAL_ROOT="$TEST_ROOT/etc/credstore.encrypted"
   UNIT_DIR="$TEST_ROOT/usr/lib/systemd/system"
+  UPDATE_LOCK="$TEST_ROOT/run/tokrate-headless/update.lock"
 fi
 
 TARGET_USER=
@@ -82,6 +89,25 @@ command -v systemctl >/dev/null || fail 'systemctl is required'
 command -v install >/dev/null || fail 'install is required'
 command -v mktemp >/dev/null || fail 'mktemp is required'
 command -v stat >/dev/null || fail 'stat is required'
+command -v date >/dev/null || fail 'date is required'
+command -v flock >/dev/null || fail 'flock is required'
+
+lock_dir=$(dirname -- "$UPDATE_LOCK")
+if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
+  install -d -o root -g root -m 0755 "$lock_dir"
+fi
+[[ -d "$lock_dir" && ! -L "$lock_dir" && "$(stat -c %u -- "$lock_dir")" == 0 ]] || fail 'update lock directory is unsafe'
+lock_dir_mode=$(stat -c %a -- "$lock_dir") || fail 'could not inspect update lock directory permissions'
+(( (0$lock_dir_mode & 022) == 0 )) || fail 'update lock directory must not be writable by group or others'
+if [[ -e "$UPDATE_LOCK" || -L "$UPDATE_LOCK" ]]; then
+  [[ -f "$UPDATE_LOCK" && ! -L "$UPDATE_LOCK" && "$(stat -c %u -- "$UPDATE_LOCK")" == 0 ]] || fail 'update lock must be a root-owned regular file'
+  lock_mode=$(stat -c %a -- "$UPDATE_LOCK") || fail 'could not inspect update lock permissions'
+  (( (0$lock_mode & 077) == 0 )) || fail 'update lock must be private to root'
+fi
+umask 077
+exec {update_lock_fd}>>"$UPDATE_LOCK"
+[[ -f "$UPDATE_LOCK" && ! -L "$UPDATE_LOCK" && "$(stat -c %u -- "$UPDATE_LOCK")" == 0 ]] || fail 'could not open the update lock safely'
+flock -x "$update_lock_fd" || fail 'could not acquire the Tokrate update lock'
 
 account=$(getent passwd "$TARGET_USER") || fail "account does not exist: $TARGET_USER"
 IFS=: read -r account_name _ target_uid target_gid _ target_home _ <<<"$account"
@@ -99,7 +125,28 @@ binary_target=/usr/bin/tokrate-headless
 state_dir="/var/lib/${APP}/${TARGET_USER}"
 local_template_path="${UNIT_DIR}/${LOCAL_TEMPLATE}"
 share_template_path="${UNIT_DIR}/${SHARE_TEMPLATE}"
+update_check_service_path="${UNIT_DIR}/${UPDATE_CHECK_SERVICE}"
+update_check_timer_path="${UNIT_DIR}/${UPDATE_CHECK_TIMER}"
 identity_marker="$config_dir/identity-provisioned"
+
+# Availability checks have a root-managed machine-wide setting, independent of
+# the target account's sharing consent. A new explicit install enables checks;
+# subsequent installer runs preserve the administrator's saved choice.
+update_checks=on
+if [[ -e "$UPDATE_SETTING" || -L "$UPDATE_SETTING" ]]; then
+  [[ -f "$UPDATE_SETTING" && ! -L "$UPDATE_SETTING" ]] || fail 'update-check setting must be a regular file'
+  [[ "$(stat -c %u -- "$UPDATE_SETTING")" == 0 ]] || fail 'update-check setting must be owned by root'
+  setting_mode=$(stat -c %a -- "$UPDATE_SETTING") || fail 'could not inspect update-check setting permissions'
+  (( (0$setting_mode & 022) == 0 )) || fail 'update-check setting must not be writable by group or others'
+  mapfile -t update_setting_lines <"$UPDATE_SETTING"
+  [[ ${#update_setting_lines[@]} -eq 1 ]] || fail 'update-check setting must contain exactly one value'
+  update_checks=${update_setting_lines[0]}
+  [[ "$update_checks" == on || "$update_checks" == off ]] || fail 'update-check setting must contain exactly on or off'
+fi
+previous_binary_version=
+if [[ -x "$binary_target" && -f "$binary_target" && ! -L "$binary_target" ]]; then
+  previous_binary_version=$("$binary_target" --version 2>/dev/null | sed -n 's/^tokrate-headless //p' | head -n 1 || true)
+fi
 
 # Capture whether sharing was already configured before setup. If the encrypted
 # key later disappears, an installer rerun must fail closed rather than minting
@@ -171,6 +218,7 @@ for path in "${system_paths[@]}"; do
   assert_root_owned "$path"
 done
 for path in "$binary_target" "$local_template_path" "$share_template_path" \
+  "$update_check_service_path" "$update_check_timer_path" "$UPDATE_SETTING" \
   "$config_dir/settings.json" "$config_dir/setup-complete" "$config_dir/consent-v6.json" "$identity_marker"; do
   assert_regular_or_missing "$path"
   assert_root_owned "$path"
@@ -195,6 +243,12 @@ else
 fi
 install -o root -g root -m 0644 "$(dirname -- "$0")/${LOCAL_TEMPLATE}" "$local_template_path"
 install -o root -g root -m 0644 "$(dirname -- "$0")/${SHARE_TEMPLATE}" "$share_template_path"
+install -o root -g root -m 0644 "$(dirname -- "$0")/${UPDATE_CHECK_SERVICE}" "$update_check_service_path"
+install -o root -g root -m 0644 "$(dirname -- "$0")/${UPDATE_CHECK_TIMER}" "$update_check_timer_path"
+if [[ ! -e "$UPDATE_SETTING" ]]; then
+  install -o root -g root -m 0644 /dev/null "$UPDATE_SETTING"
+  printf 'on\n' >"$UPDATE_SETTING"
+fi
 
 # The setup directory is created by root, then only its private children are
 # writable by the target account. The trap removes this exact mktemp path.
@@ -301,14 +355,68 @@ if [[ "$MODE" == share ]]; then
 fi
 
 systemctl daemon-reload
+service_start_epoch=$(date -u +%s)
 if [[ "$MODE" == share ]]; then
   systemctl disable "$local_unit" >/dev/null
   systemctl enable --now "$share_unit"
-  printf 'Community sharing is enabled for %s.\n' "$TARGET_USER"
+  selected_unit=$share_unit
+  sharing_setting=on
 else
   systemctl disable "$share_unit" >/dev/null
   systemctl enable --now "$local_unit"
-  printf 'Local-only monitoring is enabled for %s.\n' "$TARGET_USER"
+  selected_unit=$local_unit
+  sharing_setting=off
 fi
+if [[ "$update_checks" == on ]]; then
+  systemctl enable --now "$UPDATE_CHECK_TIMER"
+else
+  systemctl disable --now "$UPDATE_CHECK_TIMER" >/dev/null
+fi
+active_state=$(systemctl show --property=ActiveState --value "$selected_unit" 2>/dev/null) || fail "could not confirm service state: $selected_unit"
+[[ "$active_state" == active ]] || fail "service did not restart and become active: $selected_unit ($active_state)"
+version_output=$("$binary_target" --version 2>/dev/null) || fail 'could not verify installed binary version'
+installed_version=${version_output#tokrate-headless }
+[[ "$version_output" == "tokrate-headless $installed_version" && "$installed_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'installed binary returned an invalid version'
+if [[ -z "$TEST_ROOT" ]]; then
+  main_pid=$(systemctl show --property=MainPID --value "$selected_unit" 2>/dev/null) || fail "could not inspect running process: $selected_unit"
+  [[ "$main_pid" =~ ^[1-9][0-9]*$ && -e "/proc/$main_pid/exe" ]] || fail "service has no running Tokrate process: $selected_unit"
+  installed_inode=$(stat -Lc '%d:%i' -- "$binary_target") || fail 'could not identify the installed Tokrate binary'
+  running_inode=$(stat -Lc '%d:%i' -- "/proc/$main_pid/exe") || fail 'could not identify the running Tokrate process'
+  [[ "$running_inode" == "$installed_inode" ]] || fail 'the active service is not running the installed binary'
+
+  heartbeat_ok=0
+  for _ in {1..60}; do
+    status_output=$(runuser -u "$TARGET_USER" -- "$binary_target" --config-dir "$config_dir" --data-dir "$state_dir" status 2>/dev/null || true)
+    if [[ "$status_output" == *"\"version\": \"$installed_version\""* \
+       && "$status_output" == *'"monitoring": true'* \
+       && "$status_output" == *'"running": true'* ]]; then
+      heartbeat_at=$(sed -n 's/^[[:space:]]*"updated_at": "\([^"]*\)".*/\1/p' <<<"$status_output")
+      heartbeat_epoch=$(date -u -d "$heartbeat_at" +%s 2>/dev/null || printf '0')
+      if [[ "$heartbeat_epoch" =~ ^[0-9]+$ ]] && ((heartbeat_epoch >= service_start_epoch)); then
+        heartbeat_ok=1
+        break
+      fi
+    fi
+    sleep 0.5
+  done
+  ((heartbeat_ok == 1)) || fail 'service did not publish a fresh running status for the installed version'
+
+  # Recheck the process identity after the heartbeat in case the unit exited while
+  # the status file was being read.
+  main_pid_after=$(systemctl show --property=MainPID --value "$selected_unit" 2>/dev/null) || fail "could not confirm service process: $selected_unit"
+  [[ "$main_pid_after" == "$main_pid" && -e "/proc/$main_pid_after/exe" ]] || fail 'service stopped before health verification completed'
+  running_inode_after=$(stat -Lc '%d:%i' -- "/proc/$main_pid_after/exe") || fail 'could not recheck the running Tokrate process'
+  [[ "$running_inode_after" == "$installed_inode" ]] || fail 'service stopped running the installed binary during health verification'
+fi
+if [[ -n "$previous_binary_version" && "$previous_binary_version" != "$installed_version" ]]; then
+  printf 'Updated %s → %s\n' "$previous_binary_version" "$installed_version"
+elif [[ -n "$previous_binary_version" ]]; then
+  printf 'Already up to date: %s\n' "$installed_version"
+else
+  printf 'Installed binary version: %s\n' "$installed_version"
+fi
+printf 'Community sharing configured: %s\n' "$sharing_setting"
+printf 'Automatic update checks configured: %s\n' "$update_checks"
+printf 'Service restarted and running: %s\n' "$selected_unit"
 printf 'Configuration: %s\n' "$config_dir"
 printf 'Check status: sudo -u %s -H %s --config-dir %s --data-dir %s status\n' "$TARGET_USER" "$binary_target" "$config_dir" "$state_dir"

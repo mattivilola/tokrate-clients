@@ -28,9 +28,11 @@ Only new observations after sharing starts are eligible; no historical backfill.
 grouped after five-minute buckets close, with a one-minute wait plus up to one minute of shared random jitter (normally about 1–7 minutes after completion; offline or delayed collection can take longer). Pending reports stay in bounded memory.\n\
 Local normalized history lasts seven days (up to 50,000 turns); server samples expire after\n\
 30 days via asynchronous TTL. Stopping sharing clears pending reports, not received reports\n\
-or backups. No automatic updates. Privacy: https://tokrate.dev/privacy\n\
+or backups. Privacy: https://tokrate.dev/privacy\n\
 Terms: https://tokrate.dev/terms\n\
-Use `tokrate-headless example` to inspect the exact allowlisted payload with fake values.\n";
+Use `tokrate-headless example` to inspect the exact allowlisted payload with fake values.\n\
+Update availability checks are separate from community sharing and can be disabled with\n\
+`tokrate-headless update-checks off`. Updates are installed only when you run `update` or press U.\n";
 
 #[derive(Clone, Debug)]
 pub struct Paths {

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Tokrate Headless update availability check
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=6h
+Persistent=true
+Unit=tokrate-headless-update-check.service
+
+[Install]
+WantedBy=timers.target

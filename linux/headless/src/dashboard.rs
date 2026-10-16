@@ -1,6 +1,6 @@
 //! Read-only terminal dashboard. It never reads a credential or starts the collector.
 use crate::config::{Paths, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -27,6 +27,47 @@ fn text(value: &Value, key: &str) -> String {
 }
 fn count(value: &Value, key: &str) -> u64 {
     value[key].as_u64().unwrap_or(0)
+}
+fn relative_age(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = now.signed_duration_since(at).num_seconds();
+    if seconds < 0 {
+        return "clock is ahead".into();
+    }
+    match seconds {
+        0..=5 => "just now".into(),
+        6..=59 => format!("{seconds}s ago"),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h {}m ago", seconds / 3_600, (seconds % 3_600) / 60),
+        _ => format!("{}d {}h ago", seconds / 86_400, (seconds % 86_400) / 3_600),
+    }
+}
+fn upload_time(value: &Value, key: &str, now: DateTime<Utc>) -> Option<String> {
+    let at = value[key]
+        .as_str()
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())?
+        .with_timezone(&Utc);
+    Some(format!(
+        "{} UTC · {}",
+        at.format("%Y-%m-%d %H:%M:%S"),
+        relative_age(at, now)
+    ))
+}
+fn last_successful_upload(status: &Value, now: DateTime<Utc>) -> String {
+    upload_time(status, "last_upload_successful_at", now)
+        .unwrap_or_else(|| "No successful upload recorded yet".into())
+}
+fn latest_upload_attempt(status: &Value, now: DateTime<Utc>, demo: bool) -> String {
+    if demo {
+        return "Unavailable in offline demo".into();
+    }
+    let Some(at) = upload_time(status, "last_upload_at", now) else {
+        return "No upload attempts recorded".into();
+    };
+    let result = status["last_upload_attempt_result"]
+        .as_str()
+        .or_else(|| status["last_upload_result"].as_str())
+        .unwrap_or("outcome unavailable");
+    format!("{at} · {}", clean(result))
 }
 fn median(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
@@ -78,6 +119,29 @@ fn fit(text: &str, width: usize) -> String {
     result
 }
 
+fn update_line(status: &Value, demo: bool) -> String {
+    if demo {
+        return "Updates are unavailable in the offline demo.".into();
+    }
+    let update = &status["update_check"];
+    let checks = update["automaticChecks"].as_str().unwrap_or("unknown");
+    let installed = update["installedVersion"]
+        .as_str()
+        .unwrap_or(tokrate_core::APP_VERSION);
+    match update["state"].as_str().unwrap_or("never-checked") {
+        "available" => format!(
+            "Update available: {} → {} · automatic checks {} · press U to update",
+            installed,
+            update["availableVersion"].as_str().unwrap_or("unknown"),
+            checks
+        ),
+        "up-to-date" => format!("Already up to date: {installed} · automatic checks {checks}"),
+        "stale" => format!("Update check is stale · automatic checks {checks} · press U to refresh and update"),
+        "error" => format!("Could not check for updates · automatic checks {checks}"),
+        _ => format!("Update availability has not been checked · automatic checks {checks} · press U to check"),
+    }
+}
+
 fn big_number(value: &str) -> Vec<String> {
     let digits = [
         ["███", "█ █", "█ █", "█ █", "███"],
@@ -120,11 +184,14 @@ pub(crate) fn render(
             .as_f64()
             .map(|v| format!("{v:.1} tok/s"))
             .unwrap_or("Waiting for data".into());
-        return format!("{TEAL}T O K R A T E{RESET}  {}\r\n\r\n{WHITE}{speed}{RESET}\r\n{}\r\n{} / {}\r\n\r\n{} stored turns / {} queued\r\nSharing {} / upload {}\r\n\r\n{CORAL}[Q] / [ESC]{RESET} back to shell\r\n",
+        return format!("{TEAL}T O K R A T E{RESET}  {}\r\n\r\n{WHITE}{speed}{RESET}\r\n{}\r\n{} / {}\r\n\r\n{} stored turns / {} queued\r\nSharing {} / sent {} since restart\r\nLast successful upload: {}\r\nLatest upload attempt: {}\r\n{}\r\n{} · [Q] / [ESC] back to shell\r\n",
             if demo { "DEMO / SYNTHETIC DATA" } else { "SERVER COMPANION" },
             fit(hero["label"].as_str().unwrap_or("Local monitoring"), cols.saturating_sub(2)),
             text(hero,"model"), text(hero,"provider"), count(status,"history_turns"), count(status,"pending_samples"),
-            if status["sharing_active"].as_bool() == Some(true) { "ON" } else { "OFF" }, text(status,"last_upload_result"));
+            if status["sharing_active"].as_bool() == Some(true) { "ON" } else { "OFF" }, count(status,"uploaded_samples"),
+            if demo { "Unavailable in offline demo".into() } else { last_successful_upload(status, Utc::now()) },
+            latest_upload_attempt(status, Utc::now(), demo), update_line(status, demo),
+            if demo { "Updates disabled in offline demo" } else { "[U] update" });
     }
     let width = cols.clamp(48, 110).saturating_sub(2);
     let inner = width - 4;
@@ -256,11 +323,19 @@ pub(crate) fn render(
     } else {
         "OFF"
     };
-    line(format!("{TEAL}● {WHITE}SHARING {sharing}{RESET}   {MUTED}queued {WHITE}{}{MUTED} samples + {WHITE}{}{MUTED} count entries  /  sent {WHITE}{}",
+    line(format!("{TEAL}● {WHITE}SHARING {sharing}{RESET}   {MUTED}queued {WHITE}{}{MUTED} samples + {WHITE}{}{MUTED} count entries  /  sent {WHITE}{} {MUTED}since restart",
         count(status,"pending_samples"), count(status,"pending_request_counts"), count(status,"uploaded_samples")));
     line(format!(
-        "{MUTED}  Upload: {}",
-        text(status, "last_upload_result")
+        "{MUTED}  Last successful upload: {}",
+        if demo {
+            "Unavailable in offline demo".into()
+        } else {
+            last_successful_upload(status, Utc::now())
+        }
+    ));
+    line(format!(
+        "{MUTED}  Latest upload attempt: {}",
+        latest_upload_attempt(status, Utc::now(), demo)
     ));
     line(format!(
         "{MUTED}  Sources: {}{}",
@@ -271,8 +346,16 @@ pub(crate) fn render(
             ""
         }
     ));
+    line(format!("{MUTED}{}", update_line(status, demo)));
     line(String::new());
-    line(format!("{CORAL}[Q] / [ESC]{RESET} {MUTED}back to shell · collector keeps running     {TEAL}tokrate.dev"));
+    line(format!(
+        "{} {CORAL}[Q] / [ESC]{RESET} {MUTED}back to shell · collector keeps running     {TEAL}tokrate.dev",
+        if demo {
+            format!("{MUTED}Updates disabled in offline demo")
+        } else {
+            format!("{CORAL}[U]{RESET} {MUTED}update")
+        }
+    ));
     lines.push(format!("{TEAL}╰{}╯{RESET}", "─".repeat(width - 2)));
     lines.join("\r\n") + "\r\n"
 }
@@ -360,14 +443,14 @@ fn demo() -> (Value, Vec<TurnMetric>) {
     records.sort_by_key(|m| std::cmp::Reverse(m.completed_at));
     (
         json!({"monitoring":true, "history_turns":1248, "sharing_active":true, "pending_samples":6,
-            "pending_request_counts":2, "uploaded_samples":482, "last_upload_result":"accepted / moments ago",
+            "pending_request_counts":2, "uploaded_samples":482,
             "source_summary":"Codex + Claude Code + Grok Build",
             "hero":{"speed":84.7, "model":"gpt-6.1-sol", "provider":"openai", "tool":"codex", "label":"Response speed / last 5 responses"}}),
         records,
     )
 }
 
-pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<()> {
+pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<bool> {
     let _terminal = if once { None } else { Some(Terminal::enter()?) };
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -411,6 +494,7 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<()> {
                     })
                     .unwrap_or_else(|_| "Setup required".into())
                     .into();
+                status["update_check"] = crate::updater::status_value(tokrate_core::APP_VERSION);
                 (status, history.records().to_vec())
             };
             let (cols, rows) = size();
@@ -423,11 +507,11 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<()> {
             }
             io::stdout().flush()?;
             if once {
-                return Ok(());
+                return Ok(false);
             }
             last_draw = std::time::Instant::now();
         }
-        tokio::select! { _ = interrupt.recv() => return Ok(()), _ = tick.tick() => {} }
+        tokio::select! { _ = interrupt.recv() => return Ok(false), _ = tick.tick() => {} }
         let mut fd = libc::pollfd {
             fd: libc::STDIN_FILENO,
             events: libc::POLLIN,
@@ -435,12 +519,15 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<()> {
         };
         if unsafe { libc::poll(&mut fd, 1, 0) } > 0 {
             if fd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                return Ok(());
+                return Ok(false);
             }
             if fd.revents & libc::POLLIN != 0 {
                 let mut key = [0];
                 if io::stdin().read(&mut key)? == 0 || matches!(key[0], b'q' | b'Q' | 27 | 3) {
-                    return Ok(());
+                    return Ok(false);
+                }
+                if !preview && matches!(key[0], b'u' | b'U') {
+                    return Ok(true);
                 }
             }
         }
@@ -450,12 +537,16 @@ pub async fn monitor(paths: &Paths, preview: bool, once: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
     #[test]
     fn terminal_output_sanitizes_source_control_sequences_and_labels_demo() {
         let (mut status, records) = demo();
         status["hero"]["model"] = "hostile\x1b]52;c;clipboard-secret\x07".into();
         let rendered = render(&status, &records, 110, 36, true);
         assert!(rendered.contains("DEMO / SYNTHETIC DATA"));
+        assert!(rendered.contains("Updates disabled in offline demo"));
+        assert!(!rendered.contains("[U] update"));
         assert!(!rendered.contains("\x1b]52"));
         assert!(rendered.contains("RSP response / TURN whole-turn"));
         assert!(rendered.contains("[Q] / [ESC]"));
@@ -465,5 +556,55 @@ mod tests {
         assert_eq!(median(&mut []), None);
         assert_eq!(median(&mut [2.0, 4.0]), Some(3.0));
         assert_eq!(spark(&[2.0; 50]).chars().count(), 18);
+    }
+
+    #[test]
+    fn upload_status_uses_utc_relative_age_and_explicit_empty_state() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 16, 12, 5, 32).unwrap();
+        let status = json!({
+            "last_upload_successful_at":"2026-10-16T12:00:00Z",
+            "last_upload_at":"2026-10-16T12:04:30Z",
+            "last_upload_failed_at":"2026-10-16T11:45:00Z",
+            "last_upload_attempt_result":"http-503; retry pending"
+        });
+        assert_eq!(
+            last_successful_upload(&status, now),
+            "2026-10-16 12:00:00 UTC · 5m ago"
+        );
+        assert_eq!(
+            latest_upload_attempt(&status, now, false),
+            "2026-10-16 12:04:30 UTC · 1m ago · http-503; retry pending"
+        );
+        assert_eq!(
+            last_successful_upload(&json!({}), now),
+            "No successful upload recorded yet"
+        );
+        assert_eq!(
+            latest_upload_attempt(&json!({}), now, false),
+            "No upload attempts recorded"
+        );
+        assert_eq!(
+            latest_upload_attempt(&status, now, true),
+            "Unavailable in offline demo"
+        );
+    }
+
+    #[test]
+    fn dashboard_labels_report_upload_time_and_restart_scoped_counter() {
+        let status = json!({
+            "sharing_active":false,
+            "uploaded_samples":12,
+            "last_upload_successful_at":"2026-10-16T12:00:00Z",
+            "last_upload_at":"2026-10-16T12:04:30Z",
+            "last_upload_attempt_result":"http-503; retry pending",
+            "update_check":{"automaticChecks":"off","state":"never-checked"}
+        });
+        let rendered = render(&status, &[], 110, 36, false);
+        assert!(rendered.contains("since restart"));
+        assert!(rendered.contains("12"));
+        assert!(rendered.contains("Last successful upload: 2026-10-16 12:00:00 UTC"));
+        assert!(rendered.contains("Latest upload attempt: 2026-10-16 12:04:30 UTC"));
+        let empty = render(&json!({"sharing_active":false}), &[], 110, 36, false);
+        assert!(empty.contains("No successful upload recorded yet"));
     }
 }

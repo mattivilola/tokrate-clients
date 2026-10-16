@@ -1,0 +1,28 @@
+[Unit]
+Description=Tokrate Headless update availability check
+Documentation=https://tokrate.dev/updates/headless/alpha.json
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+CacheDirectory=tokrate-headless-updates
+CacheDirectoryMode=0755
+UMask=0022
+ExecStart=/usr/bin/tokrate-headless update-check --service
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/etc/tokrate-headless -/etc/credstore.encrypted -/var/lib/tokrate-headless
+

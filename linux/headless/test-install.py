@@ -17,6 +17,8 @@ PACKAGER = ROOT / "package.sh"
 BOOTSTRAP = ROOT / "bootstrap.sh"
 LOCAL_UNIT = ROOT / "tokrate-headless-local@.service"
 SHARE_UNIT = ROOT / "tokrate-headless-share@.service"
+UPDATE_CHECK_SERVICE = ROOT / "tokrate-headless-update-check.service"
+UPDATE_CHECK_TIMER = ROOT / "tokrate-headless-update-check.timer"
 
 
 def require(condition: bool, message: str) -> None:
@@ -57,6 +59,20 @@ def main() -> None:
     require('sharing-enabled' in installer and 'MODE=share' in installer and 'MODE=local' in installer, "interactive setup choice must select exactly one service mode")
     require('systemctl enable --now "$share_unit"' in installer, "selected share unit must be enabled and started")
     require('systemctl enable --now "$local_unit"' in installer, "selected local unit must be enabled and started")
+    require('systemctl enable --now "$UPDATE_CHECK_TIMER"' in installer, "update checks must be enabled independently of sharing")
+    require('systemctl disable --now "$UPDATE_CHECK_TIMER"' in installer, "saved update-check opt-out must be honored")
+    require("mapfile -t update_setting_lines" in installer, "installer must reject ambiguous update-check settings")
+    require('systemctl show --property=MainPID --value "$selected_unit"' in installer, "installer must verify the selected service process")
+    require('"running": true' in installer and '"monitoring": true' in installer, "installer must require a live daemon heartbeat before claiming success")
+    require('Updated %s → %s' in installer and 'Already up to date: %s' in installer, "installer must state whether the binary changed")
+
+    update_check_service = UPDATE_CHECK_SERVICE.read_text()
+    update_check_timer = UPDATE_CHECK_TIMER.read_text()
+    update_check_service_section = section(update_check_service, "Service")
+    require("DynamicUser=yes" in update_check_service_section, "update checks must run as an unprivileged dynamic user")
+    require("CacheDirectory=tokrate-headless-updates" in update_check_service_section, "update service must use its public cache")
+    require("/etc/tokrate-headless" in update_check_service_section and "/etc/credstore.encrypted" in update_check_service_section, "update service must not access config or credentials")
+    require("OnCalendar=daily" in update_check_timer and "RandomizedDelaySec=" in update_check_timer, "update availability checks must run on a randomized daily timer")
 
     local = LOCAL_UNIT.read_text()
     local_service = section(local, "Service")
@@ -77,6 +93,7 @@ def main() -> None:
     require("daemon-reload" in postinst, "package installation must reload systemd unit definitions")
     require("systemctl enable" not in postinst and "systemctl start" not in postinst, "package postinst must not enable or start services")
     require("provision-key" not in packager and "consent-v6.json" not in packager, "package build must not create consent or credentials")
+    require('"$script_dir/tokrate-headless-update-check.service"' in packager and '"$script_dir/tokrate-headless-update-check.timer"' in packager, "Debian package must contain both updater units")
     require("Depends: libc6 (>= 2.36), libgcc-s1, systemd (>= 252)" in packager, "Debian package must declare its runtime ABI and systemd requirements")
 
     bootstrap = BOOTSTRAP.read_text()
@@ -138,6 +155,7 @@ def run_dynamic_install_test() -> None:
             "    esac\n"
             "    ;;\n"
             "  stop) touch \"$TOKRATE_FAKE_SYSTEMCTL_STOPPED/$2\" ;;\n"
+            "  enable) rm -f \"$TOKRATE_FAKE_SYSTEMCTL_STOPPED/${3:-$2}\" ;;\n"
             "  *) ;;\n"
             "esac\n"
         )
@@ -185,6 +203,11 @@ def run_dynamic_install_test() -> None:
 
             result = install("--share")
             require(result.returncode == 0, f"first share install failed: {result.stderr}")
+            update_setting = root / "etc/tokrate-headless/update-checks"
+            require(update_setting.read_text() == "on\n", "first explicit install must enable update checks independently")
+            require("Automatic update checks configured: on" in result.stdout, "installer must report the update-check setting separately")
+            require("Service restarted and running:" in result.stdout, "installer must report the selected service health result")
+            require("Installed binary version:" in result.stdout, "first install must identify the installed binary version")
             require(config.is_dir() and config.stat().st_uid == 0 and stat.S_IMODE(config.stat().st_mode) == 0o755, "config directory must be root-owned and non-writable by the target account")
             require(json.loads((config / "settings.json").read_text())["codex"] == str(source_home / "sessions"), "same-account CODEX_HOME must be captured during setup")
             require(consent_marker.is_file(), "share install must promote the current consent marker")
@@ -205,7 +228,15 @@ def run_dynamic_install_test() -> None:
             # it succeeds with stdin closed instead of prompting again.
             result = install()
             require(result.returncode == 0, f"no-mode reinstall should reuse saved choice: {result.stderr}")
+            require("Already up to date:" in result.stdout, "same-version reinstall must report the installed version is current")
             require(encrypted_key.read_bytes() == encrypted_before, "reinstall must reuse, not replace, the encrypted identity")
+
+            update_setting.write_text("off\n")
+            result = install()
+            require(result.returncode == 0, f"installer rerun with update checks off failed: {result.stderr}")
+            require(update_setting.read_text() == "off\n", "installer rerun must preserve update-check opt-out")
+            calls = log.read_text().splitlines()
+            require(any(line.startswith("disable --now tokrate-headless-update-check.timer") for line in calls), "saved opt-out must keep the timer disabled")
 
             result = install("--local-only")
             require(result.returncode == 0, f"local-only mode switch failed: {result.stderr}")
@@ -213,6 +244,7 @@ def run_dynamic_install_test() -> None:
             require(identity_marker.is_file() and encrypted_key.read_bytes() == encrypted_before, "turning sharing off must preserve the provisioned identity")
             calls = log.read_text().splitlines()
             require(any(line.startswith(f"enable --now tokrate-headless-local@{username}.service") for line in calls), "local-only install must enable the selected local service")
+            require(update_setting.read_text() == "off\n", "local-only mode must preserve the independent update-check setting")
 
             encrypted_key.unlink()
             result = install("--share")
