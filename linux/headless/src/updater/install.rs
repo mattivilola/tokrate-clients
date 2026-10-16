@@ -19,6 +19,8 @@ use std::{
 
 const BIN: &str = "/usr/bin/tokrate-headless";
 const UNIT_DIR: &str = "/usr/lib/systemd/system";
+const SYSUSERS_CONFIG: &str = "/usr/lib/sysusers.d/tokrate-update.conf";
+const UPDATE_USER_HELPER: &str = "/usr/libexec/tokrate-headless/provision-update-user";
 const LOCK_DIR: &str = "/run/tokrate-headless";
 const LOCK_FILE: &str = "/run/tokrate-headless/update.lock";
 const HIGH_WATER_DIR: &str = "/var/lib/tokrate-headless-updates";
@@ -663,6 +665,8 @@ fn build_rollback_package(stage: &Path) -> Result<PathBuf> {
     let root = stage.join("rollback-root");
     fs::create_dir_all(root.join("DEBIAN"))?;
     fs::create_dir_all(root.join("usr/bin"))?;
+    fs::create_dir_all(root.join("usr/lib/sysusers.d"))?;
+    fs::create_dir_all(root.join("usr/libexec/tokrate-headless"))?;
     fs::create_dir_all(root.join("lib/systemd/system"))?;
     let has_check_service = safe_unit_file(UPDATE_CHECK_SERVICE)?.is_some();
     let has_check_timer = safe_unit_file(UPDATE_CHECK_TIMER)?.is_some();
@@ -674,6 +678,29 @@ fn build_rollback_package(stage: &Path) -> Result<PathBuf> {
         return Err("The current Tokrate binary is not safe for rollback staging.".into());
     }
     fs::copy(binary, root.join("usr/bin/tokrate-headless"))?;
+    for (source, relative, mode, label) in [
+        (
+            Path::new(SYSUSERS_CONFIG),
+            Path::new("usr/lib/sysusers.d/tokrate-update.conf"),
+            0o644,
+            "Tokrate sysusers definition",
+        ),
+        (
+            Path::new(UPDATE_USER_HELPER),
+            Path::new("usr/libexec/tokrate-headless/provision-update-user"),
+            0o755,
+            "Tokrate updater account helper",
+        ),
+    ] {
+        let metadata = fs::symlink_metadata(source)
+            .map_err(|_| format!("Cannot prepare rollback because {label} is missing."))?;
+        if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(format!("Cannot prepare rollback because {label} is unsafe.").into());
+        }
+        let destination = root.join(relative);
+        fs::copy(source, &destination)?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(mode))?;
+    }
     for template in &units {
         let source = Path::new(UNIT_DIR).join(template);
         let metadata = fs::symlink_metadata(&source)
@@ -699,7 +726,7 @@ fn build_rollback_package(stage: &Path) -> Result<PathBuf> {
         "Package: tokrate-headless\nVersion: {version}\nSection: net\nPriority: optional\nArchitecture: {arch}\nDepends: libc6 (>= 2.36), libgcc-s1, systemd (>= 252)\nMaintainer: Tokrate maintainers\nDescription: Local coding-session speed monitor for headless Linux servers\n"
     );
     write_private(&root.join("DEBIAN/control"), control.as_bytes(), 0o644)?;
-    let postinst = b"#!/bin/sh\nset -e\nif [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi\nexit 0\n";
+    let postinst = b"#!/bin/sh\nset -e\n/usr/libexec/tokrate-headless/provision-update-user\nif [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi\nexit 0\n";
     write_private(&root.join("DEBIAN/postinst"), postinst, 0o755)?;
     let package = stage.join("tokrate-headless-rollback.deb");
     let output = command_output(

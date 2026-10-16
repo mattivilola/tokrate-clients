@@ -203,7 +203,7 @@ pub fn status_value_at(
         ),
         "up-to-date" => format!("Already up to date: {}.", record.installed_version),
         "stale" => "Update check is stale; run check-update to refresh it.".into(),
-        _ => "Could not check for updates. Will retry automatically.".into(),
+        _ => "Could not check for updates. Run check-update to try again.".into(),
     };
     json!({
         "automaticChecks": setting.as_str(),
@@ -265,7 +265,7 @@ pub fn error_record(installed_version: &str, now: DateTime<Utc>) -> CacheRecord 
         release_version: None,
         released_at: None,
         expires_at: None,
-        message: "Could not check for updates. Will retry automatically.".into(),
+        message: "Could not check for updates. Run check-update to try again.".into(),
     }
 }
 

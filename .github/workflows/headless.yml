@@ -62,6 +62,9 @@ jobs:
           install -D linux/headless/target/release/tokrate-headless /usr/bin/tokrate-headless
       - name: Verify systemd units and encrypted credential flow
         run: |
+          install -D -m 0644 linux/headless/tokrate-update.sysusers /usr/lib/sysusers.d/tokrate-update.conf
+          install -D -m 0755 linux/headless/provision-update-user.sh /usr/libexec/tokrate-headless/provision-update-user
+          /usr/libexec/tokrate-headless/provision-update-user
           systemd-analyze verify linux/headless/tokrate-headless-local@.service linux/headless/tokrate-headless-share@.service linux/headless/tokrate-headless-update-check.service linux/headless/tokrate-headless-update-check.timer
           python3 linux/headless/test-runtime.py linux/headless/target/release/tokrate-headless
           TOKRATE_HEADLESS_RUN_INSTALL_TEST=1 TOKRATE_HEADLESS_BINARY=/usr/bin/tokrate-headless python3 linux/headless/test-install.py
@@ -77,6 +80,8 @@ jobs:
           install -m 0644 linux/headless/tokrate-headless-share@.service "$bundle_root/tokrate-headless/tokrate-headless-share@.service"
           install -m 0644 linux/headless/tokrate-headless-update-check.service "$bundle_root/tokrate-headless/tokrate-headless-update-check.service"
           install -m 0644 linux/headless/tokrate-headless-update-check.timer "$bundle_root/tokrate-headless/tokrate-headless-update-check.timer"
+          install -m 0644 linux/headless/tokrate-update.sysusers "$bundle_root/tokrate-headless/tokrate-update.sysusers"
+          install -m 0755 linux/headless/provision-update-user.sh "$bundle_root/tokrate-headless/provision-update-user.sh"
           architecture=$(dpkg --print-architecture)
           tar --create --gzip --file "$RUNNER_TEMP/tokrate-headless_0.1.28_${architecture}.tar.gz" --directory "$bundle_root" tokrate-headless
       - name: Sign and verify release artifacts
@@ -107,6 +112,35 @@ jobs:
           path: ${{ steps.release_assets.outputs.path }}
           if-no-files-found: error
           retention-days: 7
+  runtime-debian12:
+    needs: debian
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: tokrate-headless-debian12-*
+          path: ${{ runner.temp }}/headless-runtime-artifacts
+          merge-multiple: true
+      - name: Build privileged Debian 12 systemd test image
+        run: docker build --file linux/headless/runtime-test.Dockerfile --tag tokrate-headless-runtime-test:debian12 linux/headless
+      - name: Run real Debian 12 package and systemd lifecycle tests
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/headless-runtime-artifacts
+        run: |
+          deb=$(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name 'tokrate-headless_*_amd64.deb' -print -quit)
+          test -n "$deb"
+          name=tokrate-headless-systemd-runtime
+          docker run --detach --privileged --cgroupns=host --name "$name" \
+            --mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --env container=docker \
+            tokrate-headless-runtime-test:debian12
+          trap 'docker rm --force "$name" >/dev/null 2>&1 || true' EXIT
+          docker cp "$deb" "$name:/tmp/tokrate-headless.deb"
+          docker exec "$name" python3 /work/linux/headless/test-systemd-runtime.py /tmp/tokrate-headless.deb /work/linux/headless
   signed-feed:
     needs: debian
     if: github.event_name != 'pull_request'

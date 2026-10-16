@@ -90,13 +90,16 @@ linux/headless/package.sh ./dist/headless
 ```
 
 The package contains the compiled binary, both collector service templates,
-and the update-check service and timer. Its post-install step reloads
-systemd's unit definitions only; unpacking a package does not enable the
-collector or update-check timer, create consent, or provision a key. After
+the update-check service and timer, and a `tokrate-update` sysusers definition.
+The update checker runs under that dedicated unprivileged, non-login system
+account so its read-only status cache remains available after the oneshot exits.
+Its post-install step provisions that account and reloads systemd's unit
+definitions only; unpacking a package does not enable the collector or
+update-check timer, create consent, or provision a key. After
 installing the package with `dpkg -i`, run `install.sh` from the source
 checkout with `--binary /usr/bin/tokrate-headless`, an explicit target user,
-and a chosen mode. The published bootstrap archive includes the installer
-and templates for a guided setup.
+and a chosen mode. The published bootstrap archive includes the installer,
+templates, sysusers definition, and account validator for a guided setup.
 
 ## Status and service operations
 

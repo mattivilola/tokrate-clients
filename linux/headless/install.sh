@@ -11,6 +11,8 @@ CONFIG_ROOT=/etc/tokrate-headless
 UPDATE_SETTING=/etc/tokrate-headless/update-checks
 CREDENTIAL_ROOT=/etc/credstore.encrypted
 UNIT_DIR=/usr/lib/systemd/system
+SYSUSERS_DIR=/usr/lib/sysusers.d
+LIBEXEC_DIR=/usr/libexec/tokrate-headless
 UPDATE_LOCK=/run/tokrate-headless/update.lock
 
 usage() {
@@ -39,6 +41,8 @@ if [[ -n "$TEST_ROOT" ]]; then
   UPDATE_SETTING="$CONFIG_ROOT/update-checks"
   CREDENTIAL_ROOT="$TEST_ROOT/etc/credstore.encrypted"
   UNIT_DIR="$TEST_ROOT/usr/lib/systemd/system"
+  SYSUSERS_DIR="$TEST_ROOT/usr/lib/sysusers.d"
+  LIBEXEC_DIR="$TEST_ROOT/usr/libexec/tokrate-headless"
   UPDATE_LOCK="$TEST_ROOT/run/tokrate-headless/update.lock"
 fi
 
@@ -127,6 +131,8 @@ local_template_path="${UNIT_DIR}/${LOCAL_TEMPLATE}"
 share_template_path="${UNIT_DIR}/${SHARE_TEMPLATE}"
 update_check_service_path="${UNIT_DIR}/${UPDATE_CHECK_SERVICE}"
 update_check_timer_path="${UNIT_DIR}/${UPDATE_CHECK_TIMER}"
+sysusers_config_path="${SYSUSERS_DIR}/tokrate-update.conf"
+provision_update_user_path="${LIBEXEC_DIR}/provision-update-user"
 identity_marker="$config_dir/identity-provisioned"
 
 # Availability checks have a root-managed machine-wide setting, independent of
@@ -209,9 +215,9 @@ assert_root_owned() {
 }
 
 if [[ -n "$TEST_ROOT" ]]; then
-  system_paths=("$TEST_ROOT/usr" "$TEST_ROOT/usr/bin" "$TEST_ROOT/usr/lib" "$TEST_ROOT/usr/lib/systemd" "$UNIT_DIR" "$TEST_ROOT" "$CONFIG_ROOT" "$config_dir")
+  system_paths=("$TEST_ROOT/usr" "$TEST_ROOT/usr/bin" "$TEST_ROOT/usr/lib" "$TEST_ROOT/usr/lib/systemd" "$UNIT_DIR" "$SYSUSERS_DIR" "$TEST_ROOT/usr/libexec" "$LIBEXEC_DIR" "$TEST_ROOT" "$CONFIG_ROOT" "$config_dir")
 else
-  system_paths=(/usr/bin /usr/lib /usr/lib/systemd "$UNIT_DIR" "$CONFIG_ROOT" "$config_dir")
+  system_paths=(/usr/bin /usr/lib /usr/lib/systemd "$UNIT_DIR" "$SYSUSERS_DIR" /usr/libexec "$LIBEXEC_DIR" "$CONFIG_ROOT" "$config_dir")
 fi
 for path in "${system_paths[@]}"; do
   assert_real_directory "$path"
@@ -219,6 +225,7 @@ for path in "${system_paths[@]}"; do
 done
 for path in "$binary_target" "$local_template_path" "$share_template_path" \
   "$update_check_service_path" "$update_check_timer_path" "$UPDATE_SETTING" \
+  "$sysusers_config_path" "$provision_update_user_path" \
   "$config_dir/settings.json" "$config_dir/setup-complete" "$config_dir/consent-v6.json" "$identity_marker"; do
   assert_regular_or_missing "$path"
   assert_root_owned "$path"
@@ -234,7 +241,7 @@ if [[ "$MODE" == share ]]; then
   fi
 fi
 
-install -d -o root -g root -m 0755 "$CONFIG_ROOT" "$config_dir" "$UNIT_DIR" "$(dirname -- "$binary_target")"
+install -d -o root -g root -m 0755 "$CONFIG_ROOT" "$config_dir" "$UNIT_DIR" "$SYSUSERS_DIR" "$LIBEXEC_DIR" "$(dirname -- "$binary_target")"
 if [[ "$SOURCE_BINARY" != "$binary_target" ]]; then
   install -o root -g root -m 0755 "$SOURCE_BINARY" "$binary_target"
 else
@@ -245,6 +252,11 @@ install -o root -g root -m 0644 "$(dirname -- "$0")/${LOCAL_TEMPLATE}" "$local_t
 install -o root -g root -m 0644 "$(dirname -- "$0")/${SHARE_TEMPLATE}" "$share_template_path"
 install -o root -g root -m 0644 "$(dirname -- "$0")/${UPDATE_CHECK_SERVICE}" "$update_check_service_path"
 install -o root -g root -m 0644 "$(dirname -- "$0")/${UPDATE_CHECK_TIMER}" "$update_check_timer_path"
+install -o root -g root -m 0644 "$(dirname -- "$0")/tokrate-update.sysusers" "$sysusers_config_path"
+install -o root -g root -m 0755 "$(dirname -- "$0")/provision-update-user.sh" "$provision_update_user_path"
+if [[ -z "$TEST_ROOT" ]]; then
+  "$provision_update_user_path"
+fi
 if [[ ! -e "$UPDATE_SETTING" ]]; then
   install -o root -g root -m 0644 /dev/null "$UPDATE_SETTING"
   printf 'on\n' >"$UPDATE_SETTING"

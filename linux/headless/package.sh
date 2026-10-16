@@ -51,8 +51,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-install -d -m 0755 "$stage/DEBIAN" "$stage/usr/bin" "$stage/lib/systemd/system"
+install -d -m 0755 "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/lib/sysusers.d" "$stage/usr/libexec/tokrate-headless" "$stage/lib/systemd/system"
 install -m 0755 "$binary" "$stage/usr/bin/tokrate-headless"
+install -m 0644 "$script_dir/tokrate-update.sysusers" "$stage/usr/lib/sysusers.d/tokrate-update.conf"
+install -m 0755 "$script_dir/provision-update-user.sh" "$stage/usr/libexec/tokrate-headless/provision-update-user"
 install -m 0644 "$script_dir/tokrate-headless-local@.service" "$stage/lib/systemd/system/tokrate-headless-local@.service"
 install -m 0644 "$script_dir/tokrate-headless-share@.service" "$stage/lib/systemd/system/tokrate-headless-share@.service"
 install -m 0644 "$script_dir/tokrate-headless-update-check.service" "$stage/lib/systemd/system/tokrate-headless-update-check.service"
@@ -74,6 +76,7 @@ cat >"$stage/DEBIAN/postinst" <<'EOF'
 set -e
 # Loading unit definitions does not enable or start either service. The
 # administrator must run the installer and explicitly choose a consent mode.
+"/usr/libexec/tokrate-headless/provision-update-user"
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
 fi

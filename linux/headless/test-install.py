@@ -19,6 +19,8 @@ LOCAL_UNIT = ROOT / "tokrate-headless-local@.service"
 SHARE_UNIT = ROOT / "tokrate-headless-share@.service"
 UPDATE_CHECK_SERVICE = ROOT / "tokrate-headless-update-check.service"
 UPDATE_CHECK_TIMER = ROOT / "tokrate-headless-update-check.timer"
+UPDATE_SYSUSERS = ROOT / "tokrate-update.sysusers"
+UPDATE_USER_HELPER = ROOT / "provision-update-user.sh"
 
 
 def require(condition: bool, message: str) -> None:
@@ -33,7 +35,7 @@ def section(text: str, name: str) -> str:
 
 
 def main() -> None:
-    for path in (INSTALLER, PACKAGER, BOOTSTRAP):
+    for path in (INSTALLER, PACKAGER, BOOTSTRAP, UPDATE_USER_HELPER):
         result = subprocess.run(["bash", "-n", str(path)], check=False)
         require(result.returncode == 0, f"shell syntax check failed: {path.name}")
 
@@ -69,10 +71,17 @@ def main() -> None:
     update_check_service = UPDATE_CHECK_SERVICE.read_text()
     update_check_timer = UPDATE_CHECK_TIMER.read_text()
     update_check_service_section = section(update_check_service, "Service")
-    require("DynamicUser=yes" in update_check_service_section, "update checks must run as an unprivileged dynamic user")
+    require("User=tokrate-update" in update_check_service_section and "Group=tokrate-update" in update_check_service_section, "update checks must use the dedicated unprivileged system account")
+    require("DynamicUser=" not in update_check_service_section, "update cache must remain readable after the oneshot user exits")
     require("CacheDirectory=tokrate-headless-updates" in update_check_service_section, "update service must use its public cache")
+    require("CacheDirectoryMode=0755" in update_check_service_section and "UMask=0022" in update_check_service_section, "update cache must be readable by local users but not writable")
+    require("RemoveIPC=yes" in update_check_service_section, "update checker must clean up its IPC resources")
     require("/etc/tokrate-headless" in update_check_service_section and "/etc/credstore.encrypted" in update_check_service_section, "update service must not access config or credentials")
     require("OnCalendar=daily" in update_check_timer and "RandomizedDelaySec=" in update_check_timer, "update availability checks must run on a randomized daily timer")
+    sysusers = UPDATE_SYSUSERS.read_text()
+    require('u tokrate-update - "Tokrate update checker" /nonexistent /usr/sbin/nologin' in sysusers, "checker account must be a system non-login account with no home")
+    helper = UPDATE_USER_HELPER.read_text()
+    require('systemd-sysusers "$CONFIG"' in helper and "validate_local_account" in helper, "account provisioning must use sysusers and reject incompatible existing accounts")
 
     local = LOCAL_UNIT.read_text()
     local_service = section(local, "Service")
@@ -92,8 +101,10 @@ def main() -> None:
     postinst = packager.split("cat >\"$stage/DEBIAN/postinst\" <<'EOF'", 1)[1].split("EOF", 1)[0]
     require("daemon-reload" in postinst, "package installation must reload systemd unit definitions")
     require("systemctl enable" not in postinst and "systemctl start" not in postinst, "package postinst must not enable or start services")
+    require("provision-update-user" in postinst, "Debian postinst must provision the static checker account")
     require("provision-key" not in packager and "consent-v6.json" not in packager, "package build must not create consent or credentials")
     require('"$script_dir/tokrate-headless-update-check.service"' in packager and '"$script_dir/tokrate-headless-update-check.timer"' in packager, "Debian package must contain both updater units")
+    require('"$script_dir/tokrate-update.sysusers"' in packager and '"$script_dir/provision-update-user.sh"' in packager, "Debian package must contain the shared sysusers definition and validator")
     require("Depends: libc6 (>= 2.36), libgcc-s1, systemd (>= 252)" in packager, "Debian package must declare its runtime ABI and systemd requirements")
 
     bootstrap = BOOTSTRAP.read_text()

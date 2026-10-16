@@ -6,11 +6,13 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-DynamicUser=yes
+User=tokrate-update
+Group=tokrate-update
 CacheDirectory=tokrate-headless-updates
 CacheDirectoryMode=0755
 UMask=0022
 ExecStart=/usr/bin/tokrate-headless update-check --service
+RemoveIPC=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
