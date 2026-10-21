@@ -2,10 +2,10 @@
 
 ## npm CLI
 
-The repository now includes a dependency-free `tokrate` npm CLI, ready for its
-first publication. After it is published, `npx tokrate@latest connect` guides
-native desktop setup or invokes the existing verified Debian headless
-installer. `status` and `doctor` provide local diagnostics. Installing the npm
+The dependency-free `tokrate` npm CLI provides native setup and diagnostics.
+Run `npx tokrate@latest connect` for guided native desktop setup or installation
+through the existing verified Debian headless installer.
+`status` and `doctor` provide local diagnostics. Installing the npm
 package alone does not start monitoring or enable sharing; the existing native
 consent flow and saved OFF preference still apply. Node.js 22+ is required.
 See the [CLI usage, platform limits and publishing instructions](cli/README.md).

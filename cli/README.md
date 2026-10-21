@@ -4,7 +4,7 @@ The `tokrate` npm package is a small, dependency-free setup and diagnostics CLI
 for the existing native clients. Requires Node.js 22 or later. Its version is
 independent of the Mac, desktop and headless client versions.
 
-After publication:
+Run without a permanent CLI installation:
 
 ```sh
 npx tokrate@latest connect
@@ -125,8 +125,7 @@ An authorized npm maintainer must claim/control the `tokrate` package name,
 authenticate to the public registry with the required account protections,
 and run `npm publish --access public` from the root after validation. Check
 name ownership again immediately before the first publish. No npm token or
-new credential is needed to develop, test or pack. The package has not been
-published by implementing these files. Subsequent releases must use a new
+new credential is needed to develop, test or pack. Subsequent releases must use a new
 package version. Native release publication remains governed by its existing
 platform verification and signing gates.
 
