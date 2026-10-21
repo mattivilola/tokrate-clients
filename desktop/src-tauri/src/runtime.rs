@@ -26,7 +26,7 @@ use tokrate_core::{
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-14-v6";
+pub const SHARING_NOTICE_VERSION: &str = "2026-10-21-v7";
 /// While records keep arriving, local history is written at most this often. What is not written
 /// yet is safe: the checkpoints are saved with the records they belong to, so after a crash the
 /// files behind the unwritten records are read again.
@@ -2291,6 +2291,7 @@ mod tests {
     const PREVIOUS_NOTICE: &str = "2026-10-05-v2";
     const NOTICE_V4: &str = "2026-10-06-v4";
     const NOTICE_V5: &str = "2026-10-09-v5";
+    const NOTICE_V6: &str = "2026-10-14-v6";
     fn saved_settings(sharing: bool, consent: Option<(&str, &str)>) -> serde_json::Value {
         let mut settings = serde_json::to_value(Settings::default()).unwrap();
         settings["sharing"] = sharing.into();
@@ -2300,9 +2301,9 @@ mod tests {
         settings
     }
     #[test]
-    fn notice_version_six_pauses_sharing_that_was_accepted_under_earlier_versions() {
-        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-14-v6");
-        for old in [OLD_NOTICE, PREVIOUS_NOTICE, NOTICE_V4, NOTICE_V5] {
+    fn notice_version_seven_pauses_sharing_that_was_accepted_under_earlier_versions() {
+        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-21-v7");
+        for old in [OLD_NOTICE, PREVIOUS_NOTICE, NOTICE_V4, NOTICE_V5, NOTICE_V6] {
             assert_ne!(SHARING_NOTICE_VERSION, old);
             let dir = temporary();
             write_settings(&dir, saved_settings(true, Some((old, "accepted"))));

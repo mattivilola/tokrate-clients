@@ -6,6 +6,7 @@ use crate::model::{
     CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION, T3_CODE_CLIENT,
 };
 use crate::parser::JsonlEventParser;
+use crate::prompt_size::PromptSizeTracker;
 use crate::t3_identity::T3ClaudeIdentityIndex;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
@@ -87,19 +88,48 @@ struct MessageUsage {
     input_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
     cache_creation_input_tokens: Option<i64>,
+    prompt_conflict: bool,
 }
 
 impl MessageUsage {
     fn observe_prompt_cache(&mut self, usage: Option<&serde_json::Map<String, Value>>) {
-        let field = |name: &str| nonnegative_integer(usage.and_then(|usage| usage.get(name)));
-        self.input_tokens = self.input_tokens.or_else(|| field("input_tokens"));
-        self.cache_read_input_tokens = self
-            .cache_read_input_tokens
-            .or_else(|| field("cache_read_input_tokens"));
-        self.cache_creation_input_tokens = self
-            .cache_creation_input_tokens
-            .or_else(|| field("cache_creation_input_tokens"));
+        let (input, input_invalid) = prompt_usage_field(usage, "input_tokens");
+        let (read, read_invalid) = prompt_usage_field(usage, "cache_read_input_tokens");
+        let (created, created_invalid) = prompt_usage_field(usage, "cache_creation_input_tokens");
+        self.prompt_conflict |= input_invalid || read_invalid || created_invalid;
+        self.input_tokens =
+            observe_unique_usage(self.input_tokens, input, &mut self.prompt_conflict);
+        self.cache_read_input_tokens = observe_unique_usage(
+            self.cache_read_input_tokens,
+            read,
+            &mut self.prompt_conflict,
+        );
+        self.cache_creation_input_tokens = observe_unique_usage(
+            self.cache_creation_input_tokens,
+            created,
+            &mut self.prompt_conflict,
+        );
     }
+}
+
+fn prompt_usage_field(
+    usage: Option<&serde_json::Map<String, Value>>,
+    name: &str,
+) -> (Option<i64>, bool) {
+    let raw = usage.and_then(|usage| usage.get(name));
+    let parsed = nonnegative_integer(raw);
+    (parsed, raw.is_some() && parsed.is_none())
+}
+
+fn observe_unique_usage(
+    previous: Option<i64>,
+    current: Option<i64>,
+    conflict: &mut bool,
+) -> Option<i64> {
+    if previous.is_some() && current.is_some() && previous != current {
+        *conflict = true;
+    }
+    previous.or(current)
 }
 
 /// Prompt-cache totals `(input, read, write)` over a turn's counted messages. The input total
@@ -1080,6 +1110,22 @@ impl ClaudeTranscriptParser {
         }
         let (input_tokens, cache_read_input_tokens, cache_write_input_tokens) =
             prompt_cache_totals(&turn.messages);
+        let mut prompt_requests = PromptSizeTracker::default();
+        for (message_id, usage) in &turn.messages {
+            if usage.prompt_conflict {
+                prompt_requests.invalidate();
+            }
+            let complete_input = usage
+                .input_tokens
+                .zip(usage.cache_read_input_tokens)
+                .zip(usage.cache_creation_input_tokens)
+                .and_then(|((input, read), created)| input.checked_add(read)?.checked_add(created));
+            prompt_requests.record(
+                Some(message_id),
+                complete_input,
+                usage.cache_read_input_tokens,
+            );
+        }
         let client = self.client_for_activity(
             turn.session_identity.as_deref(),
             Some(started_at),
@@ -1135,12 +1181,15 @@ impl ClaudeTranscriptParser {
             input_tokens: None,
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
+            prompt_size_buckets: None,
         };
         metric.set_prompt_cache(
             input_tokens,
             cache_read_input_tokens,
             cache_write_input_tokens,
         );
+        metric.prompt_size_buckets =
+            prompt_requests.finish(metric.input_tokens, metric.cache_read_input_tokens);
         Some(metric)
     }
 

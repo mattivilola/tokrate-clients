@@ -7,6 +7,7 @@ use crate::model::{
     OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
 };
 use crate::opencode_db::{Assistant, MessageKind, Read, SessionRow};
+use crate::prompt_size::PromptSizeTracker;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -486,6 +487,17 @@ fn prompt_cache(metric: &mut TurnMetric, assistants: &[(&str, &Assistant)], prov
         write = write.saturating_add(message_write);
     }
     metric.set_prompt_cache(input, read, (provider == "anthropic").then_some(write));
+    let mut requests = PromptSizeTracker::default();
+    for (id, assistant) in assistants {
+        let input = assistant
+            .input_tokens
+            .zip(assistant.cache_read_tokens)
+            .and_then(|(input, read)| input.checked_add(read))
+            .and_then(|input| input.checked_add(assistant.cache_write_tokens.unwrap_or(0)));
+        requests.record(Some(id), input, assistant.cache_read_tokens);
+    }
+    metric.prompt_size_buckets =
+        requests.finish(metric.input_tokens, metric.cache_read_input_tokens);
 }
 
 /// Σ output of subagent messages created within the turn, and whether that total is final: every

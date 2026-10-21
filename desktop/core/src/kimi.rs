@@ -11,6 +11,7 @@ use crate::model::{
     ToolSurface, TurnMetric, KIMI_CLIENT, KIMI_METRIC_VERSION, KIMI_PARSER_VERSION,
 };
 use crate::parser::JsonlEventParser;
+use crate::prompt_size::PromptSizeTracker;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -146,6 +147,7 @@ struct TurnState {
     output_tokens: i64,
     input_tokens: i64,
     cache_read_tokens: i64,
+    prompt_requests: PromptSizeTracker,
     responses: ResponseTotals,
     model: Common<String>,
     provider: Common<&'static str>,
@@ -165,6 +167,7 @@ impl TurnState {
             output_tokens: 0,
             input_tokens: 0,
             cache_read_tokens: 0,
+            prompt_requests: PromptSizeTracker::default(),
             responses: ResponseTotals::default(),
             model: Common::Unobserved,
             provider: Common::Unobserved,
@@ -507,6 +510,14 @@ impl KimiWireParser {
         turn.cache_read_tokens = turn
             .cache_read_tokens
             .saturating_add(usage.input_cache_read);
+        turn.prompt_requests.record(
+            Some(&format!("{}:{}", turn.id, step)),
+            usage
+                .input_other
+                .checked_add(usage.input_cache_read)
+                .and_then(|input| input.checked_add(usage.input_cache_creation)),
+            Some(usage.input_cache_read),
+        );
         turn.model.observe(request.model.clone());
         turn.provider.observe(Some(request.provider));
         turn.effort.observe(request.effort.clone());
@@ -647,6 +658,8 @@ impl KimiWireParser {
         metric.surface = self.surface;
         // Kimi Code reports no cache writes: its `inputCacheCreation` is always 0.
         metric.set_prompt_cache(Some(turn.input_tokens), Some(turn.cache_read_tokens), None);
+        metric.prompt_size_buckets = std::mem::take(&mut turn.prompt_requests)
+            .finish(metric.input_tokens, metric.cache_read_input_tokens);
         self.delegation_events.push(DelegationEvent::Turn {
             turn_id: id,
             root_session: root_session_key(KIMI_CLIENT, &self.session),

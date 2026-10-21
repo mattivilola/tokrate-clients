@@ -500,6 +500,51 @@ final class CodexEventParserTests: XCTestCase {
         XCTAssertEqual(zero.cacheReadInputTokens, 0)
     }
 
+    func testPromptSizeCountsEveryUniqueUsageRecordIncludingZeroAndShortOutputs() throws {
+        var parser = CodexEventParser(sourceIdentity: "prompt-size")
+        try begin(&parser)
+        func usage(_ id: String, input: Int, read: Int, output: Int, totalInput: Int, totalRead: Int, totalOutput: Int) throws -> Data {
+            try at(5, "token_usage_record", [
+                "turn_id": "turn-1", "response_id": id,
+                "usage": ["input_tokens": input, "cached_input_tokens": read, "output_tokens": output],
+                "turn_token_usage": ["input_tokens": totalInput, "cached_input_tokens": totalRead, "output_tokens": totalOutput]
+            ])
+        }
+        _ = parser.consume(line: try usage("short", input: 7_999, read: 1_000, output: 0, totalInput: 7_999, totalRead: 1_000, totalOutput: 0))
+        _ = parser.consume(line: try usage("short", input: 7_999, read: 1_000, output: 0, totalInput: 7_999, totalRead: 1_000, totalOutput: 0))
+        _ = parser.consume(line: try usage("small", input: 8_000, read: 2_000, output: 100, totalInput: 15_999, totalRead: 3_000, totalOutput: 100))
+        let metric = try XCTUnwrap(complete(&parser, at: 10))
+
+        XCTAssertNil(metric.responseCount, "prompt accounting does not use the response-speed filter")
+        XCTAssertEqual(metric.inputTokens, 15_999)
+        XCTAssertEqual(metric.cacheReadInputTokens, 3_000)
+        XCTAssertEqual(metric.promptSizeBuckets?.map(\.bucket), ["under-8k", "8k-32k"])
+        XCTAssertEqual(metric.promptSizeBuckets?.map(\.requestCount), [1, 1], "a duplicate response ID is counted once")
+    }
+
+    func testCodexPromptSizeHistogramRequiresCompleteNonconflictingRequestUsage() throws {
+        var missing = CodexEventParser(sourceIdentity: "missing-prompt")
+        try begin(&missing)
+        _ = missing.consume(line: try at(5, "token_usage_record", [
+            "turn_id": "turn-1", "response_id": "request", "usage": ["output_tokens": 100],
+            "turn_token_usage": ["input_tokens": 10_000, "cached_input_tokens": 1_000, "output_tokens": 100]
+        ]))
+        XCTAssertNil(try complete(&missing, at: 10)?.promptSizeBuckets)
+
+        var conflict = CodexEventParser(sourceIdentity: "conflict-prompt")
+        try begin(&conflict)
+        let record: (Int) throws -> Data = { input in
+            try self.at(5, "token_usage_record", [
+                "turn_id": "turn-1", "response_id": "same-request",
+                "usage": ["input_tokens": input, "cached_input_tokens": 1_000, "output_tokens": 100],
+                "turn_token_usage": ["input_tokens": 10_000, "cached_input_tokens": 1_000, "output_tokens": 100]
+            ])
+        }
+        _ = conflict.consume(line: try record(10_000))
+        _ = conflict.consume(line: try record(9_000))
+        XCTAssertNil(try complete(&conflict, at: 10)?.promptSizeBuckets)
+    }
+
     private func digest(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }

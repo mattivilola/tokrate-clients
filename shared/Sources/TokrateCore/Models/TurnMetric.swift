@@ -51,6 +51,9 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     /// Tokens written to the prompt cache. Reported by Claude Code only; nil for Codex and Grok Build
     /// (their logs carry a field that is always 0, which is not a report) and whenever `inputTokens` is nil.
     public let cacheWriteInputTokens: Int?
+    /// Sparse request-level prompt-size histogram. It is retained only when all requests reconcile
+    /// exactly with the turn's reported input and cache-read totals.
+    public let promptSizeBuckets: [PromptSizeBucket]?
     /// Generic name for the source-reported TTFT observation. The stored Codex name remains
     /// for backward compatibility with existing history files.
     /// Output tokens per second while the model was responding: tools and waiting excluded.
@@ -176,7 +179,8 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         surface: ToolSurface? = nil,
         inputTokens: Int? = nil,
         cacheReadInputTokens: Int? = nil,
-        cacheWriteInputTokens: Int? = nil
+        cacheWriteInputTokens: Int? = nil,
+        promptSizeBuckets: [PromptSizeBucket]? = nil
     ) {
         // The three response fields travel together: a partial set carries no usable measurement.
         let hasResponse = responseOutputTokens.map { $0 > 0 } == true
@@ -192,6 +196,10 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         self.inputTokens = cache.input
         self.cacheReadInputTokens = cache.read
         self.cacheWriteInputTokens = cache.write
+        self.promptSizeBuckets = Self.canRetainPromptSizeBuckets(
+            promptSizeBuckets, inputTokens: cache.input, cacheReadInputTokens: cache.read,
+            client: client, parserVersion: parserVersion, metricVersion: metricVersion
+        ) ? promptSizeBuckets : nil
         self.reasoningEffort = reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil }
         self.client = client
         self.clientVersion = clientVersion
@@ -216,6 +224,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         case turnThroughputTPS, streamingTPS
         case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion, delegatedOutputTokens, surface
         case inputTokens, cacheReadInputTokens, cacheWriteInputTokens
+        case promptSizeBuckets
     }
 
     /// The prompt-cache fields as one consistent set (contract "Prompt cache"): input and cache-read
@@ -225,6 +234,19 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         guard let input, let read, input >= 0, read >= 0, read <= input, write.map({ $0 >= 0 }) ?? true
         else { return (nil, nil, nil) }
         return (input, read, write)
+    }
+
+    private static func canRetainPromptSizeBuckets(
+        _ buckets: [PromptSizeBucket]?, inputTokens: Int?, cacheReadInputTokens: Int?,
+        client: String, parserVersion: String, metricVersion: String
+    ) -> Bool {
+        let effectiveClient = client == T3Runtime.client
+            ? T3Runtime.nativeClient(parser: parserVersion, metric: metricVersion)
+            : client
+        guard effectiveClient != "grok-build" else { return false }
+        return PromptSizeBuckets.validated(
+            buckets, inputTokens: inputTokens, cacheReadInputTokens: cacheReadInputTokens
+        )
     }
 
     public init(from decoder: any Decoder) throws {
@@ -267,6 +289,11 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         inputTokens = cache.input
         cacheReadInputTokens = cache.read
         cacheWriteInputTokens = cache.write
+        let promptBuckets = try? values.decode([PromptSizeBucket].self, forKey: .promptSizeBuckets)
+        promptSizeBuckets = Self.canRetainPromptSizeBuckets(
+            promptBuckets, inputTokens: cache.input, cacheReadInputTokens: cache.read,
+            client: client, parserVersion: parserVersion, metricVersion: metricVersion
+        ) ? promptBuckets : nil
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -296,6 +323,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encodeIfPresent(inputTokens, forKey: .inputTokens)
         try values.encodeIfPresent(cacheReadInputTokens, forKey: .cacheReadInputTokens)
         try values.encodeIfPresent(cacheWriteInputTokens, forKey: .cacheWriteInputTokens)
+        try values.encodeIfPresent(promptSizeBuckets, forKey: .promptSizeBuckets)
     }
 
     /// This record without response timing, for a measurement that failed `hasPlausibleResponseTiming`.
@@ -309,7 +337,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
             reasoningEffort: reasoningEffort, providerRegion: providerRegion,
             delegatedOutputTokens: delegatedOutputTokens, surface: surface,
             inputTokens: inputTokens, cacheReadInputTokens: cacheReadInputTokens,
-            cacheWriteInputTokens: cacheWriteInputTokens
+            cacheWriteInputTokens: cacheWriteInputTokens, promptSizeBuckets: promptSizeBuckets
         )
     }
 
@@ -325,7 +353,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
             responseDurationSeconds: responseDurationSeconds, responseCount: responseCount,
             providerRegion: providerRegion, delegatedOutputTokens: tokens, surface: surface,
             inputTokens: inputTokens, cacheReadInputTokens: cacheReadInputTokens,
-            cacheWriteInputTokens: cacheWriteInputTokens
+            cacheWriteInputTokens: cacheWriteInputTokens, promptSizeBuckets: promptSizeBuckets
         )
     }
 }

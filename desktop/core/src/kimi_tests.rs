@@ -253,6 +253,15 @@ fn the_real_desktop_log_of_two_steps_is_one_turn_with_one_response() {
     assert_eq!(turn.surface, Some(ToolSurface::Desktop));
     assert_eq!(turn.input_tokens, Some(36_590));
     assert_eq!(turn.cache_read_input_tokens, Some(30_976));
+    assert_eq!(
+        turn.prompt_size_buckets
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket.request_count)
+            .sum::<u32>(),
+        2
+    );
     assert_eq!(turn.cache_write_input_tokens, None);
     assert_eq!(turn.reasoning_output_tokens, None);
     assert_eq!(turn.client_version, None);
@@ -1411,7 +1420,7 @@ fn a_kimi_sample_is_shared_only_for_moonshot_or_unknown_without_a_cache_write() 
         assert_eq!(sample.client, "kimi-code");
         assert_eq!(sample.parser_version, "kimi-wire-v1");
         assert_eq!(sample.metric_version, "kimi-observed-turn-v1");
-        assert_eq!(sample.app_version, "0.1.28");
+        assert_eq!(sample.app_version, "0.1.30");
         assert_eq!(sample.model, "k2d8-preview");
         assert_eq!(sample.input_tokens, Some(1_000));
         assert_eq!(sample.cache_read_input_tokens, Some(800));

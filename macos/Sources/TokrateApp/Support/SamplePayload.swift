@@ -26,7 +26,10 @@ enum SamplePayload {
             delegatedOutputTokens: 0,
             surface: .cli,
             inputTokens: 48_000,
-            cacheReadInputTokens: 36_000
+            cacheReadInputTokens: 36_000,
+            promptSizeBuckets: [PromptSizeBucket(
+                bucket: "8k-32k", requestCount: 3, inputTokens: 48_000, cacheReadInputTokens: 36_000
+            )]
         )
     }
 

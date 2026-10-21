@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::prompt_size::{deserialize_prompt_size_buckets, PromptSizeBucket};
+
 pub const CODEX_CLIENT: &str = "codex";
 pub const CODEX_PARSER_VERSION: &str = "codex-rollout-v2";
 pub const CODEX_METRIC_VERSION: &str = "turn-v1";
@@ -204,6 +206,9 @@ pub struct TurnMetric {
     /// `input_tokens` is `None`.
     #[serde(default)]
     pub cache_write_input_tokens: Option<i64>,
+    /// Complete per-request prompt-size histogram, or null when request coverage is unavailable.
+    #[serde(default, deserialize_with = "deserialize_prompt_size_buckets")]
+    pub prompt_size_buckets: Option<Vec<PromptSizeBucket>>,
 }
 
 /// The prompt-cache fields as one consistent set (contract "Prompt cache"): input and cache-read
@@ -344,6 +349,7 @@ impl TurnMetric {
             input_tokens: None,
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
+            prompt_size_buckets: None,
         }
     }
 
@@ -412,6 +418,7 @@ impl TurnMetric {
             input_tokens: None,
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
+            prompt_size_buckets: None,
         }
     }
 }

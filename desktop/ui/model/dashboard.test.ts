@@ -547,6 +547,7 @@ describe("sharing notice", () => {
       "Model, provider (for Claude on Amazon Bedrock, its inference-profile region) and effort",
       "Source kind (primary, subagent or unknown)",
       "Token counts and turn duration",
+      "Per-request input size bands and token totals, when complete",
       "Output tokens of subagent work a turn started",
       "Where the tool ran, as a category",
       "Response timing within the turn",

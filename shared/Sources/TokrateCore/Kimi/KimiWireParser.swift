@@ -69,6 +69,7 @@ struct KimiWireParser: JSONLMetricParser {
         var responseTokens = 0
         var responseSeconds = 0.0
         var responseCount = 0
+        var promptUsage = PromptSizeUsageAccumulator()
         var models: Set<String?> = []
         var providers: Set<String> = []
         var efforts: Set<String?> = []
@@ -311,6 +312,13 @@ struct KimiWireParser: JSONLMetricParser {
         state.outputTokens += usage.output
         state.inputTokens += usage.inputOther + usage.cacheRead + usage.cacheCreation
         state.cacheReadTokens += usage.cacheRead
+        let (inputAndRead, firstPromptOverflow) = usage.inputOther.addingReportingOverflow(usage.cacheRead)
+        let (requestInput, secondPromptOverflow) = inputAndRead.addingReportingOverflow(usage.cacheCreation)
+        if firstPromptOverflow || secondPromptOverflow {
+            state.promptUsage.invalidate()
+        } else {
+            state.promptUsage.record(id: String(step), inputTokens: requestInput, cacheReadInputTokens: usage.cacheRead)
+        }
         if isResponse {
             state.responseTokens += usage.output
             state.responseSeconds += duration
@@ -359,7 +367,10 @@ struct KimiWireParser: JSONLMetricParser {
             responseCount: hasResponse ? state.responseCount : nil,
             surface: surface,
             inputTokens: state.inputTokens,
-            cacheReadInputTokens: state.cacheReadTokens
+            cacheReadInputTokens: state.cacheReadTokens,
+            promptSizeBuckets: state.promptUsage.buckets(
+                inputTokens: state.inputTokens, cacheReadInputTokens: state.cacheReadTokens
+            )
         )
         delegationEvents.append(.primaryTurn(turnID: metric.id, root: rootKey))
         return metric

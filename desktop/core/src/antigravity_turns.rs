@@ -5,6 +5,7 @@ use crate::model::{
     response_qualifies, speed_is_plausible, ResponseMetric, ResponseTotals, ToolSurface,
     TurnMetric, ANTIGRAVITY_CLIENT, ANTIGRAVITY_METRIC_VERSION, ANTIGRAVITY_PARSER_VERSION,
 };
+use crate::prompt_size::PromptSizeTracker;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -154,6 +155,25 @@ fn execution_metric(
     metric.response_count = response_count;
     // Cache writes are not recorded.
     metric.set_prompt_cache(Some(input_tokens), Some(cache_read_tokens), None);
+    let mut prompt_requests = PromptSizeTracker::default();
+    // The database can contain steps whose usage protobuf was absent. Treat the entire turn as
+    // incomplete rather than histogramming only the calls whose usage happened to be present.
+    if steps.iter().any(|step| step.usage.is_none()) {
+        prompt_requests.invalidate();
+    }
+    for call in &calls {
+        let Some(usage) = call.usage else {
+            prompt_requests.invalidate();
+            continue;
+        };
+        prompt_requests.record(
+            Some(&call.idx.to_string()),
+            usage.input_tokens.checked_add(usage.cache_read_tokens),
+            Some(usage.cache_read_tokens),
+        );
+    }
+    metric.prompt_size_buckets =
+        prompt_requests.finish(metric.input_tokens, metric.cache_read_input_tokens);
     metric.surface = Some(surface);
     // Subagent work started by the execution is not part of its output and cannot be attributed
     // yet: the turn stays local and is never final.

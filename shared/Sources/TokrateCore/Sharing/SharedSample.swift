@@ -7,7 +7,7 @@ public struct SharedSample: Encodable, Sendable {
     public let client: String
     public let clientVersion: String
     /// The release this build reports, in every upload and in the `User-Agent` of every community request.
-    public static let appVersion = "0.1.27"
+    public static let appVersion = "0.1.30"
     public let appVersion = SharedSample.appVersion
     public let parserVersion: String
     public let metricVersion: String
@@ -37,6 +37,8 @@ public struct SharedSample: Encodable, Sendable {
     public let inputTokens: Int?
     public let cacheReadInputTokens: Int?
     public let cacheWriteInputTokens: Int?
+    /// Per-model-request prompt-size bins. Always sent, null when the source cannot account for every request.
+    public let promptSizeBuckets: [PromptSizeBucket]?
     /// Largest accepted delegated total (the same bound the server enforces).
     public static let maximumDelegatedOutputTokens = 100_000_000
     public static let providerRegions: Set<String> = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov", "unknown"]
@@ -96,6 +98,10 @@ public struct SharedSample: Encodable, Sendable {
         inputTokens = metric.inputTokens
         cacheReadInputTokens = metric.cacheReadInputTokens
         cacheWriteInputTokens = metric.cacheWriteInputTokens
+        promptSizeBuckets = metric.runtimeClient != "grok-build" && PromptSizeBuckets.validated(
+            metric.promptSizeBuckets, inputTokens: metric.inputTokens, cacheReadInputTokens: metric.cacheReadInputTokens,
+            minimumRequestCount: metric.hasPlausibleResponseTiming ? metric.responseCount ?? 0 : 0
+        ) ? metric.promptSizeBuckets : nil
         provider = metric.provider ?? "unknown"
         reasoningEffort = metric.reasoningEffort.flatMap { ReportedReasoningEffort.isAllowed($0) ? $0 : nil } ?? "unknown"
         outputTokens = metric.outputTokens
@@ -140,6 +146,7 @@ public struct SharedSample: Encodable, Sendable {
         case sampleId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider, reasoningEffort, sourceKind, outputTokens, reasoningOutputTokens, durationMs, ttftMs
         case responseOutputTokens, responseDurationMs, responseCount, providerRegion, delegatedOutputTokens, surface
         case inputTokens, cacheReadInputTokens, cacheWriteInputTokens
+        case promptSizeBuckets
     }
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -167,6 +174,7 @@ public struct SharedSample: Encodable, Sendable {
         try container.encode(inputTokens, forKey: .inputTokens)
         try container.encode(cacheReadInputTokens, forKey: .cacheReadInputTokens)
         try container.encode(cacheWriteInputTokens, forKey: .cacheWriteInputTokens)
+        try container.encode(promptSizeBuckets, forKey: .promptSizeBuckets)
     }
 
     private static func safeIdentifier(_ value: String?, maximum: Int) -> String? {

@@ -7,6 +7,7 @@ use crate::model::{
     KIMI_PARSER_VERSION, OPENCODE_CLIENT, OPENCODE_METRIC_VERSION, OPENCODE_PARSER_VERSION,
     REQUEST_OUTCOME_METRIC_VERSION, T3_CODE_CLIENT,
 };
+use crate::prompt_size::{validate_prompt_size_buckets, PromptSizeBucket};
 use crate::CoreError;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -18,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.28";
+pub const APP_VERSION: &str = "0.1.30";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 /// The request-count entries wait in a queue of their own with the same cap.
 pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
@@ -77,6 +78,7 @@ pub struct SharedSample {
     pub input_tokens: Option<i64>,
     pub cache_read_input_tokens: Option<i64>,
     pub cache_write_input_tokens: Option<i64>,
+    pub prompt_size_buckets: Option<Vec<PromptSizeBucket>>,
 }
 
 impl SharedSample {
@@ -266,6 +268,18 @@ impl SharedSample {
             input_tokens,
             cache_read_input_tokens,
             cache_write_input_tokens,
+            prompt_size_buckets: (client != GROK_CLIENT)
+                .then(|| metric.prompt_size_buckets.clone())
+                .flatten()
+                .filter(|buckets| {
+                    validate_prompt_size_buckets(buckets)
+                        == input_tokens.zip(cache_read_input_tokens)
+                        && buckets
+                            .iter()
+                            .map(|bucket| u64::from(bucket.request_count))
+                            .sum::<u64>()
+                            >= response_count.map(|count| count.max(0) as u64).unwrap_or(0)
+                }),
         })
     }
 }
@@ -401,6 +415,12 @@ pub fn example_request_json() -> String {
     metric.delegated_output_tokens = Some(0);
     metric.surface = Some(ToolSurface::Cli);
     metric.set_prompt_cache(Some(48_000), Some(36_000), None);
+    metric.prompt_size_buckets = Some(vec![PromptSizeBucket {
+        bucket: "8k-32k".to_owned(),
+        request_count: 3,
+        input_tokens: 48_000,
+        cache_read_input_tokens: 36_000,
+    }]);
     let sample = SharedSample::from_metric(
         &metric,
         Uuid::parse_str("00000000-0000-4000-8000-000000000000").expect("a valid example id"),

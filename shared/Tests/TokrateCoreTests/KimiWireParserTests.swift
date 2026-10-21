@@ -35,6 +35,9 @@ final class KimiWireParserTests: XCTestCase {
         XCTAssertEqual(turn.surface, .desktop)
         XCTAssertEqual(turn.inputTokens, 36_590)
         XCTAssertEqual(turn.cacheReadInputTokens, 30_976)
+        XCTAssertEqual(turn.promptSizeBuckets?.reduce(0) { $0 + $1.inputTokens }, 36_590)
+        XCTAssertEqual(turn.promptSizeBuckets?.reduce(0) { $0 + $1.cacheReadInputTokens }, 30_976)
+        XCTAssertEqual(turn.promptSizeBuckets?.reduce(0) { $0 + $1.requestCount }, 2)
         XCTAssertNil(turn.cacheWriteInputTokens)
         XCTAssertNil(turn.reasoningOutputTokens)
         XCTAssertNil(turn.clientVersion)
@@ -465,6 +468,9 @@ final class KimiWireParserTests: XCTestCase {
         let turn = try XCTUnwrap(KimiWireParser.parse(lines).metrics.first)
         XCTAssertEqual(turn.inputTokens, 10 + 100 + 5 + 20 + 200 + 7)
         XCTAssertEqual(turn.cacheReadInputTokens, 300)
+        XCTAssertEqual(turn.promptSizeBuckets?.map(\.bucket), ["under-8k"])
+        XCTAssertEqual(turn.promptSizeBuckets?.first?.requestCount, 2)
+        XCTAssertEqual(turn.promptSizeBuckets?.first?.inputTokens, 342)
         XCTAssertNil(turn.cacheWriteInputTokens)
     }
 

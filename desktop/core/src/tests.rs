@@ -1164,7 +1164,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.28");
+    assert_eq!(sample.app_version, "0.1.30");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1195,6 +1195,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
             "observedAt",
             "outputTokens",
             "parserVersion",
+            "promptSizeBuckets",
             "provider",
             "providerRegion",
             "reasoningEffort",
@@ -1909,7 +1910,8 @@ fn history_deduplicates_prunes_caps_and_persists_only_normalized_metrics() {
     let saved = fs::read_to_string(&path).unwrap();
     assert!(saved.contains("schemaVersion"));
     assert!(saved.contains("records"));
-    assert!(!saved.contains("prompt"));
+    assert!(!saved.contains("\"prompt\":"));
+    assert!(!saved.contains("\"prompt\" :"));
     assert_eq!(
         History::load(&path, now).unwrap().records(),
         history.records()
@@ -1958,7 +1960,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::minutes(12));
     let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.28");
+    assert_eq!(first[0].app_version, "0.1.30");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2326,7 +2328,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts.len(), 5);
     assert_eq!(counts[0]["client"], "claude-code");
     assert_eq!(counts[0]["overloaded"], 3);
-    assert_eq!(counts[0]["appVersion"], "0.1.28");
+    assert_eq!(counts[0]["appVersion"], "0.1.30");
     assert_eq!(counts[0]["metricVersion"], "request-outcome-v1");
     assert_eq!(counts[1]["serverError"], 1);
     // Throttled is always sent, 0 when there is none.
@@ -2339,12 +2341,12 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts[3]["clientVersion"], "0.159.2");
     assert_eq!(counts[3]["parserVersion"], "codex-rollout-v2");
     assert_eq!(counts[3]["provider"], "openai");
-    assert_eq!(counts[3]["appVersion"], "0.1.28");
+    assert_eq!(counts[3]["appVersion"], "0.1.30");
     assert_eq!(counts[4]["client"], "t3-code");
     assert_eq!(counts[4]["clientVersion"], "2.1.295");
     assert_eq!(counts[4]["parserVersion"], "claude-transcript-v4");
     assert_eq!(counts[4]["provider"], "anthropic");
-    assert_eq!(counts[4]["appVersion"], "0.1.28");
+    assert_eq!(counts[4]["appVersion"], "0.1.30");
     assert_eq!(actual["samples"][0]["client"], "claude-code");
     assert_eq!(actual["samples"][0]["provider"], "anthropic");
     assert_eq!(actual["samples"][0]["ttftMs"], Value::Null);
@@ -2357,7 +2359,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.28");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.30");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2417,7 +2419,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][4]["inputTokens"], 36_590);
     assert_eq!(actual["samples"][4]["cacheReadInputTokens"], 30_976);
     assert_eq!(actual["samples"][4]["cacheWriteInputTokens"], Value::Null);
-    assert_eq!(actual["samples"][4]["appVersion"], "0.1.28");
+    assert_eq!(actual["samples"][4]["appVersion"], "0.1.30");
     assert_eq!(actual["samples"][5]["client"], "t3-code");
     assert_eq!(actual["samples"][5]["clientVersion"], "0.159.2");
     assert_eq!(actual["samples"][5]["parserVersion"], "codex-rollout-v2");
@@ -2425,7 +2427,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][5]["provider"], "openai");
     assert_eq!(actual["samples"][5]["surface"], "other");
     assert_eq!(actual["samples"][5]["ttftMs"], 250.0);
-    assert_eq!(actual["samples"][5]["appVersion"], "0.1.28");
+    assert_eq!(actual["samples"][5]["appVersion"], "0.1.30");
     assert_eq!(actual["samples"][6]["client"], "t3-code");
     assert_eq!(
         actual["samples"][6]["parserVersion"],
@@ -2438,7 +2440,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][6]["provider"], "anthropic");
     assert_eq!(actual["samples"][6]["surface"], "sdk");
     assert_eq!(actual["samples"][6]["cacheWriteInputTokens"], 1_000);
-    assert_eq!(actual["samples"][6]["appVersion"], "0.1.28");
+    assert_eq!(actual["samples"][6]["appVersion"], "0.1.30");
     assert_eq!(actual["samples"][7]["client"], "t3-code");
     assert_eq!(
         actual["samples"][7]["metricVersion"],
@@ -2458,7 +2460,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][8]["provider"], "google");
     assert_eq!(actual["samples"][8]["surface"], "other");
     assert_eq!(actual["samples"][8]["ttftMs"], Value::Null);
-    assert_eq!(actual["samples"][8]["appVersion"], "0.1.28");
+    assert_eq!(actual["samples"][8]["appVersion"], "0.1.30");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2939,7 +2941,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.28");
+    assert_eq!(crate::APP_VERSION, "0.1.30");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [
@@ -6885,6 +6887,58 @@ fn shared_samples_always_serialize_the_surface() {
     assert_eq!(share(&turn)["surface"], "desktop");
 }
 
+#[test]
+fn prompt_size_histogram_is_allowlisted_reconciled_and_never_sent_for_grok() {
+    let mut turn = metric("prompt-size", time("2026-10-03T10:00:00Z"));
+    turn.set_prompt_cache(Some(8_000), Some(2_000), None);
+    turn.prompt_size_buckets = Some(vec![crate::PromptSizeBucket {
+        bucket: "8k-32k".to_owned(),
+        request_count: 1,
+        input_tokens: 8_000,
+        cache_read_input_tokens: 2_000,
+    }]);
+    let sample = crate::SharedSample::from_metric(&turn, Uuid::new_v4()).unwrap();
+    assert_eq!(
+        serde_json::to_value(sample).unwrap()["promptSizeBuckets"][0]["inputTokens"],
+        8_000
+    );
+
+    turn.prompt_size_buckets.as_mut().unwrap()[0].input_tokens = 7_999;
+    let sample = crate::SharedSample::from_metric(&turn, Uuid::new_v4()).unwrap();
+    assert_eq!(
+        serde_json::to_value(sample).unwrap()["promptSizeBuckets"],
+        Value::Null
+    );
+
+    turn.prompt_size_buckets.as_mut().unwrap()[0].input_tokens = 8_000;
+    turn.client = crate::GROK_CLIENT.to_owned();
+    turn.parser_version = crate::GROK_PARSER_VERSION.to_owned();
+    turn.metric_version = crate::GROK_METRIC_VERSION.to_owned();
+    turn.provider = Some("xai".to_owned());
+    let sample = crate::SharedSample::from_metric(&turn, Uuid::new_v4()).unwrap();
+    assert_eq!(
+        serde_json::to_value(sample).unwrap()["promptSizeBuckets"],
+        Value::Null
+    );
+}
+
+#[test]
+fn old_and_malformed_history_prompt_buckets_become_unavailable() {
+    let mut saved =
+        serde_json::to_value(metric("legacy-size", time("2026-10-03T10:00:00Z"))).unwrap();
+    saved.as_object_mut().unwrap().remove("promptSizeBuckets");
+    let restored: TurnMetric = serde_json::from_value(saved.clone()).unwrap();
+    assert_eq!(restored.prompt_size_buckets, None);
+    saved["promptSizeBuckets"] = json!([{
+        "bucket": "8k-32k",
+        "requestCount": 1,
+        "inputTokens": 7_999,
+        "cacheReadInputTokens": 0
+    }]);
+    let restored: TurnMetric = serde_json::from_value(saved).unwrap();
+    assert_eq!(restored.prompt_size_buckets, None);
+}
+
 // --- Prompt cache (0.1.18) -------------------------------------------------------------------
 
 /// Claude Code usage: `input_tokens` excludes the cached tokens.
@@ -6940,6 +6994,12 @@ fn claude_prompt_cache_sums_unique_messages_and_takes_repeated_records_once() {
     assert_eq!(result.output_tokens, 150);
     // input = sum(input + read + create) = (5 + 1,000 + 200) + (3 + 1,300 + 0)
     assert_eq!(prompt_cache(&result), (Some(2_508), Some(2_300), Some(200)));
+    let buckets = result.prompt_size_buckets.as_ref().unwrap();
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(buckets[0].bucket, "under-8k");
+    assert_eq!(buckets[0].request_count, 2);
+    assert_eq!(buckets[0].input_tokens, 2_508);
+    assert_eq!(buckets[0].cache_read_input_tokens, 2_300);
 }
 
 #[test]
@@ -6958,6 +7018,50 @@ fn claude_prompt_cache_takes_each_field_from_the_first_record_that_has_it() {
         ))
         .unwrap();
     assert_eq!(prompt_cache(&result), (Some(100), Some(90), Some(6)));
+}
+
+#[test]
+fn claude_prompt_size_counts_short_messages_but_rejects_conflicting_usage() {
+    let mut short_parser = claude_parser();
+    short_parser.consume_settled(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "short-turn",
+        json!("synthetic"),
+    ));
+    let short = short_parser
+        .consume_settled(&with_usage(
+            assistant("2026-10-03T10:00:10Z", "short-call", "end_turn", 50),
+            cache_usage(8_000, 1_000, 0),
+        ))
+        .unwrap();
+    assert_eq!(short.response_count, None);
+    assert_eq!(
+        short.prompt_size_buckets.as_ref().unwrap()[0].request_count,
+        1
+    );
+
+    let mut conflicting_parser = claude_parser();
+    conflicting_parser.consume_settled(&claude_user(
+        "2026-10-03T10:00:00Z",
+        "conflict-turn",
+        json!("synthetic"),
+    ));
+    conflicting_parser.consume_settled(&with_usage(
+        assistant("2026-10-03T10:00:04Z", "same-call", "", 10),
+        cache_usage(4, 90, 6),
+    ));
+    conflicting_parser.consume_settled(&with_usage(
+        assistant("2026-10-03T10:00:06Z", "same-call", "", 20),
+        cache_usage(4, 91, 6),
+    ));
+    let conflicting = conflicting_parser
+        .consume_settled(&with_usage(
+            assistant("2026-10-03T10:00:10Z", "same-call", "end_turn", 50),
+            cache_usage(4, 90, 6),
+        ))
+        .unwrap();
+    assert_eq!(conflicting.output_tokens, 50);
+    assert_eq!(conflicting.prompt_size_buckets, None);
 }
 
 #[test]
@@ -7116,6 +7220,68 @@ fn codex_prompt_cache_comes_from_the_last_turn_token_usage_and_never_reports_a_w
         json!({"output_tokens": 50, "input_tokens": 100, "cached_input_tokens": 0}),
     )]);
     assert_eq!(prompt_cache(&zero), (Some(100), Some(0), None));
+}
+
+#[test]
+fn codex_prompt_sizes_count_short_responses_and_require_unique_complete_coverage() {
+    let run = |records: &[Value]| {
+        let start = "2026-10-03T10:00:00.000Z";
+        let mut parser = crate::parser::CodexEventParser::new("file".into());
+        parser.consume(&codex_line(
+            "session_meta",
+            json!({"id":"session-1", "source":"cli", "model_provider":"openai"}),
+            start,
+        ));
+        parser.consume(&codex_line(
+            "event_msg",
+            json!({"type":"task_started", "turn_id":"turn-1"}),
+            start,
+        ));
+        for record in records {
+            parser.consume(&codex_line(
+                "token_usage_record",
+                record.clone(),
+                "2026-10-03T10:00:01.000Z",
+            ));
+        }
+        parser
+            .consume(&codex_line(
+                "event_msg",
+                json!({"type":"task_complete", "turn_id":"turn-1", "duration_ms":1000}),
+                "2026-10-03T10:00:01.000Z",
+            ))
+            .unwrap()
+    };
+    let record = |response_id: Option<&str>, input: i64| {
+        let mut value = json!({
+            "turn_id":"turn-1",
+            "usage":{"output_tokens":100, "input_tokens":input, "cached_input_tokens":4000},
+            "turn_token_usage":{"output_tokens":500, "input_tokens":input, "cached_input_tokens":4000}
+        });
+        if let Some(response_id) = response_id {
+            value["response_id"] = response_id.into();
+        }
+        value
+    };
+
+    let short = run(&[record(Some("request-1"), 8_000)]);
+    assert_eq!(short.response_count, None);
+    assert_eq!(
+        short.prompt_size_buckets.as_ref().unwrap()[0].request_count,
+        1
+    );
+    assert_eq!(
+        short.prompt_size_buckets.as_ref().unwrap()[0].input_tokens,
+        8_000
+    );
+
+    let missing_id = run(&[record(None, 8_000)]);
+    assert_eq!(missing_id.prompt_size_buckets, None);
+    let conflicting = run(&[
+        record(Some("request-1"), 8_000),
+        record(Some("request-1"), 9_000),
+    ]);
+    assert_eq!(conflicting.prompt_size_buckets, None);
 }
 
 #[test]

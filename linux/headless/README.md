@@ -64,7 +64,7 @@ Otherwise, setup uses the target account's normal defaults.
 The installer stops both service modes before setup or configuration changes.
 It runs setup as the target account in a private temporary directory, then
 copies only `settings.json`, `setup-complete`, and—after an affirmative sharing
-choice—`consent-v6.json` into `/etc/tokrate-headless/USER`. That directory is
+choice—`consent-v7.json` into `/etc/tokrate-headless/USER`. That directory is
 root-owned and readable by the service account; the service cannot change the
 authoritative consent marker. Runtime data is kept under
 `/var/lib/tokrate-headless/USER` with mode `0700`.
@@ -279,3 +279,7 @@ closure, and up to one extra minute of shared random delay. Completed turns
 normally arrive about 1–7 minutes later; sleep, offline collection and pending
 subagent work can take longer. Completion timestamps remain rounded to five
 minutes. No new telemetry fields or consent version are introduced.
+
+## Prompt-size sharing (0.1.30)
+
+Updated collectors summarize complete individual model-request input/cache usage into six numeric size ranges. No prompt text or request IDs are shared. Upgrading requires notice 7 acceptance before sharing resumes; local-only and saved OFF remain local-only. Old consent files are retained, but only the current v7 marker enables the sharing service. Grok Build has no per-request size breakdown. Earlier history is not uploaded or inferred from turn totals.

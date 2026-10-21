@@ -100,7 +100,7 @@ describe("Debian update settings", () => {
     const checkUpdate = vi.fn(async () => ({
       started: true,
       update: {
-        version: "0.1.28",
+        version: "0.1.30",
         body: "Debian release notes",
       },
     }));
@@ -134,7 +134,7 @@ describe("Debian update settings", () => {
       await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledWith(false));
     });
     await vi.waitFor(() =>
-      expect(host.textContent).toContain("Tokrate 0.1.28 is available."),
+      expect(host.textContent).toContain("Tokrate 0.1.30 is available."),
     );
 
     const downloadButton = [...host.querySelectorAll("button")].find((button) =>

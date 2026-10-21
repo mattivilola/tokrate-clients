@@ -152,11 +152,36 @@ struct OpenCodeTurnBuilder: Sendable {
 
         // Prompt cache: every step must report both counts, else the turn reports none of them. Only
         // Anthropic reports cache writes; other providers log 0, which is not a report.
-        let cacheSteps = assistants.compactMap { message -> (input: Int, read: Int, write: Int)? in
-            guard let input = message.inputTokens, let read = message.cacheReadTokens, let write = message.cacheWriteTokens else { return nil }
-            return (input, read, write)
+        var cacheInputTotal = 0
+        var cacheReadTotal = 0
+        var cacheWriteTotal = 0
+        var cacheTotalsValid = true
+        var promptUsage = PromptSizeUsageAccumulator()
+        for message in assistants {
+            guard let input = message.inputTokens, let read = message.cacheReadTokens, let write = message.cacheWriteTokens else {
+                cacheTotalsValid = false
+                promptUsage.invalidate()
+                continue
+            }
+            let (withRead, firstOverflow) = input.addingReportingOverflow(read)
+            let (requestInput, secondOverflow) = withRead.addingReportingOverflow(write)
+            let (nextInput, inputOverflow) = cacheInputTotal.addingReportingOverflow(requestInput)
+            let (nextRead, readOverflow) = cacheReadTotal.addingReportingOverflow(read)
+            let (nextWrite, writeOverflow) = cacheWriteTotal.addingReportingOverflow(write)
+            guard !(firstOverflow || secondOverflow || inputOverflow || readOverflow || writeOverflow) else {
+                cacheTotalsValid = false
+                promptUsage.invalidate()
+                continue
+            }
+            cacheInputTotal = nextInput
+            cacheReadTotal = nextRead
+            cacheWriteTotal = nextWrite
+            promptUsage.record(id: message.id, inputTokens: requestInput, cacheReadInputTokens: read)
         }
-        let hasCache = cacheSteps.count == assistants.count
+        let hasCache = cacheTotalsValid
+        let promptSizeBuckets = hasCache
+            ? promptUsage.buckets(inputTokens: cacheInputTotal, cacheReadInputTokens: cacheReadTotal)
+            : nil
         let digest = SHA256.hash(data: Data("opencode|\(user.sessionID)|\(user.id)".utf8))
         let metric = TurnMetric(
             id: digest.map { String(format: "%02x", $0) }.joined(),
@@ -179,9 +204,10 @@ struct OpenCodeTurnBuilder: Sendable {
             responseDurationSeconds: responses.isEmpty ? nil : responseSeconds,
             responseCount: responses.isEmpty ? nil : responses.count,
             delegatedOutputTokens: delegated.total,
-            inputTokens: hasCache ? cacheSteps.reduce(0) { $0 + $1.input + $1.read + $1.write } : nil,
-            cacheReadInputTokens: hasCache ? cacheSteps.reduce(0) { $0 + $1.read } : nil,
-            cacheWriteInputTokens: hasCache && provider == "anthropic" ? cacheSteps.reduce(0) { $0 + $1.write } : nil
+            inputTokens: hasCache ? cacheInputTotal : nil,
+            cacheReadInputTokens: hasCache ? cacheReadTotal : nil,
+            cacheWriteInputTokens: hasCache && provider == "anthropic" ? cacheWriteTotal : nil,
+            promptSizeBuckets: promptSizeBuckets
         )
         let checked = metric.responseOutputTokens != nil && !metric.hasPlausibleResponseTiming ? metric.withoutResponseTiming() : metric
         return OpenCodeTurnEvaluation(

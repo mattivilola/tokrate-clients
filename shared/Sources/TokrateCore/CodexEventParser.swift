@@ -29,6 +29,8 @@ public struct CodexEventParser: Sendable {
         var responseSeconds = 0.0
         var responseCount = 0
         var seenResponseIDs: Set<String> = []
+        /// All completed API request prompts, independent of response-speed eligibility.
+        var promptUsage = PromptSizeUsageAccumulator()
     }
 
     private var sourceIdentity: String
@@ -170,6 +172,16 @@ public struct CodexEventParser: Sendable {
         if eventType == "token_usage_record" {
             guard let turnID = Self.identifier(payload["turn_id"]) else { return nil }
             var state = turns[turnID, default: TurnState()]
+            if let responseID = Self.identifier(payload["response_id"]),
+               let usage = payload["usage"] as? [String: Any] {
+                state.promptUsage.record(
+                    id: responseID,
+                    inputTokens: nonnegativeInteger(usage["input_tokens"]),
+                    cacheReadInputTokens: nonnegativeInteger(usage["cached_input_tokens"])
+                )
+            } else {
+                state.promptUsage.invalidate()
+            }
             consumeResponseUsage(payload, completedAt: parseDate(event["timestamp"]), turnID: turnID, state: &state)
             if let usage = payload["turn_token_usage"] as? [String: Any],
                let output = nonnegativeInteger(usage["output_tokens"]) {
@@ -290,7 +302,10 @@ public struct CodexEventParser: Sendable {
             // Codex logs a cache-write field that is always 0: not reported, never 0.
             inputTokens: state.inputTokens,
             cacheReadInputTokens: state.cachedInputTokens,
-            cacheWriteInputTokens: nil
+            cacheWriteInputTokens: nil,
+            promptSizeBuckets: state.promptUsage.buckets(
+                inputTokens: state.inputTokens, cacheReadInputTokens: state.cachedInputTokens
+            )
         )
     }
 

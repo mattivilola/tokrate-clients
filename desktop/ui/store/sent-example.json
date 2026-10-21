@@ -1,7 +1,7 @@
 {
   "requestCounts": [
     {
-      "appVersion": "0.1.28",
+      "appVersion": "0.1.30",
       "client": "codex",
       "clientVersion": "1.2.3",
       "countId": "00000000-0000-4000-8000-000000000001",
@@ -18,7 +18,7 @@
   ],
   "samples": [
     {
-      "appVersion": "0.1.28",
+      "appVersion": "0.1.30",
       "cacheReadInputTokens": 36000,
       "cacheWriteInputTokens": null,
       "client": "codex",
@@ -31,6 +31,14 @@
       "observedAt": "2026-01-01T12:00:00Z",
       "outputTokens": 1234,
       "parserVersion": "codex-rollout-v2",
+      "promptSizeBuckets": [
+        {
+          "bucket": "8k-32k",
+          "cacheReadInputTokens": 36000,
+          "inputTokens": 48000,
+          "requestCount": 3
+        }
+      ],
       "provider": "openai",
       "providerRegion": null,
       "reasoningEffort": "medium",

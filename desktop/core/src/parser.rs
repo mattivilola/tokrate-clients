@@ -5,6 +5,7 @@ use crate::model::{
     ResponseMetric, ResponseTotals, ToolSurface, TurnMetric, CODEX_CLIENT, CODEX_PARSER_VERSION,
     T3_CODE_CLIENT,
 };
+use crate::prompt_size::PromptSizeTracker;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
@@ -87,6 +88,8 @@ struct TurnState {
     /// Qualifying model responses of this turn (one per token-usage record).
     responses: ResponseTotals,
     response_ids: HashSet<String>,
+    /// Independent of response-speed eligibility: includes every usage-bearing model call.
+    prompt_requests: PromptSizeTracker,
     /// A delegated work item was reported as started for this turn.
     work_started: bool,
 }
@@ -218,6 +221,13 @@ impl CodexEventParser {
 
         if event_type == "token_usage_record" {
             let turn_id = valid_turn_id(payload.get("turn_id")?)?;
+            let usage = payload.get("usage").and_then(Value::as_object);
+            let state = self.turn_state_mut(turn_id);
+            state.prompt_requests.record(
+                payload.get("response_id").and_then(Value::as_str),
+                usage.and_then(|usage| nonnegative_integer(usage.get("input_tokens"))),
+                usage.and_then(|usage| nonnegative_integer(usage.get("cached_input_tokens"))),
+            );
             self.consume_response_usage(turn_id, payload, parse_date(event.get("timestamp")));
             let state = self.turn_state_mut(turn_id);
             if let Some(usage) = payload.get("turn_token_usage").and_then(Value::as_object) {
@@ -347,9 +357,13 @@ impl CodexEventParser {
             input_tokens: None,
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
+            prompt_size_buckets: None,
         };
         // Codex logs a cache-write field that is always 0: not reported, never 0.
         metric.set_prompt_cache(state.input_tokens, state.cached_input_tokens, None);
+        metric.prompt_size_buckets = state
+            .prompt_requests
+            .finish(metric.input_tokens, metric.cache_read_input_tokens);
         if self.source_kind == "primary" {
             // The root session joins this turn with the delegated work started during it.
             let root = self

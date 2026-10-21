@@ -689,6 +689,10 @@ fn prompt_cache_needs_both_counts_and_writes_are_anthropic_only() {
         ),
         (Some(1_450), Some(400), Some(50))
     );
+    assert_eq!(
+        anthropic.prompt_size_buckets.as_ref().unwrap()[0].input_tokens,
+        1_450
+    );
     // Other providers log a write of 0 that is not a report.
     let other = turn_with(base.clone().model("m", "openai").usage(1_000, 400, 0));
     assert_eq!(

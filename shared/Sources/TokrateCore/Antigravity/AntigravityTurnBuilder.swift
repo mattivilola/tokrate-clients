@@ -103,6 +103,26 @@ struct AntigravityTurnBuilder: Sendable {
         let responses = calls.filter(\.qualifiesAsResponse)
         let responseTokens = responses.reduce(0) { $0 + $1.outputTokens }
         let responseSeconds = responses.reduce(0) { $0 + $1.durationSeconds }
+        var promptUsage = PromptSizeUsageAccumulator()
+        var promptInputTotal = 0
+        var promptReadTotal = 0
+        var promptTotalsValid = true
+        for call in calls {
+            let (requestInput, requestOverflow) = call.inputTokens.addingReportingOverflow(call.cacheReadTokens)
+            let (nextInput, inputOverflow) = promptInputTotal.addingReportingOverflow(requestInput)
+            let (nextRead, readOverflow) = promptReadTotal.addingReportingOverflow(call.cacheReadTokens)
+            guard !(requestOverflow || inputOverflow || readOverflow) else {
+                promptTotalsValid = false
+                promptUsage.invalidate()
+                continue
+            }
+            promptInputTotal = nextInput
+            promptReadTotal = nextRead
+            promptUsage.record(id: String(call.stepIndex), inputTokens: requestInput, cacheReadInputTokens: call.cacheReadTokens)
+        }
+        let reportedPromptInput = promptTotalsValid ? promptInputTotal : nil
+        let reportedPromptRead = promptTotalsValid ? promptReadTotal : nil
+        let promptSizeBuckets = promptUsage.buckets(inputTokens: reportedPromptInput, cacheReadInputTokens: reportedPromptRead)
         let digest = SHA256.hash(data: Data("antigravity|\(conversationID)|\(executor.executionID)".utf8))
         let metric = TurnMetric(
             id: digest.map { String(format: "%02x", $0) }.joined(),
@@ -130,9 +150,10 @@ struct AntigravityTurnBuilder: Sendable {
             surface: surface,
             // 9.2 counts the uncached input, 9.5 the cache reads; the total includes both. Cache
             // writes are not recorded. TurnMetric drops an inconsistent set.
-            inputTokens: calls.reduce(0) { $0 + $1.inputTokens + $1.cacheReadTokens },
-            cacheReadInputTokens: calls.reduce(0) { $0 + $1.cacheReadTokens },
-            cacheWriteInputTokens: nil
+            inputTokens: reportedPromptInput,
+            cacheReadInputTokens: reportedPromptRead,
+            cacheWriteInputTokens: nil,
+            promptSizeBuckets: promptSizeBuckets
         )
         let hasResponse = metric.responseOutputTokens != nil
         return hasResponse && !metric.hasPlausibleResponseTiming ? metric.withoutResponseTiming() : metric

@@ -29,12 +29,17 @@ export const REQUEST_COUNT_NOTICE =
 export const THROTTLED_NOTICE =
   "From 0.1.24 the request counts also include requests the provider rejected as too many while your plan still had quota left (throttled). Your plan usage itself is never sent.";
 
+/** From notice version 7: complete request-level input usage is sent as coarse size bands. */
+export const PROMPT_SIZE_NOTICE =
+  "From 0.1.30, when every model request in a turn has usable input counts, sharing includes a six-band summary of per-request input size (including cached input). It sends only band counts and token totals, not prompts. If any request usage is missing or inconsistent, that turn has no size summary; unavailable usage is not reported as zero.";
+
 /** What every shared turn contains, in the wording of the Mac notice. */
 export const SENT_FIELDS = [
   "Coding tool, and app, parser and metric versions",
   "Model, provider (for Claude on Amazon Bedrock, its inference-profile region) and effort",
   "Source kind (primary, subagent or unknown)",
   "Token counts and turn duration",
+  "Per-request input size bands and token totals, when complete",
   "Output tokens of subagent work a turn started",
   "Where the tool ran, as a category",
   "Response timing within the turn",
@@ -117,6 +122,7 @@ export function SharingChoice({
       <p className="detail-fine region-notice">{PROMPT_CACHE_NOTICE}</p>
       <p className="detail-fine region-notice">{REQUEST_COUNT_NOTICE}</p>
       <p className="detail-fine region-notice">{THROTTLED_NOTICE}</p>
+      <p className="detail-fine region-notice">{PROMPT_SIZE_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

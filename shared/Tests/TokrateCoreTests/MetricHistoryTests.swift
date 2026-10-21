@@ -150,7 +150,10 @@ final class MetricHistoryTests: XCTestCase {
             parserVersion: "claude-transcript-v4", metricVersion: "claude-observed-turn-v1",
             responseOutputTokens: 900, responseDurationSeconds: 18, responseCount: 2, providerRegion: "us",
             delegatedOutputTokens: 40, surface: .cli,
-            inputTokens: input, cacheReadInputTokens: read, cacheWriteInputTokens: write
+            inputTokens: input, cacheReadInputTokens: read, cacheWriteInputTokens: write,
+            promptSizeBuckets: input == 50_000 && read == 40_000
+                ? [PromptSizeBucket(bucket: "8k-32k", requestCount: 2, inputTokens: 50_000, cacheReadInputTokens: 40_000)]
+                : nil
         )
     }
 
@@ -160,12 +163,14 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertEqual(object["inputTokens"] as? Int, 50_000)
         XCTAssertEqual(object["cacheReadInputTokens"] as? Int, 40_000)
         XCTAssertEqual(object["cacheWriteInputTokens"] as? Int, 6_000)
+        XCTAssertEqual(full.promptSizeBuckets?.first?.bucket, "8k-32k")
         XCTAssertEqual(try JSONDecoder().decode(TurnMetric.self, from: JSONEncoder().encode(full)), full)
 
         for copy in [full.withoutResponseTiming(), full.withDelegatedOutputTokens(7)] {
             XCTAssertEqual(copy.inputTokens, 50_000)
             XCTAssertEqual(copy.cacheReadInputTokens, 40_000)
             XCTAssertEqual(copy.cacheWriteInputTokens, 6_000)
+            XCTAssertEqual(copy.promptSizeBuckets, full.promptSizeBuckets)
         }
 
         // Not reported (and Codex / Grok Build, which never report a write): encoded only when present.
@@ -208,6 +213,19 @@ final class MetricHistoryTests: XCTestCase {
         XCTAssertNil(decodedBad.inputTokens)
         XCTAssertNil(decodedBad.cacheReadInputTokens)
         XCTAssertNil(decodedBad.cacheWriteInputTokens)
+    }
+
+    func testPromptSizeHistoryFieldIsOptionalAndInvalidDataDoesNotDiscardTheTurn() throws {
+        let old = #"{"id":"x","completedAt":1,"outputTokens":100,"durationSeconds":10,"turnThroughputTPS":10,"inputTokens":100,"cacheReadInputTokens":20}"#
+        XCTAssertNil(try JSONDecoder().decode(TurnMetric.self, from: Data(old.utf8)).promptSizeBuckets)
+
+        let invalid = #"{"id":"x","completedAt":1,"outputTokens":100,"durationSeconds":10,"turnThroughputTPS":10,"inputTokens":100,"cacheReadInputTokens":20,"promptSizeBuckets":"not-an-array"}"#
+        let decodedInvalid = try JSONDecoder().decode(TurnMetric.self, from: Data(invalid.utf8))
+        XCTAssertEqual(decodedInvalid.inputTokens, 100)
+        XCTAssertNil(decodedInvalid.promptSizeBuckets)
+
+        let inconsistent = #"{"id":"x","completedAt":1,"outputTokens":100,"durationSeconds":10,"turnThroughputTPS":10,"inputTokens":100,"cacheReadInputTokens":20,"promptSizeBuckets":[{"bucket":"8k-32k","requestCount":1,"inputTokens":100,"cacheReadInputTokens":20}]}"#
+        XCTAssertNil(try JSONDecoder().decode(TurnMetric.self, from: Data(inconsistent.utf8)).promptSizeBuckets)
     }
 
     func testLoadingHistoryDropsImpossibleTurnsAndClearsImplausibleResponseTiming() {

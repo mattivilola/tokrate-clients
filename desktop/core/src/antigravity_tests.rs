@@ -681,6 +681,15 @@ fn prompt_cache_sums_uncached_and_cache_read_input_with_absent_counts_as_zero() 
     assert_eq!(turn.input_tokens, Some(1_000 + 200 + 3_000));
     assert_eq!(turn.cache_read_input_tokens, Some(3_000));
     assert_eq!(turn.cache_write_input_tokens, None);
+    assert_eq!(
+        turn.prompt_size_buckets
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket.request_count)
+            .sum::<u32>(),
+        3
+    );
     // The shared sample carries the same consistent set (cache write explicitly null).
     let sample = SharedSample::from_metric(turn, Uuid::new_v4()).unwrap();
     assert_eq!(

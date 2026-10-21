@@ -33,6 +33,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         var inputTokens: Int?
         var cacheReadInputTokens: Int?
         var cacheCreationInputTokens: Int?
+        /// Repeated records for one API message must agree on all available prompt counts.
+        var promptSizeCountsConflict = false
         /// Timestamp of the message's latest assistant record.
         var endedAt: Date?
     }
@@ -420,9 +422,15 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
         var usage = state.messages[messageID] ?? MessageUsage()
         if let prior = usage.outputTokens, let output, output < prior { state.hasIncompleteUsage = true }
         if let output, usage.outputTokens.map({ output >= $0 }) ?? true { usage.outputTokens = output }
-        if usage.inputTokens == nil { usage.inputTokens = nonnegativeInteger(usageFields?["input_tokens"]) }
-        if usage.cacheReadInputTokens == nil { usage.cacheReadInputTokens = nonnegativeInteger(usageFields?["cache_read_input_tokens"]) }
-        if usage.cacheCreationInputTokens == nil { usage.cacheCreationInputTokens = nonnegativeInteger(usageFields?["cache_creation_input_tokens"]) }
+        let inputUpdate = Self.updatedPromptCount(usageFields, key: "input_tokens", current: usage.inputTokens, conflicted: usage.promptSizeCountsConflict, parse: nonnegativeInteger)
+        usage.inputTokens = inputUpdate.value
+        usage.promptSizeCountsConflict = inputUpdate.conflicted
+        let readUpdate = Self.updatedPromptCount(usageFields, key: "cache_read_input_tokens", current: usage.cacheReadInputTokens, conflicted: usage.promptSizeCountsConflict, parse: nonnegativeInteger)
+        usage.cacheReadInputTokens = readUpdate.value
+        usage.promptSizeCountsConflict = readUpdate.conflicted
+        let creationUpdate = Self.updatedPromptCount(usageFields, key: "cache_creation_input_tokens", current: usage.cacheCreationInputTokens, conflicted: usage.promptSizeCountsConflict, parse: nonnegativeInteger)
+        usage.cacheCreationInputTokens = creationUpdate.value
+        usage.promptSizeCountsConflict = creationUpdate.conflicted
         if let timestamp { usage.endedAt = max(usage.endedAt ?? timestamp, timestamp) } else { usage.endedAt = nil }
         state.messages[messageID] = usage
         if isTerminal { state.terminalMessageID = messageID }
@@ -599,6 +607,9 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             ? "unknown" : state.providers.first ?? "unknown"
         let hasResponse = state.responseCount > 0
         let promptCache = Self.promptCache(of: state.messages.values)
+        let promptSizeBuckets = Self.promptSizeBuckets(
+            of: state.messages, inputTokens: promptCache?.input, cacheReadInputTokens: promptCache?.read
+        )
         return TurnMetric(
             id: identityDigest(for: state),
             completedAt: completedAt,
@@ -622,7 +633,8 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             surface: state.surface,
             inputTokens: promptCache?.input,
             cacheReadInputTokens: promptCache?.read,
-            cacheWriteInputTokens: promptCache?.write
+            cacheWriteInputTokens: promptCache?.write,
+            promptSizeBuckets: promptSizeBuckets
         )
     }
 
@@ -645,6 +657,40 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
             write = newWrite
         }
         return (input, read, write)
+    }
+
+    private static func promptSizeBuckets(
+        of messages: [String: MessageUsage], inputTokens: Int?, cacheReadInputTokens: Int?
+    ) -> [PromptSizeBucket]? {
+        var requests: [PromptSizeRequestUsage] = []
+        requests.reserveCapacity(messages.count)
+        for (id, message) in messages {
+            guard !message.promptSizeCountsConflict,
+                  let uncached = message.inputTokens,
+                  let cacheRead = message.cacheReadInputTokens,
+                  let cacheCreated = message.cacheCreationInputTokens
+            else { return nil }
+            let (input, firstOverflow) = uncached.addingReportingOverflow(cacheRead)
+            let (total, secondOverflow) = input.addingReportingOverflow(cacheCreated)
+            guard !(firstOverflow || secondOverflow) else { return nil }
+            requests.append(PromptSizeRequestUsage(id: id, inputTokens: total, cacheReadInputTokens: cacheRead))
+        }
+        return PromptSizeBuckets.aggregate(
+            requests, inputTokens: inputTokens, cacheReadInputTokens: cacheReadInputTokens
+        )
+    }
+
+    private static func updatedPromptCount(
+        _ fields: [String: Any]?, key: String, current: Int?, conflicted: Bool,
+        parse: (Any?) -> Int?
+    ) -> (value: Int?, conflicted: Bool) {
+        guard let fields, fields.keys.contains(key) else { return (current, conflicted) }
+        guard let count = parse(fields[key]) else { return (current, true) }
+        if let current {
+            return (current, conflicted || current != count)
+        } else {
+            return (count, conflicted)
+        }
     }
 
     private mutating func noteActivity(at timestamp: Date) {

@@ -90,7 +90,7 @@ final class HistoryExportTests: XCTestCase {
             "sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider",
             "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs",
             "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface",
-            "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"
+            "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens", "promptSizeBuckets"
         ])
         XCTAssertFalse(String(decoding: line, as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
         XCTAssertFalse(String(decoding: line, as: UTF8.self).contains("\n"))

@@ -290,11 +290,11 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         let metric = try XCTUnwrap(terminal(&parser, assistant(at: 10, id: "s1", output: 200, stop: "end_turn", sidechain: true)))
         let sample = try XCTUnwrap(SharedSample(metric))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"])
+        XCTAssertEqual(Set(json.keys), ["sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs", "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface", "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens", "promptSizeBuckets"])
         XCTAssertEqual(json["sourceKind"] as? String, "subagent")
         XCTAssertEqual(json["metricVersion"] as? String, "claude-observed-subagent-turn-v1")
         XCTAssertEqual(json["parserVersion"] as? String, "claude-transcript-v4")
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.27")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.30")
         XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertTrue(json["ttftMs"] is NSNull)
         // The only response (200 tokens in 10 s from the task prompt) qualifies.
@@ -773,7 +773,7 @@ final class ClaudeTranscriptParserTests: XCTestCase {
             XCTAssertNil(sample(client: "grok-build", provider: provider))
         }
         XCTAssertNil(sample(client: "claude-code", provider: "azure"))
-        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.27")
+        XCTAssertEqual(SharedSample(try XCTUnwrap(metric(records: [(anthropicMessage, anthropicRequest, "m")])).withDelegatedOutputTokens(0))?.appVersion, "0.1.30")
     }
 
     // MARK: Response speed (response-v1)
@@ -1361,6 +1361,11 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(metric.inputTokens, 2_508)
         XCTAssertEqual(metric.cacheReadInputTokens, 2_300)
         XCTAssertEqual(metric.cacheWriteInputTokens, 200)
+        XCTAssertNil(metric.responseCount, "short model requests still contribute to prompt-size bins")
+        XCTAssertEqual(metric.promptSizeBuckets?.map(\.bucket), ["under-8k"])
+        XCTAssertEqual(metric.promptSizeBuckets?.first?.requestCount, 2, "repeated records of m1 are one request")
+        XCTAssertEqual(metric.promptSizeBuckets?.first?.inputTokens, 2_508)
+        XCTAssertEqual(metric.promptSizeBuckets?.first?.cacheReadInputTokens, 2_300)
     }
 
     func testPromptCacheTakesAFieldFromTheFirstRecordThatHasIt() throws {
@@ -1373,6 +1378,18 @@ final class ClaudeTranscriptParserTests: XCTestCase {
         XCTAssertEqual(metric.inputTokens, 100)
         XCTAssertEqual(metric.cacheReadInputTokens, 90)
         XCTAssertEqual(metric.cacheWriteInputTokens, 6)
+    }
+
+    func testPromptSizeHistogramDropsWhenRepeatedMessageUsageConflicts() throws {
+        var parser = ClaudeTranscriptParser(sourceIdentity: "synthetic")
+        _ = parser.consume(line: try user(at: 0, id: "prompt"))
+        _ = parser.consume(line: try assistant(at: 2, id: "m1", output: 10, stop: nil, cache: cacheUsage(input: 3, read: 2, create: 1)))
+        let metric = try XCTUnwrap(terminal(&parser, assistant(
+            at: 10, id: "m1", output: 100, stop: "end_turn", cache: cacheUsage(input: 4, read: 2, create: 1)
+        )))
+        XCTAssertEqual(metric.outputTokens, 100)
+        XCTAssertEqual(metric.inputTokens, 6, "the existing prompt-cache accounting remains unchanged")
+        XCTAssertNil(metric.promptSizeBuckets, "one API message with conflicting prompt counts cannot be binned")
     }
 
     func testPromptCacheIsNilWhenAnyCountedMessageLacksAField() throws {

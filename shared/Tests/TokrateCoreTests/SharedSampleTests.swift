@@ -8,7 +8,8 @@ final class SharedSampleTests: XCTestCase {
     private func claude(
         provider: String? = "anthropic", region: String? = nil, outputTokens: Int = 1_000, durationSeconds: Double = 100,
         tokens: Int? = nil, seconds: Double? = nil, count: Int? = nil, sourceKind: String = "primary", delegated: Int? = 0,
-        surface: ToolSurface? = nil, input: Int? = nil, cacheRead: Int? = nil, cacheWrite: Int? = nil
+        surface: ToolSurface? = nil, input: Int? = nil, cacheRead: Int? = nil, cacheWrite: Int? = nil,
+        promptSizeBuckets: [PromptSizeBucket]? = nil
     ) -> TurnMetric {
         TurnMetric(
             id: "LOCAL_PRIVATE_DIGEST", completedAt: now, model: "claude-sonnet-4-5", outputTokens: outputTokens,
@@ -17,7 +18,8 @@ final class SharedSampleTests: XCTestCase {
             metricVersion: "claude-observed-turn-v1", sourceKind: sourceKind, provider: provider,
             responseOutputTokens: tokens, responseDurationSeconds: seconds, responseCount: count, providerRegion: region,
             delegatedOutputTokens: delegated, surface: surface,
-            inputTokens: input, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite
+            inputTokens: input, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite,
+            promptSizeBuckets: promptSizeBuckets
         )
     }
 
@@ -32,12 +34,12 @@ final class SharedSampleTests: XCTestCase {
             "sampleId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider",
             "reasoningEffort", "sourceKind", "outputTokens", "reasoningOutputTokens", "durationMs", "ttftMs",
             "responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "delegatedOutputTokens", "surface",
-            "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"
+            "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens", "promptSizeBuckets"
         ])
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.27")
-        XCTAssertEqual(sample.appVersion, "0.1.27")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.30")
+        XCTAssertEqual(sample.appVersion, "0.1.30")
         for key in ["responseOutputTokens", "responseDurationMs", "responseCount", "providerRegion", "ttftMs", "reasoningOutputTokens", "surface",
-                    "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"] {
+                    "inputTokens", "cacheReadInputTokens", "cacheWriteInputTokens", "promptSizeBuckets"] {
             XCTAssertTrue(object[key] is NSNull, "\(key) is encoded as null when absent")
         }
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(sample), as: UTF8.self).contains("LOCAL_PRIVATE_DIGEST"))
@@ -79,6 +81,46 @@ final class SharedSampleTests: XCTestCase {
         }
         // Subagent records carry their own turn's cache usage like any other turn.
         XCTAssertEqual(try XCTUnwrap(SharedSample(claude(sourceKind: "subagent", delegated: nil, input: 10, cacheRead: 4, cacheWrite: 1))).cacheReadInputTokens, 4)
+    }
+
+    func testPromptSizeHistogramUsesTheSharedNullableAllowlistField() throws {
+        let histogram = [PromptSizeBucket(bucket: "8k-32k", requestCount: 2, inputTokens: 48_000, cacheReadInputTokens: 36_000)]
+        let sample = try XCTUnwrap(SharedSample(claude(input: 48_000, cacheRead: 36_000, promptSizeBuckets: histogram)))
+        let object = try json(sample)
+        let bins = try XCTUnwrap(object["promptSizeBuckets"] as? [[String: Any]])
+        XCTAssertEqual(bins.count, 1)
+        XCTAssertEqual(bins[0]["bucket"] as? String, "8k-32k")
+        XCTAssertEqual(bins[0]["requestCount"] as? Int, 2)
+        XCTAssertEqual(bins[0]["inputTokens"] as? Int, 48_000)
+        XCTAssertEqual(bins[0]["cacheReadInputTokens"] as? Int, 36_000)
+
+        let inconsistent = claude(input: 48_000, cacheRead: 36_000, promptSizeBuckets: [
+            PromptSizeBucket(bucket: "8k-32k", requestCount: 2, inputTokens: 48_000, cacheReadInputTokens: 35_999)
+        ])
+        XCTAssertNil(inconsistent.promptSizeBuckets)
+        XCTAssertTrue(try json(try XCTUnwrap(SharedSample(inconsistent)))["promptSizeBuckets"] is NSNull)
+    }
+
+    func testSharedHistogramHasEnoughRequestsForReportedResponseCountAndAlwaysNullsForGrok() throws {
+        let oneRequest = [PromptSizeBucket(bucket: "8k-32k", requestCount: 1, inputTokens: 20_000, cacheReadInputTokens: 0)]
+        let claudeWithTwoResponses = claude(
+            tokens: 900, seconds: 18, count: 2, input: 20_000, cacheRead: 0, promptSizeBuckets: oneRequest
+        )
+        XCTAssertNotNil(claudeWithTwoResponses.promptSizeBuckets, "valid local history retains internally reconciled bins")
+        let claudeSample = try XCTUnwrap(SharedSample(claudeWithTwoResponses))
+        XCTAssertEqual(claudeSample.responseCount, 2)
+        XCTAssertNil(claudeSample.promptSizeBuckets, "uploaded bins cannot claim fewer requests than speed-qualified responses")
+
+        let grok = TurnMetric(
+            id: "grok-local", completedAt: now, model: "grok-test", outputTokens: 1_000,
+            durationSeconds: 100, codexTTFTSeconds: nil, turnThroughputTPS: 10,
+            client: "grok-build", clientVersion: "unknown", parserVersion: "grok-session-v2",
+            metricVersion: "grok-observed-work-turn-v1", sourceKind: "primary", provider: "xai",
+            delegatedOutputTokens: 0, inputTokens: 20_000, cacheReadInputTokens: 0,
+            promptSizeBuckets: oneRequest
+        )
+        XCTAssertNil(grok.promptSizeBuckets)
+        XCTAssertTrue(try json(try XCTUnwrap(SharedSample(grok)))["promptSizeBuckets"] is NSNull)
     }
 
     func testDelegatedOutputTokensAreSharedForFinalPrimaryTurnsAndNullForSubagents() throws {

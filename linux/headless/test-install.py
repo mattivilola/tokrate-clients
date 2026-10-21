@@ -57,7 +57,7 @@ def main() -> None:
     require('"$caller_user" == "$TARGET_USER"' in installer, "source environment must only pass for the same caller account")
     require("assert_root_owned \"$path\"" in installer and "refusing existing path not owned by root" in installer, "installer must refuse pre-existing non-root-owned system paths")
     require('"$(dirname -- "$binary_target")"' in installer, "installer must create the binary destination in a staged integration root")
-    require('rm -f -- "$config_dir/consent-v6.json"' in installer, "local-only switch must remove only current consent marker")
+    require('rm -f -- "$config_dir/consent-v7.json"' in installer, "local-only switch must remove only current consent marker")
     require('sharing-enabled' in installer and 'MODE=share' in installer and 'MODE=local' in installer, "interactive setup choice must select exactly one service mode")
     require('systemctl enable --now "$share_unit"' in installer, "selected share unit must be enabled and started")
     require('systemctl enable --now "$local_unit"' in installer, "selected local unit must be enabled and started")
@@ -85,14 +85,14 @@ def main() -> None:
 
     local = LOCAL_UNIT.read_text()
     local_service = section(local, "Service")
-    require("ConditionPathExists=!/etc/tokrate-headless/%i/consent-v6.json" in local, "local mode must require absent consent")
+    require("ConditionPathExists=!/etc/tokrate-headless/%i/consent-v7.json" in local, "local mode must require absent consent")
     require(" run\n" in local_service and "run --share" not in local_service, "local mode must not pass --share")
     require("LoadCredentialEncrypted" not in local, "local mode must not load signing credentials")
     require("RestrictAddressFamilies=AF_UNIX\n" in local_service, "local service must have no IP network access")
 
     share = SHARE_UNIT.read_text()
     share_service = section(share, "Service")
-    require("ConditionPathExists=/etc/tokrate-headless/%i/consent-v6.json" in share, "share mode must require current consent")
+    require("ConditionPathExists=/etc/tokrate-headless/%i/consent-v7.json" in share, "share mode must require current consent")
     require("run --share" in share_service, "share mode must pass --share")
     require("LoadCredentialEncrypted=signing-key:/etc/credstore.encrypted/tokrate-headless-%i.key" in share_service, "share mode must load the encrypted system credential")
     require("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in share_service, "share mode must allow network access")
@@ -102,7 +102,7 @@ def main() -> None:
     require("daemon-reload" in postinst, "package installation must reload systemd unit definitions")
     require("systemctl enable" not in postinst and "systemctl start" not in postinst, "package postinst must not enable or start services")
     require("provision-update-user" in postinst, "Debian postinst must provision the static checker account")
-    require("provision-key" not in packager and "consent-v6.json" not in packager, "package build must not create consent or credentials")
+    require("provision-key" not in packager and "consent-v7.json" not in packager, "package build must not create consent or credentials")
     require('"$script_dir/tokrate-headless-update-check.service"' in packager and '"$script_dir/tokrate-headless-update-check.timer"' in packager, "Debian package must contain both updater units")
     require('"$script_dir/tokrate-update.sysusers"' in packager and '"$script_dir/provision-update-user.sh"' in packager, "Debian package must contain the shared sysusers definition and validator")
     require("Depends: libc6 (>= 2.36), libgcc-s1, systemd (>= 252)" in packager, "Debian package must declare its runtime ABI and systemd requirements")
@@ -197,7 +197,7 @@ def run_dynamic_install_test() -> None:
             config = root / "etc/tokrate-headless" / username
             encrypted_key = root / "etc/credstore.encrypted" / f"tokrate-headless-{username}.key"
             identity_marker = config / "identity-provisioned"
-            consent_marker = config / "consent-v6.json"
+            consent_marker = config / "consent-v7.json"
 
             def install(*mode: str, stdin: int | None = subprocess.DEVNULL) -> subprocess.CompletedProcess[str]:
                 for item in stopped.iterdir():
@@ -249,9 +249,13 @@ def run_dynamic_install_test() -> None:
             calls = log.read_text().splitlines()
             require(any(line.startswith("disable --now tokrate-headless-update-check.timer") for line in calls), "saved opt-out must keep the timer disabled")
 
+            old_consent_marker = config / "consent-v6.json"
+            old_consent_marker.write_text('{"notice_version":"2026-10-14-v6"}\n')
+            old_consent_before = old_consent_marker.read_bytes()
             result = install("--local-only")
             require(result.returncode == 0, f"local-only mode switch failed: {result.stderr}")
             require(not consent_marker.exists(), "local-only mode must remove the authoritative consent marker")
+            require(old_consent_marker.read_bytes() == old_consent_before, "notice migration must preserve old consent files")
             require(identity_marker.is_file() and encrypted_key.read_bytes() == encrypted_before, "turning sharing off must preserve the provisioned identity")
             calls = log.read_text().splitlines()
             require(any(line.startswith(f"enable --now tokrate-headless-local@{username}.service") for line in calls), "local-only install must enable the selected local service")

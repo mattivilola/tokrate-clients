@@ -10,9 +10,9 @@ use std::{
 use tokrate_core::{read_private_file, write_private_file, SourceMonitor, MAX_SMALL_FILE_BYTES};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-pub const NOTICE_VERSION: &str = "2026-10-14-v6";
-pub const CONSENT_FILE: &str = "consent-v6.json";
-pub const NOTICE: &str = "Tokrate community sharing (notice 2026-10-14-v6)\n\
+pub const NOTICE_VERSION: &str = "2026-10-21-v7";
+pub const CONSENT_FILE: &str = "consent-v7.json";
+pub const NOTICE: &str = "Tokrate community sharing (notice 2026-10-21-v7)\n\
 Reads supported coding-tool logs locally. Sends only derived measurements: coding tool and\n\
 versions, model/provider/effort, primary/subagent category, token counts (including delegated\n\
 and prompt-cache counts), turn/response/first-token timing where available, tool surface\n\
@@ -26,6 +26,7 @@ country nor IP in measurements. Public regional data requires at least three con
 other early aggregates may have one. Hosting/network providers still process connection data.\n\
 Only new observations after sharing starts are eligible; no historical backfill. Uploads are\n\
 grouped after five-minute buckets close, with a one-minute wait plus up to one minute of shared random jitter (normally about 1–7 minutes after completion; offline or delayed collection can take longer). Pending reports stay in bounded memory.\n\
+When complete request usage is available, a turn also includes six coarse per-request input-size bands and their token totals (including cached input); prompts are never sent. Missing or conflicting usage means no size summary for that turn, not a measured zero.\n\
 Local normalized history lasts seven days (up to 50,000 turns); server samples expire after\n\
 30 days via asynchronous TTL. Stopping sharing clears pending reports, not received reports\n\
 or backups. Privacy: https://tokrate.dev/privacy\n\

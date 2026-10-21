@@ -1,5 +1,6 @@
 use crate::model::TurnMetric;
 use crate::private_file::{read_private_file, write_private_file};
+use crate::prompt_size::validate_prompt_size_buckets;
 use crate::sources::SourceCheckpoints;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,12 @@ impl History {
                     record.cache_read_input_tokens,
                     record.cache_write_input_tokens,
                 );
+                if validate_prompt_size_buckets(
+                    record.prompt_size_buckets.as_deref().unwrap_or_default(),
+                ) != record.input_tokens.zip(record.cache_read_input_tokens)
+                {
+                    record.prompt_size_buckets = None;
+                }
                 by_id.insert(record.id.clone(), record);
             }
         }

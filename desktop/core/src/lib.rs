@@ -18,6 +18,7 @@ mod opencode_db;
 mod opencode_turns;
 mod parser;
 mod private_file;
+mod prompt_size;
 mod protobuf;
 mod provider_errors;
 mod reader;
@@ -73,6 +74,10 @@ pub use model::{
 pub use monitor::{Monitor, SourceChange, SourceFileCheckpoint};
 pub use opencode::OpenCodeMonitor;
 pub use private_file::{read_private_file, write_private_file, MAX_SMALL_FILE_BYTES};
+pub use prompt_size::{
+    validate_prompt_size_buckets, PromptSizeBucket, PromptSizeTracker, MAX_PROMPT_SIZE_BIN_TOKENS,
+    MAX_PROMPT_SIZE_REQUESTS, PROMPT_SIZE_BUCKETS,
+};
 pub use provider_errors::{
     LocalProviderErrors, ProviderErrorGroup, ProviderErrorKind, LOCAL_ERROR_WINDOW_HOURS,
     MAX_LOCAL_ERROR_GROUPS,

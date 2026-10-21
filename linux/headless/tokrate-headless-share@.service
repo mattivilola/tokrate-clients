@@ -4,7 +4,7 @@ Documentation=https://github.com/mattivilola/tokrate-clients/tree/main/linux/hea
 After=network-online.target local-fs.target
 Wants=network-online.target
 Conflicts=tokrate-headless-local@%i.service
-ConditionPathExists=/etc/tokrate-headless/%i/consent-v6.json
+ConditionPathExists=/etc/tokrate-headless/%i/consent-v7.json
 
 [Service]
 Type=simple
