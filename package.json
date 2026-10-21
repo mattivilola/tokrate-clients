@@ -1,0 +1,20 @@
+{
+  "name": "tokrate",
+  "version": "0.1.0",
+  "description": "Connect your coding tools to Tokrate with native desktop and Debian headless installers",
+  "type": "module",
+  "bin": { "tokrate": "cli/bin/tokrate.mjs" },
+  "engines": { "node": ">=22" },
+  "files": ["cli/bin/", "cli/src/", "cli/README.md", "linux/headless/bootstrap.sh"],
+  "scripts": {
+    "test": "node --test cli/test/*.test.mjs",
+    "test:package": "node cli/test/package-smoke.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/mattivilola/tokrate-clients.git" },
+  "homepage": "https://tokrate.dev",
+  "bugs": { "url": "https://github.com/mattivilola/tokrate-clients/issues" },
+  "keywords": ["tokrate", "cli", "coding-agents", "codex", "claude-code", "headless"],
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" }
+}

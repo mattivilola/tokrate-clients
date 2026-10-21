@@ -1,5 +1,17 @@
 # Tokrate clients
 
+## npm CLI
+
+The repository now includes a dependency-free `tokrate` npm CLI, ready for its
+first publication. After it is published, `npx tokrate@latest connect` guides
+native desktop setup or invokes the existing verified Debian headless
+installer. `status` and `doctor` provide local diagnostics. Installing the npm
+package alone does not start monitoring or enable sharing; the existing native
+consent flow and saved OFF preference still apply. Node.js 22+ is required.
+See the [CLI usage, platform limits and publishing instructions](cli/README.md).
+
+## Native clients
+
 For Debian servers without a desktop, see the [headless Linux client](linux/headless/README.md): shared Rust monitoring core, first-run sharing choice, JSON CLI status and systemd services with encrypted signing credentials. This is separate from the Linux desktop alpha and ships native amd64/arm64 release packages. From 0.1.28 it has independent daily update checks, `check-update`, and an explicit `update` command (also available with **U** in the terminal monitor).
 
 Tokrate has a native macOS menu-bar companion and a shared Windows/Linux tray client. The 0.1.22 clients add optional request-outcome counts for Claude Code, Codex, OpenCode, and Kimi Code: successful requests and clearly classified provider overloads or server errors, grouped by model and five-minute period. Error text is inspected in memory and discarded; failures that may come from the user's own limits, request, or connection are excluded. From 0.1.23, when sharing is on, relevant aggregate provider-error alerts from other contributors appear beside the user's own recent provider errors. Alerts require three contributors, or one during early-data mode, and do not establish provider health. Sharing still requires an affirmative choice; “Only for local use” keeps it off, and saved OFF remains OFF. Automatic software update checks have a separate switch and work with community sharing OFF. From 0.1.28 this also includes Linux desktop `.deb` and headless clients; installing an update remains a separate action. Windows/Linux remain alpha while hands-on desktop acceptance is pending; see [GitHub Releases](https://github.com/mattivilola/tokrate-clients/releases). Prompts, responses, code, and raw error messages are never retained in measurement history.
