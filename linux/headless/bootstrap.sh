@@ -5,8 +5,8 @@ readonly TOKRATE_VERSION=0.1.31
 readonly RELEASE_TAG="v${TOKRATE_VERSION}-headless-alpha.1"
 readonly RELEASE_BASE="https://github.com/mattivilola/tokrate-clients/releases/download/${RELEASE_TAG}"
 # SHA-256 pins for the native Debian release archives.
-readonly SHA256_AMD64='bb0fad10a12ae390d8a9c2399f8f421a1400fe7a0e7ae3e4f530ca207bda2da3'
-readonly SHA256_ARM64='34ecb7627252aa1e251b171a5a5b136385ad4b65467e9dc9c49307f1b8404b73'
+readonly SHA256_AMD64='79e626e70b9c4286ed425d74131832db5a4dff8fd665dfc32b8eb27fea422d20'
+readonly SHA256_ARM64='41c5f75527a9dfbc00ca22c43b863e0162d29647731be97d4bc7ab53e8022394'
 
 usage() {
   cat <<'EOF'
