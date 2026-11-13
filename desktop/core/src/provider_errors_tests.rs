@@ -49,7 +49,7 @@ fn shape(groups: &[ProviderErrorGroup]) -> Vec<(&str, &str, ProviderErrorKind, u
 }
 
 use ProviderErrorKind::{Overloaded as Over, ServerError as Server, Throttled as Throttle};
-use RequestOutcomeKind::{Overloaded, ServerError, Succeeded, Throttled};
+use RequestOutcomeKind::{Blocked, Overloaded, ServerError, Succeeded, Throttled};
 
 #[test]
 fn counts_and_latest_time_per_client_model_and_kind() {
@@ -111,6 +111,31 @@ fn throttled_failures_are_their_own_group_and_keep_the_latest_plan_percentage() 
     let json = serde_json::to_value(&errors.summary(now())).unwrap();
     assert_eq!(json[0]["planUsedPercent"], 33);
     assert!(json[1].get("planUsedPercent").is_none());
+}
+
+#[test]
+fn blocked_failures_are_their_own_group_without_a_plan_percentage() {
+    let mut errors = LocalProviderErrors::new();
+    errors.ingest(
+        &[
+            outcome("a", "claude-code", "claude", Blocked, minutes_ago(10)),
+            outcome("b", "claude-code", "claude", Blocked, minutes_ago(30)),
+            outcome("c", "claude-code", "claude", Overloaded, minutes_ago(40)),
+        ],
+        now(),
+    );
+    let summary = errors.summary(now());
+    assert_eq!(
+        shape(&summary),
+        vec![
+            ("claude-code", "claude", ProviderErrorKind::Blocked, 2),
+            ("claude-code", "claude", Over, 1)
+        ]
+    );
+    assert_eq!(summary[0].latest_at, minutes_ago(10));
+    let json = serde_json::to_value(&summary).unwrap();
+    assert_eq!(json[0]["kind"], "blocked");
+    assert!(json[0].get("planUsedPercent").is_none());
 }
 
 #[test]

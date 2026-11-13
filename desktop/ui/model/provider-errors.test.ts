@@ -99,6 +99,15 @@ describe("providerErrorLine", () => {
     }
   });
 
+  it("words a block with the plural of requests and the VPN hint", () => {
+    expect(providerErrorLine([group({ kind: "blocked", count: 2, agoMs: 10 * MIN })], NOW)).toBe(
+      "The provider’s firewall blocked 2 requests to claude-opus-5-5 in the last 24 hours, most recently 10 min ago. It shows as a sign-in error, but it isn’t your login: the block comes from the provider’s firewall or your network (for example a VPN).",
+    );
+    expect(providerErrorLine([group({ kind: "blocked", count: 1, agoMs: 10 * MIN })], NOW)).toContain(
+      "blocked 1 request to claude-opus-5-5",
+    );
+  });
+
   it("lets a throttle be an Also group and the main group when most recent", () => {
     const line = providerErrorLine(
       [group({ model: "a", agoMs: MIN }), group({ model: "b", kind: "throttled", count: 4, agoMs: 2 * MIN })],
@@ -155,6 +164,7 @@ const alert = (over: Partial<RelevantErrorAlert> = {}): RelevantErrorAlert => ({
   overloaded: 6,
   serverError: 0,
   throttled: 0,
+  blocked: 0,
   lastFailureAt: new Date(NOW - 3 * MIN).toISOString(),
   notJustYou: false,
   others: 3,
@@ -193,6 +203,18 @@ describe("communityErrorLine reporting form", () => {
     );
     expect(line({ relevant: [alert({ overloaded: 1, serverError: 7 })] })).toContain(
       ": 1 overloaded / at capacity and 7 server errors from",
+    );
+  });
+
+  it("words blocked counts after the throttled part", () => {
+    expect(line({ relevant: [alert({ overloaded: 0, blocked: 4, failingContributors: 3 })] })).toBe(
+      "Tokrate contributors are reporting provider errors on claude-opus-5-5: 4 blocked by the provider’s firewall from 3 contributors in the last hour, latest 3 min ago.",
+    );
+    expect(line({ relevant: [alert({ overloaded: 0, throttled: 2, blocked: 4 })] })).toContain(
+      ": 2 throttled (not plan limits) and 4 blocked by the provider’s firewall from 4 contributors",
+    );
+    expect(line({ relevant: [alert({ overloaded: 1, serverError: 2, throttled: 3, blocked: 4 })] })).toContain(
+      ": 1 overloaded / at capacity, 2 server errors, 3 throttled (not plan limits) and 4 blocked by the provider’s firewall from 4 contributors",
     );
   });
 
@@ -337,6 +359,7 @@ describe("advanceRecovery", () => {
     overloaded: 6,
     serverError: 0,
     throttled: 0,
+    blocked: 0,
     firstFailureAt: new Date(NOW - 40 * MIN).toISOString(),
     lastFailureAt: new Date(NOW - 3 * MIN).toISOString(),
   });

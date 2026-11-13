@@ -3,8 +3,8 @@ import Foundation
 
 /// One model request a coding tool finished, as far as the provider is concerned (contract "Request
 /// outcomes (0.1.22)"): it succeeded, or it failed because the provider was overloaded, had a server
-/// error or, from 0.1.24, throttled the request while the user's plan still had quota left. Every other
-/// failure (the user's own limits, sign-in problems, invalid requests, cancellations, local network
+/// error, from 0.1.24, throttled the request while the user's plan still had quota left or, from
+/// 0.1.31, blocked it at its network edge. Every other failure (the user's own limits, sign-in problems, invalid requests, cancellations, local network
 /// failures) is never an outcome.
 ///
 /// Outcomes live in memory only. They are produced beside the `TurnMetric`s, travel from the monitors
@@ -19,6 +19,9 @@ public struct RequestOutcome: Hashable, Sendable {
         /// The provider rejected the request as "too many" although the user's own plan had quota left
         /// (contract "Provider throttling (0.1.24)").
         case throttled
+        /// The provider's network edge (firewall or CDN) rejected the request with a block page before it
+        /// reached the model (contract "Provider edge blocks (0.1.31)").
+        case blocked
     }
 
     /// The measurement definition of every request count.

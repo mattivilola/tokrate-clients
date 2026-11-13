@@ -13,6 +13,7 @@ import { heroCaption } from "../components/Hero";
 import { chartCopy } from "../components/Trend";
 import { CLIENT_ORDER, buildDashboard, communityLine } from "./dashboard";
 import {
+  BLOCKED_NOTICE,
   DELEGATED_NOTICE,
   FIELD_DESCRIPTION,
   PROMPT_CACHE_NOTICE,
@@ -570,6 +571,7 @@ describe("sharing notice", () => {
     expect(example.schemaVersion).toBe(2);
     expect(Object.keys(example.requestCounts[0])).toEqual([
       "appVersion",
+      "blocked",
       "client",
       "clientVersion",
       "countId",
@@ -589,6 +591,12 @@ describe("sharing notice", () => {
       "From 0.1.24 the request counts also include requests the provider rejected as too many while your plan still had quota left (throttled). Your plan usage itself is never sent.",
     );
     expect(JSON.parse(sentExample).requestCounts[0].throttled).toBe(1);
+  });
+  it("states the blocked count in the notice", () => {
+    expect(BLOCKED_NOTICE).toBe(
+      "From 0.1.31 the request counts also include requests the provider’s network firewall blocked before they reached the model (blocked). Only the count is sent, never the error page.",
+    );
+    expect(JSON.parse(sentExample).requestCounts[0].blocked).toBe(1);
   });
   it("states the surface category in the notice", () => {
     expect(SURFACE_NOTICE).toBe(

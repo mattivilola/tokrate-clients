@@ -37,6 +37,9 @@ const MID_RESPONSE_SERVER_ERROR_PREFIX: &str = "API Error: Server error mid-resp
 /// tool labels as not the user's own limit (throttled, contract "Provider throttling (0.1.24)").
 const HIGH_LOAD_FRAGMENT: &str = "is experiencing high load";
 const NOT_USER_LIMIT_FRAGMENT: &str = "not your usage limit";
+/// Fixed fragment of the block page the provider's network edge returns (blocked, contract
+/// "Provider edge blocks (0.1.31)"); it only counts together with `apiErrorStatus` 403.
+const EDGE_BLOCK_FRAGMENT: &str = "Attention Required! | Cloudflare";
 /// `attachment.type` values Claude Code writes when an API response arrives, not when its request
 /// is made. They carry the response's own arrival time, so they never start a response.
 const BOOKKEEPING_ATTACHMENT_TYPES: [&str; 1] = ["deferred_tools_record"];
@@ -1288,8 +1291,9 @@ impl JsonlEventParser for ClaudeTranscriptParser {
 /// The provider-side failure a synthetic API-error record stands for, from its `apiErrorStatus`
 /// (529 overloaded, any other 5xx a server error) or else from fixed text fragments: an explicit
 /// overload or a capacity switch (overloaded), a throttle the tool labels as not the user's limit
-/// (throttled), and a server error that ended a response mid-stream. Every other failure (the user's own
-/// limits, sign-in, invalid requests, local connection trouble) is `None`.
+/// (throttled), a server error that ended a response mid-stream, and a 403 whose text is the
+/// provider's edge block page (blocked). Every other failure (the user's own limits, every other
+/// sign-in failure, invalid requests, local connection trouble) is `None`.
 fn classify_api_error(
     root: &serde_json::Map<String, Value>,
     message: &serde_json::Map<String, Value>,
@@ -1301,9 +1305,14 @@ fn classify_api_error(
     {
         return Some(kind);
     }
+    let is_forbidden = root.get("apiErrorStatus").and_then(Value::as_i64) == Some(403);
     let mut kind = None;
     for_each_text(message.get("content"), &mut |text| {
-        if text.contains(NOT_USER_LIMIT_FRAGMENT) {
+        if is_forbidden {
+            if text.contains(EDGE_BLOCK_FRAGMENT) {
+                kind = Some(RequestOutcomeKind::Blocked);
+            }
+        } else if text.contains(NOT_USER_LIMIT_FRAGMENT) {
             kind = Some(RequestOutcomeKind::Throttled);
         } else if text.starts_with(REPEATED_OVERLOAD_PREFIX) || text.contains(HIGH_LOAD_FRAGMENT) {
             if kind != Some(RequestOutcomeKind::Throttled) {

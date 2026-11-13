@@ -78,39 +78,41 @@ final class RequestCountSharingTests: XCTestCase {
         let entry = try XCTUnwrap(SharedRequestCount(
             countId: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!, observedAt: at(130), client: "claude-code",
             clientVersion: "2.1.295", parserVersion: "claude-transcript-v4", model: "claude-opus-5-5", provider: "anthropic",
-            succeeded: 41, overloaded: 3, serverError: 0, throttled: 7
+            succeeded: 41, overloaded: 3, serverError: 0, throttled: 7, blocked: 4
         ))
         let data = try SampleEnvelope.makeEncoder().encode(entry)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(Set(object.keys), ["countId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "succeeded", "overloaded", "serverError", "throttled"])
+        XCTAssertEqual(Set(object.keys), ["countId", "observedAt", "client", "clientVersion", "appVersion", "parserVersion", "metricVersion", "model", "provider", "succeeded", "overloaded", "serverError", "throttled", "blocked"])
         XCTAssertEqual(object["countId"] as? String, "00000000-0000-4000-8000-000000000001")
         XCTAssertEqual(object["observedAt"] as? String, ISO8601DateFormatter().string(from: bucket), "floored to its five-minute period")
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.30")
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.31")
         XCTAssertEqual(object["metricVersion"] as? String, "request-outcome-v1")
         XCTAssertEqual(object["succeeded"] as? Int, 41)
         XCTAssertEqual(object["overloaded"] as? Int, 3)
         XCTAssertEqual(object["serverError"] as? Int, 0)
         XCTAssertEqual(object["throttled"] as? Int, 7)
+        XCTAssertEqual(object["blocked"] as? Int, 4)
     }
 
     func testThrottledIsEncodedEvenWhenZero() throws {
         let entry = try XCTUnwrap(SharedRequestCount(
             observedAt: bucket, client: "claude-code", clientVersion: "1", parserVersion: "claude-transcript-v4", model: "m",
-            provider: "anthropic", succeeded: 1, overloaded: 0, serverError: 0, throttled: 0
+            provider: "anthropic", succeeded: 1, overloaded: 0, serverError: 0, throttled: 0, blocked: 0
         ))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: SampleEnvelope.makeEncoder().encode(entry)) as? [String: Any])
         XCTAssertEqual(object["throttled"] as? Int, 0)
-        XCTAssertEqual(object["appVersion"] as? String, "0.1.30")
+        XCTAssertEqual(object["blocked"] as? Int, 0)
+        XCTAssertEqual(object["appVersion"] as? String, "0.1.31")
     }
 
     func testAnEntryIsRefusedOnEveryRuleTheServerEnforces() {
         func make(
             client: String = "claude-code", parser: String = "claude-transcript-v4", model: String = "m", provider: String = "anthropic",
-            version: String? = "1", s: Int = 1, o: Int = 0, e: Int = 0, t: Int = 0
+            version: String? = "1", s: Int = 1, o: Int = 0, e: Int = 0, t: Int = 0, b: Int = 0
         ) -> SharedRequestCount? {
             SharedRequestCount(
                 observedAt: bucket, client: client, clientVersion: version, parserVersion: parser, model: model, provider: provider,
-                succeeded: s, overloaded: o, serverError: e, throttled: t
+                succeeded: s, overloaded: o, serverError: e, throttled: t, blocked: b
             )
         }
         XCTAssertNotNil(make())
@@ -120,9 +122,12 @@ final class RequestCountSharingTests: XCTestCase {
         XCTAssertNil(make(s: -1, o: 5))
         XCTAssertNotNil(make(s: 0, t: 1), "a throttled request alone is a valid entry")
         XCTAssertNil(make(s: 0, t: 0))
+        XCTAssertNotNil(make(s: 0, b: 1), "a blocked request alone is a valid entry")
+        XCTAssertNil(make(b: 10_001))
+        XCTAssertNil(make(b: -1))
         XCTAssertNil(make(t: 10_001))
         XCTAssertNil(make(t: -1))
-        XCTAssertNotNil(make(s: 10_000, o: 10_000, e: 10_000, t: 10_000))
+        XCTAssertNotNil(make(s: 10_000, o: 10_000, e: 10_000, t: 10_000, b: 10_000))
         XCTAssertNil(make(client: "grok-build", parser: "grok-session-v2"))
         XCTAssertNil(make(client: "antigravity", parser: "antigravity-conversation-v1", provider: "google"))
         XCTAssertNil(make(parser: "claude-transcript-v3"))
@@ -143,20 +148,21 @@ final class RequestCountSharingTests: XCTestCase {
     func testTotalsAboveTheBoundAreSplitIntoSeveralEntries() {
         let entries = SharedRequestCount.entries(
             observedAt: bucket, client: "claude-code", clientVersion: "1", parserVersion: "claude-transcript-v4", model: "m",
-            provider: "anthropic", succeeded: 25_000, overloaded: 10_001, serverError: 3, throttled: 20_005
+            provider: "anthropic", succeeded: 25_000, overloaded: 10_001, serverError: 3, throttled: 20_005, blocked: 10_002
         )
         XCTAssertEqual(entries.map(\.succeeded), [10_000, 10_000, 5_000])
         XCTAssertEqual(entries.map(\.overloaded), [10_000, 1, 0])
         XCTAssertEqual(entries.map(\.serverError), [3, 0, 0])
         XCTAssertEqual(entries.map(\.throttled), [10_000, 10_000, 5])
+        XCTAssertEqual(entries.map(\.blocked), [10_000, 2, 0])
         XCTAssertEqual(Set(entries.map(\.countId)).count, 3)
         XCTAssertTrue(SharedRequestCount.entries(
             observedAt: bucket, client: "claude-code", clientVersion: "1", parserVersion: "claude-transcript-v4", model: "m",
-            provider: "anthropic", succeeded: 0, overloaded: 0, serverError: 0, throttled: 0
+            provider: "anthropic", succeeded: 0, overloaded: 0, serverError: 0, throttled: 0, blocked: 0
         ).isEmpty)
         XCTAssertTrue(SharedRequestCount.entries(
             observedAt: bucket, client: "claude-code", clientVersion: "1", parserVersion: "claude-transcript-v4", model: "unknown",
-            provider: "anthropic", succeeded: 5, overloaded: 0, serverError: 0, throttled: 0
+            provider: "anthropic", succeeded: 5, overloaded: 0, serverError: 0, throttled: 0, blocked: 0
         ).isEmpty, "an invalid identity sends nothing")
     }
 
@@ -206,7 +212,7 @@ final class RequestCountSharingTests: XCTestCase {
         session.enable(now: consent, startPolling: false)
         session.enqueueOutcomes([
             outcome(.succeeded, at: 10), outcome(.succeeded, at: 100), outcome(.overloaded, at: 200), outcome(.serverError, at: 299),
-            outcome(.throttled, at: 150), outcome(.throttled, at: 160),
+            outcome(.throttled, at: 150), outcome(.throttled, at: 160), outcome(.blocked, at: 170),
             outcome(.succeeded, at: 50, model: "claude-sonnet-5-5"),
             outcome(.succeeded, at: 60, version: "2.1.300"),
             // The next bucket is a different entry.
@@ -226,6 +232,8 @@ final class RequestCountSharingTests: XCTestCase {
         XCTAssertEqual(main["overloaded"] as? Int, 1)
         XCTAssertEqual(main["serverError"] as? Int, 1)
         XCTAssertEqual(main["throttled"] as? Int, 2)
+        XCTAssertEqual(main["blocked"] as? Int, 1)
+        XCTAssertTrue(entries.allSatisfy { $0["blocked"] is Int }, "every entry carries blocked, also when 0")
         XCTAssertTrue(entries.allSatisfy { $0["throttled"] is Int }, "every entry carries throttled, also when 0")
         XCTAssertEqual(main["observedAt"] as? String, ISO8601DateFormatter().string(from: bucket))
         XCTAssertEqual(main["parserVersion"] as? String, "claude-transcript-v4")

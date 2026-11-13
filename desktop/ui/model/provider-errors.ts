@@ -11,7 +11,7 @@ const MAX_ALSO = 2;
 
 const times = (count: number) => (count === 1 ? "time" : "times");
 
-/** The sentence for the main group (contract "Local provider errors" and "Provider throttling"). */
+/** The sentence for the main group (contract "Local provider errors", "Provider throttling" and "Provider edge blocks"). */
 function groupText(group: ProviderErrorGroup, ago: string): string {
   switch (group.kind) {
     case "overloaded":
@@ -20,6 +20,8 @@ function groupText(group: ProviderErrorGroup, ago: string): string {
       const used = group.planUsedPercent === undefined ? "" : ` (${group.planUsedPercent}% used)`;
       return `You were rate limited ${group.count} ${times(group.count)} on ${group.model} in the last 24 hours while your plan still had quota left${used}. That’s the provider throttling, not your plan limit.`;
     }
+    case "blocked":
+      return `The provider’s firewall blocked ${group.count} ${group.count === 1 ? "request" : "requests"} to ${group.model} in the last 24 hours, most recently ${ago}. It shows as a sign-in error, but it isn’t your login: the block comes from the provider’s firewall or your network (for example a VPN).`;
     case "serverError":
       return `${group.model} returned ${group.count} server ${group.count === 1 ? "error" : "errors"} in the last 24 hours, most recently ${ago}. That’s a failure at the provider, not your connection.`;
   }
@@ -27,7 +29,7 @@ function groupText(group: ProviderErrorGroup, ago: string): string {
 
 /**
  * The passive line about the user's own provider-side failures (contract "Local provider errors
- * (0.1.23)", throttling from 0.1.24), or null when no failure happened in the last 24 hours. The
+ * (0.1.23)", throttling from 0.1.24, blocks from 0.1.31), or null when no failure happened in the last 24 hours. The
  * main group is the one with the most recent failure; models are named as the tools report them.
  */
 export function providerErrorLine(
@@ -82,6 +84,7 @@ function alertText(alert: RelevantErrorAlert, now: number): string {
     alert.overloaded > 0 ? `${alert.overloaded} overloaded / at capacity` : null,
     alert.serverError > 0 ? count(alert.serverError, "server error", "server errors") : null,
     alert.throttled > 0 ? `${alert.throttled} throttled (not plan limits)` : null,
+    alert.blocked > 0 ? `${alert.blocked} blocked by the provider’s firewall` : null,
   ].filter((part) => part !== null);
   const counts = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
   return `Tokrate contributors are reporting provider errors on ${alert.model}: ${counts} from ${contributors(alert.failingContributors)} in the last hour, latest ${relativeTime(Date.parse(alert.lastFailureAt), now)}.`;

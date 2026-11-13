@@ -2,8 +2,9 @@ import Foundation
 
 /// One entry of an upload's `requestCounts` (contract "Request outcomes (0.1.22)"): how many requests of
 /// one client, version, model and provider succeeded and how many failed on the provider's side during
-/// one five-minute period (and, from 0.1.24, how many were throttled). The complete allowlist: no outcome identifier, message or time finer than the
-/// period crosses this boundary.
+/// one five-minute period (and, from 0.1.24, how many were throttled and, from 0.1.31, how many the provider's network edge
+/// blocked). The complete allowlist: no outcome identifier, message or time finer than the period crosses
+/// this boundary.
 public struct SharedRequestCount: Encodable, Sendable {
     /// Largest accepted value of one count (the bound the server enforces).
     public static let maximumCount = 10_000
@@ -22,6 +23,8 @@ public struct SharedRequestCount: Encodable, Sendable {
     public let serverError: Int
     /// Always encoded from 0.1.24 (contract "Provider throttling (0.1.24)"), also when 0.
     public let throttled: Int
+    /// Always encoded from 0.1.31 (contract "Provider edge blocks (0.1.31)"), also when 0.
+    public let blocked: Int
 
     /// Nil unless the entry is valid on every rule the server applies: a supported client with its
     /// current parser, a known model (never `unknown`), a hosted provider allowed for the client,
@@ -29,13 +32,14 @@ public struct SharedRequestCount: Encodable, Sendable {
     /// `unknown`, and the time is floored to its five-minute period.
     public init?(
         countId: UUID = UUID(), observedAt: Date, client: String, clientVersion: String?, parserVersion: String,
-        model: String, provider: String, succeeded: Int, overloaded: Int, serverError: Int, throttled: Int
+        model: String, provider: String, succeeded: Int, overloaded: Int, serverError: Int, throttled: Int,
+        blocked: Int
     ) {
         guard RequestOutcome.supports(client: client, parser: parserVersion),
               model != "unknown", model.range(of: RequestOutcome.modelPattern, options: .regularExpression) != nil,
               RequestOutcome.allowedProviders(client: client, parser: parserVersion).contains(provider),
-              [succeeded, overloaded, serverError, throttled].allSatisfy({ (0...Self.maximumCount).contains($0) }),
-              succeeded + overloaded + serverError + throttled >= 1,
+              [succeeded, overloaded, serverError, throttled, blocked].allSatisfy({ (0...Self.maximumCount).contains($0) }),
+              succeeded + overloaded + serverError + throttled + blocked >= 1,
               observedAt.timeIntervalSince1970.isFinite
         else { return nil }
         self.countId = countId
@@ -51,6 +55,7 @@ public struct SharedRequestCount: Encodable, Sendable {
         self.overloaded = overloaded
         self.serverError = serverError
         self.throttled = throttled
+        self.blocked = blocked
     }
 
     /// The entries that carry these totals: one, or several when a field exceeds 10,000, so no entry is
@@ -58,26 +63,29 @@ public struct SharedRequestCount: Encodable, Sendable {
     /// or there is nothing to send.
     static func entries(
         observedAt: Date, client: String, clientVersion: String?, parserVersion: String, model: String, provider: String,
-        succeeded: Int, overloaded: Int, serverError: Int, throttled: Int
+        succeeded: Int, overloaded: Int, serverError: Int, throttled: Int, blocked: Int
     ) -> [SharedRequestCount] {
         var remaining = (
-            succeeded: max(0, succeeded), overloaded: max(0, overloaded), serverError: max(0, serverError), throttled: max(0, throttled)
+            succeeded: max(0, succeeded), overloaded: max(0, overloaded), serverError: max(0, serverError), throttled: max(0, throttled),
+            blocked: max(0, blocked)
         )
         var entries: [SharedRequestCount] = []
-        while remaining.succeeded + remaining.overloaded + remaining.serverError + remaining.throttled > 0 {
+        while remaining.succeeded + remaining.overloaded + remaining.serverError + remaining.throttled + remaining.blocked > 0 {
             let chunk = (
                 succeeded: min(remaining.succeeded, maximumCount), overloaded: min(remaining.overloaded, maximumCount),
-                serverError: min(remaining.serverError, maximumCount), throttled: min(remaining.throttled, maximumCount)
+                serverError: min(remaining.serverError, maximumCount), throttled: min(remaining.throttled, maximumCount),
+                blocked: min(remaining.blocked, maximumCount)
             )
             guard let entry = SharedRequestCount(
                 observedAt: observedAt, client: client, clientVersion: clientVersion, parserVersion: parserVersion, model: model,
                 provider: provider, succeeded: chunk.succeeded, overloaded: chunk.overloaded, serverError: chunk.serverError,
-                throttled: chunk.throttled
+                throttled: chunk.throttled, blocked: chunk.blocked
             ) else { return [] }
             entries.append(entry)
             remaining = (
                 remaining.succeeded - chunk.succeeded, remaining.overloaded - chunk.overloaded,
-                remaining.serverError - chunk.serverError, remaining.throttled - chunk.throttled
+                remaining.serverError - chunk.serverError, remaining.throttled - chunk.throttled,
+                remaining.blocked - chunk.blocked
             )
         }
         return entries
@@ -85,7 +93,7 @@ public struct SharedRequestCount: Encodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case countId, observedAt, client, clientVersion, appVersion, parserVersion, metricVersion, model, provider
-        case succeeded, overloaded, serverError, throttled
+        case succeeded, overloaded, serverError, throttled, blocked
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -103,5 +111,6 @@ public struct SharedRequestCount: Encodable, Sendable {
         try container.encode(overloaded, forKey: .overloaded)
         try container.encode(serverError, forKey: .serverError)
         try container.encode(throttled, forKey: .throttled)
+        try container.encode(blocked, forKey: .blocked)
     }
 }

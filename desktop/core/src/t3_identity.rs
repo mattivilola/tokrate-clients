@@ -578,4 +578,61 @@ mod tests {
             assert!(!serialized.contains(private));
         }
     }
+
+    #[test]
+    fn an_sdk_edge_block_is_a_blocked_outcome_of_t3_code() {
+        let fixture = StateFixture::new();
+        let now = Utc::now();
+        let session = Uuid::new_v4().to_string();
+        let start = now - Duration::seconds(30);
+        let end = now - Duration::seconds(20);
+        fixture.add_window(
+            "edge-block",
+            &session,
+            "claudeAgent",
+            "strong",
+            start,
+            Some(end),
+        );
+        let root = fixture.root().to_path_buf();
+        drop(fixture.connection);
+        let index = Arc::new(T3ClaudeIdentityIndex::default());
+        index.refresh(&root, now);
+
+        let mut error: serde_json::Value = serde_json::from_slice(&transcript_record(
+            "assistant",
+            &session,
+            start + Duration::seconds(8),
+            "sdk-ts",
+        ))
+        .unwrap();
+        error["uuid"] = json!("edge-block-record");
+        error["isApiErrorMessage"] = json!(true);
+        error["apiErrorStatus"] = json!(403);
+        error["error"] = json!("authentication_failed");
+        error["message"] = json!({
+            "id": "edge-block-message", "model": "<synthetic>", "role": "assistant",
+            "content": [{"type": "text", "text": "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"}]
+        });
+        error.as_object_mut().unwrap().remove("requestId");
+        let mut parser = ClaudeTranscriptParser::for_path_with_t3_identity(
+            Path::new("native-file-identity.jsonl"),
+            Some(index),
+        );
+        parser.consume(&transcript_record(
+            "assistant",
+            &session,
+            start + Duration::seconds(5),
+            "sdk-ts",
+        ));
+        parser.consume(&serde_json::to_vec(&error).unwrap());
+        parser.flush_pending(DateTime::<Utc>::MAX_UTC, true);
+        let blocked: Vec<_> = parser
+            .take_outcomes()
+            .into_iter()
+            .filter(|outcome| outcome.kind == crate::model::RequestOutcomeKind::Blocked)
+            .collect();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].client, T3_CODE_CLIENT);
+    }
 }

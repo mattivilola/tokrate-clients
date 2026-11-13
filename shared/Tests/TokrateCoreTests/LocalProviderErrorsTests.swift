@@ -55,6 +55,18 @@ final class LocalProviderErrorsTests: XCTestCase {
         XCTAssertEqual(line(plain), "You were rate limited 1 time on m1 in the last 24 hours while your plan still had quota left. That’s the provider throttling, not your plan limit.")
     }
 
+    func testBlockedTemplateSingularAndPlural() {
+        var errors = LocalProviderErrors()
+        errors.add([outcome("a", model: "m1", kind: .blocked)], now: now)
+        XCTAssertEqual(line(errors), "The provider’s firewall blocked 1 request to m1 in the last 24 hours, most recently REL(60). It shows as a sign-in error, but it isn’t your login: the block comes from the provider’s firewall or your network (for example a VPN).")
+        errors.add([outcome("b", model: "m1", kind: .blocked, ago: 30)], now: now)
+        XCTAssertEqual(line(errors), "The provider’s firewall blocked 2 requests to m1 in the last 24 hours, most recently REL(30). It shows as a sign-in error, but it isn’t your login: the block comes from the provider’s firewall or your network (for example a VPN).")
+        errors.add([outcome("c", model: "other", kind: .overloaded, ago: 50)], now: now)
+        XCTAssertEqual(errors.groups(now: now).map(\.kind), [.blocked, .overloaded])
+        XCTAssertEqual(line(errors)?.hasSuffix(" Also: other (1)"), true)
+        XCTAssertNil(outcome("d", kind: .blocked, percent: 50).planUsagePercent)
+    }
+
     func testThrottledPluralUsesThePercentageOfTheLatestFailure() {
         var errors = LocalProviderErrors()
         errors.add([

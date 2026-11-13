@@ -977,7 +977,7 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertEqual(json["reasoningEffort"] as? String, "medium")
         XCTAssertEqual(json["sourceKind"] as? String, "primary")
         XCTAssertEqual(json["delegatedOutputTokens"] as? Int, 0)
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.30")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.31")
         XCTAssertEqual(json["surface"] as? String, "desktop")
         XCTAssertTrue(SharedSample.isAllowedProvider("google", client: "antigravity"))
         XCTAssertFalse(SharedSample.isAllowedProvider("google", client: "codex"))

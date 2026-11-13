@@ -10,16 +10,16 @@ use std::{
 use tokrate_core::{read_private_file, write_private_file, SourceMonitor, MAX_SMALL_FILE_BYTES};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-pub const NOTICE_VERSION: &str = "2026-10-21-v7";
-pub const CONSENT_FILE: &str = "consent-v7.json";
-pub const NOTICE: &str = "Tokrate community sharing (notice 2026-10-21-v7)\n\
+pub const NOTICE_VERSION: &str = "2026-11-13-v8";
+pub const CONSENT_FILE: &str = "consent-v8.json";
+pub const NOTICE: &str = "Tokrate community sharing (notice 2026-11-13-v8)\n\
 Reads supported coding-tool logs locally. Sends only derived measurements: coding tool and\n\
 versions, model/provider/effort, primary/subagent category, token counts (including delegated\n\
 and prompt-cache counts), turn/response/first-token timing where available, tool surface\n\
 category, five-minute time buckets and random sample IDs. Model names are sent as the tool\n\
 reports them; unusual characters become unknown. Custom deployment names may be shared.\n\
-Also sends five-minute counts of successful, overloaded, server-error and throttled requests;\n\
-never error messages or plan usage. No prompts, answers, code, paths, raw session IDs or logs\n\
+Also sends five-minute counts of successful, overloaded, server-error, throttled and blocked requests;\n\
+never error messages, error pages or plan usage. No prompts, answers, code, paths, raw session IDs or logs\n\
 are uploaded. A persistent pseudonymous signing identity links this installation's reports.\n\
 The server derives a continent from the connection through Cloudflare; it stores neither the\n\
 country nor IP in measurements. Public regional data requires at least three contributors;\n\
@@ -27,6 +27,7 @@ other early aggregates may have one. Hosting/network providers still process con
 Only new observations after sharing starts are eligible; no historical backfill. Uploads are\n\
 grouped after five-minute buckets close, with a one-minute wait plus up to one minute of shared random jitter (normally about 1–7 minutes after completion; offline or delayed collection can take longer). Pending reports stay in bounded memory.\n\
 When complete request usage is available, a turn also includes six coarse per-request input-size bands and their token totals (including cached input); prompts are never sent. Missing or conflicting usage means no size summary for that turn, not a measured zero.\n\
+From 0.1.31 the request counts also include requests the provider’s network firewall blocked before they reached the model (blocked). Only the count is sent, never the error page.\n\
 Local normalized history lasts seven days (up to 50,000 turns); server samples expire after\n\
 30 days via asynchronous TTL. Stopping sharing clears pending reports, not received reports\n\
 or backups. Privacy: https://tokrate.dev/privacy\n\

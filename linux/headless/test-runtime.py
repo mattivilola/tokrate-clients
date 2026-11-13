@@ -33,7 +33,7 @@ def main():
 
         assert run("setup", check=False).returncode != 0, "No unattended implicit consent"
         run("setup", "--local-only")
-        assert not (config / "consent-v7.json").exists()
+        assert not (config / "consent-v8.json").exists()
         assert run("sharing-enabled", check=False).returncode != 0
         assert run("run", "--share", check=False).returncode != 0
         run("setup", "--share")
@@ -133,7 +133,7 @@ def main():
             run("scan")
             assert json.loads(run("status").stdout)["history_turns"] == 1
             run("setup", "--local-only")
-            assert not (config / "consent-v7.json").exists()
+            assert not (config / "consent-v8.json").exists()
         finally:
             if process.poll() is None:
                 process.terminate()

@@ -17,6 +17,7 @@ fn alert(model: &str, contributors: u64) -> CommunityErrorAlert {
         overloaded: 4,
         server_error: 1,
         throttled: 0,
+        blocked: 0,
         last_failure_at: now() - Duration::minutes(3),
     }
 }
@@ -208,6 +209,34 @@ fn a_throttle_only_alert_is_selected_like_any_other_and_keeps_its_count() {
 }
 
 #[test]
+fn a_block_only_alert_is_selected_like_any_other_and_keeps_its_count() {
+    let mut block_only = alert("m", 3);
+    block_only.overloaded = 0;
+    block_only.server_error = 0;
+    block_only.blocked = 7;
+    let history = [turn(Some("m"), Duration::hours(1))];
+    let selected = relevant_error_alerts(&[block_only.clone()], &history, &[], now());
+    assert_eq!(models(&selected), ["m"]);
+    assert_eq!(
+        (
+            selected[0].overloaded,
+            selected[0].server_error,
+            selected[0].throttled,
+            selected[0].blocked
+        ),
+        (0, 0, 0, 7)
+    );
+    // The user's own block on that model in the last hour makes it "not just you" as well.
+    let own = [ProviderErrorGroup {
+        kind: ProviderErrorKind::Blocked,
+        ..failure("m", Duration::minutes(10))
+    }];
+    let selected = relevant_error_alerts(&[block_only], &[], &own, now());
+    assert!(selected[0].not_just_you);
+    assert_eq!(selected[0].others, 2);
+}
+
+#[test]
 fn the_selection_serializes_for_the_webview() {
     let alerts = [alert("m", 3)];
     let history = [turn(Some("m"), Duration::hours(1))];
@@ -220,6 +249,7 @@ fn the_selection_serializes_for_the_webview() {
             "overloaded": 4,
             "serverError": 1,
             "throttled": 0,
+            "blocked": 0,
             "lastFailureAt": "2026-10-13T11:57:00Z",
             "notJustYou": false,
             "others": 2

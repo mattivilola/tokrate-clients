@@ -158,7 +158,7 @@ fi
 # key later disappears, an installer rerun must fail closed rather than minting
 # a replacement identity behind the user's back.
 had_consent=0
-if [[ -e "$config_dir/consent-v7.json" || -L "$config_dir/consent-v7.json" ]]; then
+if [[ -e "$config_dir/consent-v8.json" || -L "$config_dir/consent-v8.json" ]]; then
   had_consent=1
 fi
 had_identity=0
@@ -226,7 +226,7 @@ done
 for path in "$binary_target" "$local_template_path" "$share_template_path" \
   "$update_check_service_path" "$update_check_timer_path" "$UPDATE_SETTING" \
   "$sysusers_config_path" "$provision_update_user_path" \
-  "$config_dir/settings.json" "$config_dir/setup-complete" "$config_dir/consent-v7.json" "$identity_marker"; do
+  "$config_dir/settings.json" "$config_dir/setup-complete" "$config_dir/consent-v8.json" "$identity_marker"; do
   assert_regular_or_missing "$path"
   assert_root_owned "$path"
 done
@@ -280,7 +280,7 @@ chmod 0711 "$setup_tmp"
 setup_config="$setup_tmp/config"
 setup_data="$setup_tmp/data"
 install -d -o "$target_uid" -g "$target_gid" -m 0700 "$setup_config" "$setup_data"
-for name in settings.json setup-complete consent-v7.json; do
+for name in settings.json setup-complete consent-v8.json; do
   if [[ -f "$config_dir/$name" ]]; then
     install -o "$target_uid" -g "$target_gid" -m 0600 "$config_dir/$name" "$setup_config/$name"
   fi
@@ -316,10 +316,10 @@ else
   fi
 fi
 
-if [[ "$MODE" == local && -e "$setup_config/consent-v7.json" ]]; then
+if [[ "$MODE" == local && -e "$setup_config/consent-v8.json" ]]; then
   # A stale or invalid marker is OFF by contract; normalize the temporary
   # config before promoting it to the authoritative root-owned directory.
-  rm -f -- "$setup_config/consent-v7.json"
+  rm -f -- "$setup_config/consent-v8.json"
 fi
 
 if [[ "$MODE" == share && ! -f "$credential_file" ]] && (( had_consent || had_identity )); then
@@ -329,9 +329,9 @@ fi
 [[ -f "$setup_config/settings.json" && ! -L "$setup_config/settings.json" ]] || fail 'setup did not create a regular settings.json'
 [[ -f "$setup_config/setup-complete" && ! -L "$setup_config/setup-complete" ]] || fail 'setup did not create a regular setup-complete marker'
 if [[ "$MODE" == share ]]; then
-  [[ -f "$setup_config/consent-v7.json" && ! -L "$setup_config/consent-v7.json" ]] || fail 'sharing setup did not create the consent marker'
+  [[ -f "$setup_config/consent-v8.json" && ! -L "$setup_config/consent-v8.json" ]] || fail 'sharing setup did not create the consent marker'
 else
-  [[ ! -e "$setup_config/consent-v7.json" && ! -L "$setup_config/consent-v7.json" ]] || fail 'local-only setup unexpectedly created a consent marker'
+  [[ ! -e "$setup_config/consent-v8.json" && ! -L "$setup_config/consent-v8.json" ]] || fail 'local-only setup unexpectedly created a consent marker'
 fi
 
 stage_dir=$(mktemp -d "$config_dir/.install.XXXXXXXX")
@@ -340,17 +340,17 @@ for name in settings.json setup-complete; do
   install -o root -g root -m 0644 "$setup_config/$name" "$stage_dir/$name"
 done
 if [[ "$MODE" == share ]]; then
-  install -o root -g root -m 0644 "$setup_config/consent-v7.json" "$stage_dir/consent-v7.json"
+  install -o root -g root -m 0644 "$setup_config/consent-v8.json" "$stage_dir/consent-v8.json"
 fi
 for name in settings.json setup-complete; do
   mv -f -- "$stage_dir/$name" "$config_dir/$name"
 done
 if [[ "$MODE" == share ]]; then
-  mv -f -- "$stage_dir/consent-v7.json" "$config_dir/consent-v7.json"
+  mv -f -- "$stage_dir/consent-v8.json" "$config_dir/consent-v8.json"
 else
   # This is the sole existing user-state file intentionally removed: the
   # authoritative current consent marker, after rejecting symlinks above.
-  rm -f -- "$config_dir/consent-v7.json"
+  rm -f -- "$config_dir/consent-v8.json"
 fi
 rm -rf -- "$stage_dir"
 stage_dir=

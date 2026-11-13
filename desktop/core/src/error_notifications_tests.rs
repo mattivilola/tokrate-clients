@@ -22,6 +22,7 @@ fn alert(model: &str) -> RelevantErrorAlert {
         overloaded: 6,
         server_error: 0,
         throttled: 0,
+        blocked: 0,
         last_failure_at: start(),
         not_just_you: false,
         others: 3,
@@ -92,45 +93,59 @@ fn the_start_text_for_a_failure_of_the_users_own() {
 
 #[test]
 fn the_start_text_for_the_reports_of_contributors() {
-    let body = |overloaded, server_error, throttled, contributors| {
+    let body = |overloaded, server_error, throttled, blocked, contributors| {
         let mut planner = running();
         let mut a = alert("m");
         a.overloaded = overloaded;
         a.server_error = server_error;
         a.throttled = throttled;
+        a.blocked = blocked;
         a.failing_contributors = contributors;
         let notifications = planner.plan(&[a], at(1));
         assert_eq!(notifications[0].title, "Provider errors on m");
         notifications[0].body.clone()
     };
     assert_eq!(
-        body(6, 0, 0, 4),
+        body(6, 0, 0, 0, 4),
         "4 Tokrate contributors reported 6 overloaded / at capacity in the last hour."
     );
     assert_eq!(
-        body(0, 1, 0, 1),
+        body(0, 1, 0, 0, 1),
         "1 Tokrate contributor reported 1 server error in the last hour."
     );
     assert_eq!(
-        body(1, 2, 0, 3),
+        body(1, 2, 0, 0, 3),
         "3 Tokrate contributors reported 1 overloaded / at capacity and 2 server errors in the last hour."
     );
     // Throttled joins the counts: a throttle alone, with one other kind, and with both.
     assert_eq!(
-        body(0, 0, 5, 3),
+        body(0, 0, 5, 0, 3),
         "3 Tokrate contributors reported 5 throttled (not plan limits) in the last hour."
     );
     assert_eq!(
-        body(2, 0, 5, 1),
+        body(2, 0, 5, 0, 1),
         "1 Tokrate contributor reported 2 overloaded / at capacity and 5 throttled (not plan limits) in the last hour."
     );
     assert_eq!(
-        body(0, 1, 2, 3),
+        body(0, 1, 2, 0, 3),
         "3 Tokrate contributors reported 1 server error and 2 throttled (not plan limits) in the last hour."
     );
     assert_eq!(
-        body(1, 2, 3, 4),
+        body(1, 2, 3, 0, 4),
         "4 Tokrate contributors reported 1 overloaded / at capacity, 2 server errors and 3 throttled (not plan limits) in the last hour."
+    );
+    // Blocked follows throttled: a block alone, after throttled, and as the last of four.
+    assert_eq!(
+        body(0, 0, 0, 4, 3),
+        "3 Tokrate contributors reported 4 blocked by the provider’s firewall in the last hour."
+    );
+    assert_eq!(
+        body(0, 0, 2, 4, 3),
+        "3 Tokrate contributors reported 2 throttled (not plan limits) and 4 blocked by the provider’s firewall in the last hour."
+    );
+    assert_eq!(
+        body(1, 2, 3, 4, 5),
+        "5 Tokrate contributors reported 1 overloaded / at capacity, 2 server errors, 3 throttled (not plan limits) and 4 blocked by the provider’s firewall in the last hour."
     );
 }
 

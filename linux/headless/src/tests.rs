@@ -70,7 +70,7 @@ fn off_and_obsolete_consent_never_call_identity_loader() {
     assert!(credentials::load(&paths).is_err());
     fs::write(
         paths.consent(),
-        br#"{"notice_version":"2026-10-14-v6","accepted_at":"2026-10-14T00:00:00Z"}"#,
+        br#"{"notice_version":"2026-10-21-v7","accepted_at":"2026-10-21T00:00:00Z"}"#,
     )
     .unwrap();
     assert!(host

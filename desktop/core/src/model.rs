@@ -435,6 +435,9 @@ pub enum RequestOutcomeKind {
     /// The provider rejected the request as too many while the user's own plan still had quota
     /// left (contract "Provider throttling (0.1.24)").
     Throttled,
+    /// The provider's network edge (its firewall or CDN) rejected the request with a block page
+    /// before it reached the model (contract "Provider edge blocks (0.1.31)").
+    Blocked,
 }
 
 impl RequestOutcomeKind {

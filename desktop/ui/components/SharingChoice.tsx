@@ -33,6 +33,10 @@ export const THROTTLED_NOTICE =
 export const PROMPT_SIZE_NOTICE =
   "From 0.1.30, when every model request in a turn has usable input counts, sharing includes a six-band summary of per-request input size (including cached input). It sends only band counts and token totals, not prompts. If any request usage is missing or inconsistent, that turn has no size summary; unavailable usage is not reported as zero.";
 
+/** From notice version 8: the request counts also include requests the provider's firewall blocked. */
+export const BLOCKED_NOTICE =
+  "From 0.1.31 the request counts also include requests the provider’s network firewall blocked before they reached the model (blocked). Only the count is sent, never the error page.";
+
 /** What every shared turn contains, in the wording of the Mac notice. */
 export const SENT_FIELDS = [
   "Coding tool, and app, parser and metric versions",
@@ -123,6 +127,7 @@ export function SharingChoice({
       <p className="detail-fine region-notice">{REQUEST_COUNT_NOTICE}</p>
       <p className="detail-fine region-notice">{THROTTLED_NOTICE}</p>
       <p className="detail-fine region-notice">{PROMPT_SIZE_NOTICE}</p>
+      <p className="detail-fine region-notice">{BLOCKED_NOTICE}</p>
       <Disclosure label="See exactly what is sent">
         <div className="details">
           <p className="detail-fine">Example with obviously fake values:</p>

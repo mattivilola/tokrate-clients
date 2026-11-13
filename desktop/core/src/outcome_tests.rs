@@ -20,7 +20,7 @@ use std::time::SystemTime;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use RequestOutcomeKind::{Overloaded, ServerError, Succeeded, Throttled};
+use RequestOutcomeKind::{Blocked, Overloaded, ServerError, Succeeded, Throttled};
 
 fn time(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
@@ -205,6 +205,17 @@ fn claude_overload_and_server_errors_are_attributed_to_the_previous_real_respons
         )),
         [(Throttled, model(), provider())]
     );
+    // A 403 whose text is the provider edge's block page, with the real-world wording.
+    assert_eq!(
+        claude_failure(api_error(
+            at,
+            "e8",
+            "authentication_failed",
+            Some(403),
+            "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"
+        )),
+        [(Blocked, model(), provider())]
+    );
     // A 5xx that ends a response mid-stream.
     assert_eq!(
         claude_failure(api_error(
@@ -250,6 +261,46 @@ fn claude_failures_that_are_not_the_providers_are_dropped() {
                 "authentication_failed",
                 Some(401),
                 "Invalid API key · Please run /login",
+            ),
+        ),
+        (
+            "403 account on hold",
+            api_error(
+                at,
+                "x3a",
+                "authentication_failed",
+                Some(403),
+                "Failed to authenticate. API Error: 403 Your account is on hold",
+            ),
+        ),
+        (
+            "401 expired token",
+            api_error(
+                at,
+                "x3b",
+                "authentication_failed",
+                Some(401),
+                "Failed to authenticate. API Error: 401 OAuth access token has expired",
+            ),
+        ),
+        (
+            "block page text with a 401",
+            api_error(
+                at,
+                "x3c",
+                "authentication_failed",
+                Some(401),
+                "Failed to authenticate. API Error: 401 Attention Required! | Cloudflare",
+            ),
+        ),
+        (
+            "block page text without a status",
+            api_error(
+                at,
+                "x3d",
+                "authentication_failed",
+                None,
+                "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
             ),
         ),
         (
@@ -1235,7 +1286,7 @@ fn outcomes_are_summed_per_bucket_and_queued_after_its_close_grace() {
     );
     assert_eq!(entry.client, "codex");
     assert_eq!(entry.client_version, "1.2.3");
-    assert_eq!(entry.app_version, "0.1.30");
+    assert_eq!(entry.app_version, "0.1.31");
     assert_eq!(entry.parser_version, "codex-rollout-v2");
     assert_eq!(entry.metric_version, "request-outcome-v1");
     assert_eq!(entry.model, "gpt-5");
@@ -1496,6 +1547,39 @@ fn counts_over_10000_are_split_into_entries_that_each_sum_to_at_least_one() {
 }
 
 #[test]
+fn blocked_outcomes_are_summed_split_and_always_sent_like_the_other_counts() {
+    let mut queue = queue(0);
+    queue.enable(time("2026-10-09T09:59:00Z"));
+    let mut outcomes: Vec<RequestOutcome> = (0..10_002)
+        .map(|index| outcome(&format!("b-{index}"), "2026-10-09T10:01:00Z", Blocked))
+        .collect();
+    outcomes.push(outcome("t", "2026-10-09T10:01:00Z", Throttled));
+    queue.enqueue_outcomes(&outcomes, time("2026-10-09T10:02:00Z"));
+    let entries = drain(&mut queue, time("2026-10-09T10:12:00Z"));
+    let counts: Vec<(u32, u32)> = entries
+        .iter()
+        .map(|entry| (entry.throttled, entry.blocked))
+        .collect();
+    assert_eq!(counts, [(1, 10_000), (0, 2)]);
+    // A block alone is an entry, and it is sent with every key.
+    let mut alone = self::queue(0);
+    alone.enable(time("2026-10-09T09:59:00Z"));
+    alone.enqueue_outcomes(
+        &[outcome("only", "2026-10-09T10:01:00Z", Blocked)],
+        time("2026-10-09T10:02:00Z"),
+    );
+    let entries = drain(&mut alone, time("2026-10-09T10:12:00Z"));
+    assert_eq!(entries.len(), 1);
+    let request = signed_request(&[], &entries, &[3; 32], time("2026-10-09T10:12:00Z")).unwrap();
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    let entry = &body["requestCounts"][0];
+    assert_eq!(entry["blocked"], 1);
+    for key in ["succeeded", "overloaded", "serverError", "throttled"] {
+        assert_eq!(entry[key], 0, "{key}");
+    }
+}
+
+#[test]
 fn throttled_outcomes_are_summed_and_split_like_the_other_counts() {
     let mut queue = queue(0);
     queue.enable(time("2026-10-09T09:59:00Z"));
@@ -1532,7 +1616,7 @@ fn throttled_outcomes_are_summed_and_split_like_the_other_counts() {
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     let entry = &body["requestCounts"][0];
     assert_eq!(entry["throttled"], 1);
-    for key in ["succeeded", "overloaded", "serverError"] {
+    for key in ["succeeded", "overloaded", "serverError", "blocked"] {
         assert_eq!(entry[key], 0, "{key}");
     }
     // No plan figure is part of the entry: its keys are exactly the request-count keys.
@@ -1547,6 +1631,7 @@ fn throttled_outcomes_are_summed_and_split_like_the_other_counts() {
         keys,
         [
             "appVersion",
+            "blocked",
             "client",
             "clientVersion",
             "countId",
@@ -1902,6 +1987,7 @@ fn entry_of(index: u128, model: &str) -> SharedRequestCount {
         overloaded: 9_999,
         server_error: 9_999,
         throttled: 9_999,
+        blocked: 9_999,
     }
 }
 
@@ -1939,7 +2025,9 @@ fn a_request_with_only_counts_is_a_signed_version_2_envelope_with_both_lists() {
     assert_eq!(body["requestCounts"].as_array().unwrap().len(), 1);
     // Keys are sorted, like the samples' keys.
     let text = String::from_utf8(request.body.clone()).unwrap();
-    assert!(text.starts_with("{\"requestCounts\":[{\"appVersion\":\"0.1.30\",\"client\":\"codex\""));
+    assert!(text.starts_with(
+        "{\"requestCounts\":[{\"appVersion\":\"0.1.31\",\"blocked\":9999,\"client\":\"codex\""
+    ));
     assert!(text.contains("\"overloaded\":9999,\"parserVersion\""));
     assert!(text.contains("\"serverError\":9999,\"succeeded\":9999,\"throttled\":9999}"));
     assert!(text.ends_with("\"sentAt\":\"2026-10-09T12:05:00Z\"}"));

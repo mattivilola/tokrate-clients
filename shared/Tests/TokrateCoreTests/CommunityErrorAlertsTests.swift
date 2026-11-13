@@ -8,11 +8,11 @@ final class CommunityErrorAlertsTests: XCTestCase {
     private let used: Set<String> = ["m1", "m2", "m3", "m4"]
 
     private func alert(
-        _ model: String, contributors: Int = 3, overloaded: Int = 2, serverError: Int = 0, throttled: Int = 0, lastAgo: TimeInterval = 120
+        _ model: String, contributors: Int = 3, overloaded: Int = 2, serverError: Int = 0, throttled: Int = 0, blocked: Int = 0, lastAgo: TimeInterval = 120
     ) -> GlobalBoard.ErrorAlert {
         GlobalBoard.ErrorAlert(
             model: model, provider: "anthropic", clients: ["claude-code"], failingContributors: contributors,
-            overloaded: overloaded, serverError: serverError, throttled: throttled,
+            overloaded: overloaded, serverError: serverError, throttled: throttled, blocked: blocked,
             firstFailureAt: now.addingTimeInterval(-lastAgo - 600), lastFailureAt: now.addingTimeInterval(-lastAgo)
         )
     }
@@ -90,6 +90,25 @@ final class CommunityErrorAlertsTests: XCTestCase {
         XCTAssertEqual(
             text([alert("m1", contributors: 5, overloaded: 3, serverError: 2, throttled: 7)]),
             "Tokrate contributors are reporting provider errors on m1: 3 overloaded / at capacity, 2 server errors and 7 throttled (not plan limits) from 5 contributors in the last hour, latest REL(120)."
+        )
+    }
+
+    func testBlockedCountsFollowThrottledInTheCountsPhrasing() {
+        XCTAssertEqual(
+            text([alert("m1", contributors: 2, overloaded: 0, serverError: 0, blocked: 4)]),
+            "Tokrate contributors are reporting provider errors on m1: 4 blocked by the provider’s firewall from 2 contributors in the last hour, latest REL(120)."
+        )
+        XCTAssertEqual(
+            text([alert("m1", contributors: 2, overloaded: 0, serverError: 0, throttled: 2, blocked: 1)]),
+            "Tokrate contributors are reporting provider errors on m1: 2 throttled (not plan limits) and 1 blocked by the provider’s firewall from 2 contributors in the last hour, latest REL(120)."
+        )
+        XCTAssertEqual(
+            text([alert("m1", contributors: 5, overloaded: 3, serverError: 2, throttled: 7, blocked: 9)]),
+            "Tokrate contributors are reporting provider errors on m1: 3 overloaded / at capacity, 2 server errors, 7 throttled (not plan limits) and 9 blocked by the provider’s firewall from 5 contributors in the last hour, latest REL(120)."
+        )
+        let only = alert("m1", contributors: 3, overloaded: 0, serverError: 0, blocked: 2)
+        XCTAssertEqual(
+            CommunityErrorAlerts.relevantAlerts([only], usedModels: used, localGroups: [], isSharing: true, now: now).map(\.model), ["m1"]
         )
     }
 

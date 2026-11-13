@@ -769,3 +769,29 @@ The parser must observe every source request, including short and zero-output re
 Old history decodes missing buckets as unavailable; do not reconstruct a distribution or backfill uploads. Complete buckets allow exact mean input per request and token-weighted cache-read/input ratios by size, but cannot establish an exact prompt-size median. Admin analytics always display covered turns/requests, separately from all cache-reporting turns.
 
 Sharing notice 7 describes request counts and input/cache token totals grouped by prompt-size range. Existing OFF remains OFF; earlier affirmative sharing choices pause until the new notice is accepted. Preserve bounded 65,536-byte envelopes and stable retry identities. Deploy backend 0.1.30 acceptance before releasing updated clients. Source implementation and local tests do not by themselves establish native release packaging, notarization, distribution or live reporting.
+
+## Provider edge blocks (0.1.31)
+
+A fourth provider-side failure class, `blocked`: the provider's network edge (its firewall or CDN in front of the API) rejected a request with a block page before it reached the model. The tool usually labels it as a sign-in failure, but the user's login is not the cause. A single installation cannot tell whether the block targets its own network (for example a VPN or a shared IP with poor reputation) or is a provider-side firewall misfire hitting many users; the community detector tells these apart. Evidence: two Claude Code sessions run through T3 Code on 2026-11-13 recorded synthetic API-error records with `apiErrorStatus` 403, `error` `authentication_failed` and text "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare", about 240 ms after the request and without retry records, while the same machine's other requests succeeded before and after.
+
+### Classification
+
+- **Claude Code** (native and T3 Code runs, primary and subagent files). A synthetic record (`isApiErrorMessage: true`) with `apiErrorStatus` 403 whose text contains `Attention Required! | Cloudflare` is `blocked`. The model and provider are those of the most recent real response in the same file, as for the other classes; none yet → dropped. Every other 401/403 (expired or revoked OAuth tokens, invalid keys, accounts on hold) stays the user's own and is never counted.
+- **Codex, OpenCode and Kimi Code.** Their records carry no evidence of an edge block page, so nothing is classified as `blocked`. Grok Build and Antigravity still send no request outcomes.
+- The fixed fragment is matched in memory only, like the earlier fragments; the error text is never stored, shown or uploaded. Claude Code writes one final record per failed request here, so each record counts once.
+
+### Upload
+
+- A request-count entry from app version 0.1.31 always carries `blocked` (integer 0–10,000) next to `succeeded`, `overloaded`, `serverError` and `throttled`; the at-least-one rule counts it. Entries from 0.1.22–0.1.30 must not carry it. `appVersion` is `0.1.31` (Mac, desktop and headless); samples are unchanged.
+- **Consent notice version 8.** `SharingPreferences.currentNoticeVersion` is 8 (desktop: `SHARING_NOTICE_VERSION = "2026-11-13-v8"`), with the same re-consent behaviour as notice 7. The notice adds: "From 0.1.31 the request counts also include requests the provider’s network firewall blocked before they reached the model (blocked). Only the count is sent, never the error page." The consent example payload includes `blocked`.
+
+### Local and community lines, notifications
+
+- Local provider errors gain a `blocked` kind, grouped per (client, model, kind) like the others. Its line: "The provider’s firewall blocked {n} request(s) to {model} in the last 24 hours, most recently {relative time}. It shows as a sign-in error, but it isn’t your login: the block comes from the provider’s firewall or your network (for example a VPN)." The " Also: {model} ({n})" suffix behaves as before.
+- Community alert counts phrasing adds "{b} blocked by the provider’s firewall" after the throttled part, with the same ", " / " and " joining. The alert entries of `GET /board` carry `blocked` (servers from this version); a missing value reads as 0.
+- Notifications use the same counts phrasing; a block-only alert uses the generic start body "{k} Tokrate contributor(s) reported {counts} in the last hour."
+
+### Server
+
+- The detector counts `blocked` as a provider failure, like `overloaded`, `serverError` and `throttled`: its contributor floors and, in standard mode, the continent/tool independence rule are what separate a provider-wide block from one network's. Rows, totals, alerts, watch entries, incidents, the admin request-error views and the public Errors tab carry `blocked` separately, labelled as blocked by the provider's firewall. Stored rows and incidents from before 0.1.31 lack `blocked` and read as 0. Apps 0.1.22–0.1.30 ignore the field; an alert entry with only blocked failures reaches only 0.1.31 apps (older apps drop an entry whose counts they know are all zero).
+- Deploy backend 0.1.31 acceptance before releasing 0.1.31 clients.

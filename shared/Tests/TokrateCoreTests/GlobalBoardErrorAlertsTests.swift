@@ -41,6 +41,18 @@ final class GlobalBoardErrorAlertsTests: XCTestCase {
         XCTAssertEqual(try decode(board(errors: #"{"alerts":[\#(negative)]}"#)).errorAlerts.first?.throttled, 0)
     }
 
+    func testDecodesBlockedAndABlockOnlyAlert() throws {
+        let base = try XCTUnwrap(decode(board(errors: #"{"alerts":[\#(alertJSON("m"))]}"#)).errorAlerts.first)
+        XCTAssertEqual(base.blocked, 0, "a server that does not send blocked reads as 0")
+        let withBlocked = try XCTUnwrap(decode(board(errors: #"{"alerts":[\#(alertJSON("m", extra: #","blocked":5"#))]}"#)).errorAlerts.first)
+        XCTAssertEqual(withBlocked.blocked, 5)
+        let only = #"{"model":"m","failingContributors":2,"blocked":3,"lastFailureAt":"2026-11-13T10:00:00Z"}"#
+        let alert = try XCTUnwrap(decode(board(errors: #"{"alerts":[\#(only)]}"#)).errorAlerts.first)
+        XCTAssertEqual([alert.overloaded, alert.serverError, alert.throttled, alert.blocked], [0, 0, 0, 3])
+        let negative = #"{"model":"m","failingContributors":2,"blocked":-4,"lastFailureAt":"2026-11-13T10:00:00Z"}"#
+        XCTAssertEqual(try decode(board(errors: #"{"alerts":[\#(negative)]}"#)).errorAlerts.first?.blocked, 0)
+    }
+
     func testMissingErrorsOrAlertsDecodeAsNoAlerts() throws {
         XCTAssertEqual(try decode(board(errors: nil)).errorAlerts, [])
         XCTAssertEqual(try decode(board(errors: "{}")).errorAlerts, [])

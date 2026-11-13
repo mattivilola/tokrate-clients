@@ -139,13 +139,15 @@ public struct GlobalBoard: Decodable, Sendable {
         /// Requests the provider throttled while contributors' plans had quota left (0.1.24); 0 from
         /// servers that do not send it.
         public let throttled: Int
+        /// Requests the provider's network edge blocked (0.1.31); 0 from servers that do not send it.
+        public let blocked: Int
         public let firstFailureAt: Date?
         public let lastFailureAt: Date
 
         public init(
             model: String, provider: String = "", clients: [String] = [], failingContributors: Int,
-            overloaded: Int = 0, serverError: Int = 0, throttled: Int = 0, firstFailureAt: Date? = nil,
-            lastFailureAt: Date
+            overloaded: Int = 0, serverError: Int = 0, throttled: Int = 0, blocked: Int = 0,
+            firstFailureAt: Date? = nil, lastFailureAt: Date
         ) {
             self.model = model
             self.provider = provider
@@ -154,12 +156,13 @@ public struct GlobalBoard: Decodable, Sendable {
             self.overloaded = overloaded
             self.serverError = serverError
             self.throttled = throttled
+            self.blocked = blocked
             self.firstFailureAt = firstFailureAt
             self.lastFailureAt = lastFailureAt
         }
 
         private enum CodingKeys: String, CodingKey {
-            case model, provider, clients, failingContributors, overloaded, serverError, throttled, firstFailureAt, lastFailureAt
+            case model, provider, clients, failingContributors, overloaded, serverError, throttled, blocked, firstFailureAt, lastFailureAt
         }
 
         /// The model, the contributor count and the time of the latest failure are required (the line
@@ -177,6 +180,7 @@ public struct GlobalBoard: Decodable, Sendable {
             overloaded = max(0, try container.decodeIfPresent(Int.self, forKey: .overloaded) ?? 0)
             serverError = max(0, try container.decodeIfPresent(Int.self, forKey: .serverError) ?? 0)
             throttled = max(0, try container.decodeIfPresent(Int.self, forKey: .throttled) ?? 0)
+            blocked = max(0, try container.decodeIfPresent(Int.self, forKey: .blocked) ?? 0)
             firstFailureAt = try container.decodeIfPresent(String.self, forKey: .firstFailureAt).flatMap(TranscriptTimestamp.parse)
             let last = try container.decode(String.self, forKey: .lastFailureAt)
             guard let lastDate = TranscriptTimestamp.parse(last) else {

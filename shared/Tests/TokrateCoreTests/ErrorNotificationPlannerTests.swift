@@ -9,12 +9,12 @@ final class ErrorNotificationPlannerTests: XCTestCase {
     private let minute: TimeInterval = 60
 
     private func alert(
-        _ model: String, contributors: Int = 3, overloaded: Int = 4, serverError: Int = 0, throttled: Int = 0, own: Bool = false
+        _ model: String, contributors: Int = 3, overloaded: Int = 4, serverError: Int = 0, throttled: Int = 0, blocked: Int = 0, own: Bool = false
     ) -> CommunityErrorAlerts.RelevantAlert {
         CommunityErrorAlerts.RelevantAlert(
             alert: GlobalBoard.ErrorAlert(
                 model: model, provider: "anthropic", clients: ["claude-code"], failingContributors: contributors,
-                overloaded: overloaded, serverError: serverError, throttled: throttled, lastFailureAt: t0
+                overloaded: overloaded, serverError: serverError, throttled: throttled, blocked: blocked, lastFailureAt: t0
             ),
             ownFailure: own,
             otherContributors: contributors - 1
@@ -74,6 +74,18 @@ final class ErrorNotificationPlannerTests: XCTestCase {
         XCTAssertEqual(
             plan(&planner, [alert("b", contributors: 4, overloaded: 2, serverError: 1, throttled: 5)], at: 2).map(\.body),
             ["4 Tokrate contributors reported 2 overloaded / at capacity, 1 server error and 5 throttled (not plan limits) in the last hour."]
+        )
+    }
+
+    func testStartTextOfABlockOnlyAlertAndOfAllCountsTogether() {
+        var planner = baselined()
+        XCTAssertEqual(
+            plan(&planner, [alert("a", contributors: 2, overloaded: 0, serverError: 0, blocked: 3)], at: 1).map(\.body),
+            ["2 Tokrate contributors reported 3 blocked by the provider’s firewall in the last hour."]
+        )
+        XCTAssertEqual(
+            plan(&planner, [alert("b", contributors: 4, overloaded: 2, serverError: 1, throttled: 5, blocked: 6)], at: 2).map(\.body),
+            ["4 Tokrate contributors reported 2 overloaded / at capacity, 1 server error, 5 throttled (not plan limits) and 6 blocked by the provider’s firewall in the last hour."]
         )
     }
 

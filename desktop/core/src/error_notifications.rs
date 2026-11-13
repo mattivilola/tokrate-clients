@@ -47,6 +47,8 @@ impl ErrorNotification {
                 }),
                 (alert.throttled > 0)
                     .then(|| format!("{} throttled (not plan limits)", alert.throttled)),
+                (alert.blocked > 0)
+                    .then(|| format!("{} blocked by the provider’s firewall", alert.blocked)),
             ]
             .into_iter()
             .flatten()

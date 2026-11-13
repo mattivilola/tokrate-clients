@@ -64,7 +64,7 @@ Otherwise, setup uses the target account's normal defaults.
 The installer stops both service modes before setup or configuration changes.
 It runs setup as the target account in a private temporary directory, then
 copies only `settings.json`, `setup-complete`, and—after an affirmative sharing
-choice—`consent-v7.json` into `/etc/tokrate-headless/USER`. That directory is
+choice—`consent-v8.json` into `/etc/tokrate-headless/USER`. That directory is
 root-owned and readable by the service account; the service cannot change the
 authoritative consent marker. Runtime data is kept under
 `/var/lib/tokrate-headless/USER` with mode `0700`.
@@ -283,3 +283,7 @@ minutes. No new telemetry fields or consent version are introduced.
 ## Prompt-size sharing (0.1.30)
 
 Updated collectors summarize complete individual model-request input/cache usage into six numeric size ranges. No prompt text or request IDs are shared. Upgrading requires notice 7 acceptance before sharing resumes; local-only and saved OFF remain local-only. Old consent files are retained, but only the current v7 marker enables the sharing service. Grok Build has no per-request size breakdown. Earlier history is not uploaded or inferred from turn totals.
+
+## Provider edge blocks (0.1.31)
+
+Request counts gain a fourth provider-side class, `blocked`: Claude Code requests (including through T3 Code) that the provider's network firewall rejected with a block page before they reached the model. Only the count is sent, never the error page. Upgrading requires notice 8 acceptance before sharing resumes; local-only and saved OFF remain local-only. Old consent files are retained, but only the current v8 marker enables the sharing service.

@@ -542,12 +542,16 @@ struct ClaudeTranscriptParser: JSONLMetricParser {
     }
 
     /// The provider-side class of a synthetic error record (contract "Per-tool mapping"), nil for every
-    /// other failure: a 429 that is the user's own limit, sign-in and key problems, invalid requests, and
+    /// other failure: a 429 that is the user's own limit, sign-in and key problems (except the edge's block
+    /// page), invalid requests, and
     /// connection failures or timeouts that carry no status.
     static func failureKind(status: Int?, content: Any?) -> RequestOutcome.Kind? {
         let texts = textBlocks(of: content)
         // Claude Code says explicitly that this 429 is not the user's limit: a provider throttle.
         if texts.contains(where: { $0.contains("not your usage limit") }) { return .throttled }
+        // The provider's edge answered with its block page, which Claude Code reports as a sign-in failure.
+        // Every other 401/403 is the user's own and stays out.
+        if status == 403, texts.contains(where: { $0.contains("Attention Required! | Cloudflare") }) { return .blocked }
         if status == 529
             || texts.contains(where: { $0.hasPrefix("API Error: Repeated 529") || $0.contains("is experiencing high load") }) {
             return .overloaded

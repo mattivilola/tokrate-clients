@@ -145,17 +145,18 @@ final class PreviewRenderTests: XCTestCase {
                 .padding(.horizontal, 16).padding(.vertical, 14).frame(width: MenuBarView.width).background(DashboardStyle.surface),
                 dark: dark, to: output, name: "provider-error-line-\(mode)"
             )
-            // The throttled local line with and without the plan percentage, and the community counts with throttled.
+            // The throttled and blocked local lines (the throttled one with and without the plan percentage), and the community counts with throttled and blocked.
             var withPercent = LocalProviderErrors()
             withPercent.add([
                 Self.failure(client: "codex", model: "gpt-5.5", kind: .throttled, at: failedAt, key: "t1", percent: 41),
                 Self.failure(client: "codex", model: "gpt-5.5", kind: .throttled, at: failedAt.addingTimeInterval(-300), key: "t2", percent: 38),
-                Self.failure(client: "claude-code", model: "claude-opus-5-5", kind: .overloaded, at: failedAt.addingTimeInterval(-3_600), key: "t3")
+                Self.failure(client: "claude-code", model: "claude-opus-5-5", kind: .overloaded, at: failedAt.addingTimeInterval(-3_600), key: "t3"),
+                Self.failure(client: "claude-code", model: "claude-sonnet-5-5", kind: .blocked, at: failedAt.addingTimeInterval(-1_800), key: "t5")
             ])
             var withoutPercent = LocalProviderErrors()
             withoutPercent.add([Self.failure(client: "claude-code", model: "claude-opus-5-5", kind: .throttled, at: failedAt, key: "t4")])
             let throttleAlerts = [
-                GlobalBoard.ErrorAlert(model: "gpt-5.5", provider: "openai", clients: ["codex"], failingContributors: 5, overloaded: 2, serverError: 1, throttled: 7, lastFailureAt: .now.addingTimeInterval(-3 * 60))
+                GlobalBoard.ErrorAlert(model: "gpt-5.5", provider: "openai", clients: ["codex"], failingContributors: 5, overloaded: 2, serverError: 1, throttled: 7, blocked: 3, lastFailureAt: .now.addingTimeInterval(-3 * 60))
             ]
             var throttleCommunity = CommunityErrorAlerts()
             let throttleLine = throttleCommunity.line(

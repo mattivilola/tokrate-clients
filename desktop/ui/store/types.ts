@@ -75,6 +75,8 @@ export interface CommunityErrorAlert {
   serverError: number;
   /** Requests the provider rejected as too many while plans had quota left; 0 from older servers. */
   throttled: number;
+  /** Requests the provider's firewall blocked; 0 from older servers. */
+  blocked: number;
   /** ISO times. */
   firstFailureAt: string;
   lastFailureAt: string;
@@ -90,6 +92,7 @@ export interface RelevantErrorAlert {
   overloaded: number;
   serverError: number;
   throttled: number;
+  blocked: number;
   /** ISO time. */
   lastFailureAt: string;
   /** The user failed on this model in the last hour: the alert reads "It's not just you". */
@@ -117,7 +120,7 @@ export interface Board {
 export interface ProviderErrorGroup {
   client: string;
   model: string;
-  kind: "overloaded" | "serverError" | "throttled";
+  kind: "overloaded" | "serverError" | "throttled" | "blocked";
   count: number;
   /** ISO time of the latest failure. */
   latestAt: string;

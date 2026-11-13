@@ -100,7 +100,7 @@ describe("Debian update settings", () => {
     const checkUpdate = vi.fn(async () => ({
       started: true,
       update: {
-        version: "0.1.30",
+        version: "0.1.31",
         body: "Debian release notes",
       },
     }));
@@ -134,7 +134,7 @@ describe("Debian update settings", () => {
       await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledWith(false));
     });
     await vi.waitFor(() =>
-      expect(host.textContent).toContain("Tokrate 0.1.30 is available."),
+      expect(host.textContent).toContain("Tokrate 0.1.31 is available."),
     );
 
     const downloadButton = [...host.querySelectorAll("button")].find((button) =>
@@ -290,6 +290,7 @@ describe("community error alerts", () => {
     overloaded: 6,
     serverError: 0,
     throttled: 0,
+    blocked: 0,
     firstFailureAt: new Date(Date.now() - 40 * 60_000).toISOString(),
     lastFailureAt: new Date(Date.now() - 3 * 60_000).toISOString(),
     ...over,
@@ -301,6 +302,7 @@ describe("community error alerts", () => {
     overloaded: 6,
     serverError: 0,
     throttled: 0,
+    blocked: 0,
     lastFailureAt: new Date(Date.now() - 3 * 60_000).toISOString(),
     notJustYou: false,
     others: 3,

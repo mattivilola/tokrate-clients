@@ -25,6 +25,7 @@ pub enum ProviderErrorKind {
     Overloaded,
     ServerError,
     Throttled,
+    Blocked,
 }
 
 impl ProviderErrorKind {
@@ -34,6 +35,7 @@ impl ProviderErrorKind {
             RequestOutcomeKind::Overloaded => Some(Self::Overloaded),
             RequestOutcomeKind::ServerError => Some(Self::ServerError),
             RequestOutcomeKind::Throttled => Some(Self::Throttled),
+            RequestOutcomeKind::Blocked => Some(Self::Blocked),
         }
     }
 }

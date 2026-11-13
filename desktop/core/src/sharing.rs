@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.30";
+pub const APP_VERSION: &str = "0.1.31";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 /// The request-count entries wait in a queue of their own with the same cap.
 pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
@@ -443,6 +443,7 @@ pub fn example_request_json() -> String {
         overloaded: 3,
         server_error: 0,
         throttled: 1,
+        blocked: 1,
         ..OpenCount::default()
     };
     let request_counts = CountKey::of(&outcome)
@@ -726,6 +727,7 @@ impl SharingQueue {
                 RequestOutcomeKind::Overloaded => open.overloaded += 1,
                 RequestOutcomeKind::ServerError => open.server_error += 1,
                 RequestOutcomeKind::Throttled => open.throttled += 1,
+                RequestOutcomeKind::Blocked => open.blocked += 1,
             }
         }
     }
@@ -833,6 +835,7 @@ struct OpenCount {
     overloaded: u64,
     server_error: u64,
     throttled: u64,
+    blocked: u64,
 }
 
 /// What request counts are summed by. Everything in it is already validated and shareable.
@@ -899,6 +902,7 @@ impl CountKey {
             counts.overloaded,
             counts.server_error,
             counts.throttled,
+            counts.blocked,
         ];
         let mut entries = Vec::new();
         while remaining.iter().any(|count| *count > 0) {
@@ -920,6 +924,7 @@ impl CountKey {
                 overloaded: take[1] as u32,
                 server_error: take[2] as u32,
                 throttled: take[3] as u32,
+                blocked: take[4] as u32,
             });
         }
         entries
@@ -1111,6 +1116,9 @@ pub struct SharedRequestCount {
     /// Requests the provider rejected as too many while the plan had quota left (contract
     /// "Provider throttling (0.1.24)"). Always sent, 0 when none.
     pub throttled: u32,
+    /// Requests the provider's network edge blocked before they reached the model (contract
+    /// "Provider edge blocks (0.1.31)"). Always sent from 0.1.31, 0 when none.
+    pub blocked: u32,
 }
 
 /// The samples and request-count entries one upload carries.

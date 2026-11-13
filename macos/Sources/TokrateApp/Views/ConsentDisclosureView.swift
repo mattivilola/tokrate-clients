@@ -50,6 +50,8 @@ struct ConsentDisclosureView: View {
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("From 0.1.30 each turn also includes model-request counts and input-token and cache-read totals grouped by prompt size: under 8,000; 8,000–31,999; 32,000–63,999; 64,000–127,999; 128,000–255,999; and 256,000 or more. Input totals include cached tokens. Prompts and request IDs are never sent.")
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
+            Text("From 0.1.31 the request counts also include requests the provider’s network firewall blocked before they reached the model (blocked). Only the count is sent, never the error page.")
+                .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("From 0.1.14 the server derives your continent from the connection's country when a sample arrives (via Cloudflare). Only the continent is stored, never the country or your IP address, and a region is shown publicly only when at least 3 contributors report from it.")
                 .font(secondaryFont).foregroundStyle(DashboardStyle.muted).fixedSize(horizontal: false, vertical: true)
             Text("Early community data may include aggregates based on a single install.")

@@ -26,7 +26,7 @@ use tokrate_core::{
 };
 use zeroize::Zeroizing;
 const API: &str = "https://tokrate.dev/api/public/v1";
-pub const SHARING_NOTICE_VERSION: &str = "2026-10-21-v7";
+pub const SHARING_NOTICE_VERSION: &str = "2026-11-13-v8";
 /// While records keep arriving, local history is written at most this often. What is not written
 /// yet is safe: the checkpoints are saved with the records they belong to, so after a crash the
 /// files behind the unwritten records are read again.
@@ -2302,7 +2302,7 @@ mod tests {
     }
     #[test]
     fn notice_version_seven_pauses_sharing_that_was_accepted_under_earlier_versions() {
-        assert_eq!(SHARING_NOTICE_VERSION, "2026-10-21-v7");
+        assert_eq!(SHARING_NOTICE_VERSION, "2026-11-13-v8");
         for old in [OLD_NOTICE, PREVIOUS_NOTICE, NOTICE_V4, NOTICE_V5, NOTICE_V6] {
             assert_ne!(SHARING_NOTICE_VERSION, old);
             let dir = temporary();
@@ -3491,13 +3491,14 @@ mod tests {
             .upload_batch(due + chrono::Duration::seconds(61))
             .request_counts
     }
-    fn totals(entries: &[tokrate_core::SharedRequestCount]) -> (u32, u32, u32, u32) {
-        entries.iter().fold((0, 0, 0, 0), |sum, entry| {
+    fn totals(entries: &[tokrate_core::SharedRequestCount]) -> (u32, u32, u32, u32, u32) {
+        entries.iter().fold((0, 0, 0, 0, 0), |sum, entry| {
             (
                 sum.0 + entry.succeeded,
                 sum.1 + entry.overloaded,
                 sum.2 + entry.server_error,
                 sum.3 + entry.throttled,
+                sum.4 + entry.blocked,
             )
         })
     }
@@ -3513,7 +3514,7 @@ mod tests {
             runtime.poll_monitor_at(now);
         }
         let entries = due_request_counts(&mut runtime, now);
-        assert_eq!(totals(&entries), (1, 1, 0, 0));
+        assert_eq!(totals(&entries), (1, 1, 0, 0, 0));
         assert!(entries.iter().all(|entry| entry.client == "claude-code"
             && entry.provider == "anthropic"
             && entry.model == "claude-opus-5-5"
@@ -3600,10 +3601,39 @@ mod tests {
         // Claude Code reports no plan usage, so no percentage is known.
         assert!(groups[0].get("planUsedPercent").is_none());
         let entries = due_request_counts(&mut runtime, now);
-        assert_eq!(totals(&entries), (1, 0, 0, 1));
+        assert_eq!(totals(&entries), (1, 0, 0, 1, 0));
         runtime.save_on_exit();
         let saved = std::fs::read_to_string(dir.join("history.json")).unwrap_or_default();
         assert!(!saved.contains("throttled") && !saved.contains("providerErrors"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn an_edge_block_reaches_the_local_summary_and_the_counts_but_no_error_text() {
+        let now = Utc::now();
+        let dir = temporary();
+        let mut runtime = Runtime::load_smoke(dir.clone()).unwrap();
+        write_claude_failure(
+            &dir,
+            now,
+            Some(403),
+            "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+        );
+        runtime.sharing_active = true;
+        runtime.queue.enable(now - chrono::Duration::minutes(10));
+        for _ in 0..4 {
+            runtime.poll_monitor_at(now);
+        }
+        let snapshot = serde_json::to_value(runtime.snapshot(None)).unwrap();
+        let groups = snapshot["providerErrors"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["kind"], "blocked");
+        assert_eq!(groups[0]["count"], 1);
+        assert!(groups[0].get("planUsedPercent").is_none());
+        let entries = due_request_counts(&mut runtime, now);
+        assert_eq!(totals(&entries), (1, 0, 0, 0, 1));
+        runtime.save_on_exit();
+        let saved = std::fs::read_to_string(dir.join("history.json")).unwrap_or_default();
+        assert!(!saved.contains("blocked") && !saved.contains("Cloudflare"));
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
