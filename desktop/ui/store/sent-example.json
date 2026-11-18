@@ -1,7 +1,7 @@
 {
   "requestCounts": [
     {
-      "appVersion": "0.1.31",
+      "appVersion": "0.1.32",
       "blocked": 1,
       "client": "codex",
       "clientVersion": "1.2.3",
@@ -19,7 +19,7 @@
   ],
   "samples": [
     {
-      "appVersion": "0.1.31",
+      "appVersion": "0.1.32",
       "cacheReadInputTokens": 36000,
       "cacheWriteInputTokens": null,
       "client": "codex",

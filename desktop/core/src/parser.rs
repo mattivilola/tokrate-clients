@@ -334,6 +334,7 @@ impl CodexEventParser {
             output_tokens: measured.output_tokens,
             duration_seconds: measured.duration,
             codex_ttft_seconds: measured.ttft,
+            antigravity_ttft_seconds: None,
             turn_throughput_tps: measured.throughput,
             streaming_tps: None,
             client_version: self.client_version.clone(),

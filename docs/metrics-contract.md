@@ -461,9 +461,15 @@ Values:
 - **Reasoning effort**: let V be the executor's variant id (10.1.28) and M the model. When V is exactly `M + "-" + e` and `e` is one of `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, the effort is `e`; otherwise `unknown`. Examples: `gemini-3.8-flash-medium` with model `gemini-3.8-flash` gives `medium`; `claude-opus-4-6-thinking` gives `unknown`.
 - **Provider**: `google` when the model starts with `gemini-` and every model call's generation has `used_non_gemini_model` = `false`; otherwise `unknown`. Antigravity serves Gemini models through Google's own API, so the client is the routing evidence; other models it offers stay `unknown`.
 - `surface` from the folder the database was found in: `antigravity` → `desktop`, `antigravity-ide` → `ide`, `antigravity-cli` → `cli`.
-- `clientVersion` nil, `codexTTFTSeconds` nil (Antigravity records first-token times, but 0.1.18 does not report them), `providerRegion` nil.
+- `clientVersion` nil, `codexTTFTSeconds` nil (older builds do not report first-token timing), `providerRegion` nil.
 - **Delegated output**: `0` at emission. When any step of the execution has `has_subtrajectory` true, the execution started subagent work that is not part of `outputTokens` and cannot be attributed yet, so `delegatedOutputTokens` stays nil: the turn is shown locally but is never final, so it is not shared and not used by the efficiency indicator.
 - **id**: SHA-256 hex of `antigravity|<conversationId>|<executionId>`, where the conversation id is the database file name without `.db`.
+
+### First-token latency (0.1.32)
+
+The installed Antigravity CLI protobuf descriptor identifies `gen_metadata.data` field `1.11` as `ChatModelMetadata.time_to_first_token` of type `google.protobuf.Duration` (seconds in field 1, nanoseconds in field 2). Read-only metadata checks found this duration joined to model-call steps in existing desktop, IDE and CLI stores. It is separate from `streaming_duration`. This evidence does not establish the exact start event, retry accounting, or whether the first token is visible text.
+
+For each completed execution with a known common model, select the model call with the earliest recorded start. The start must be unique and its linked generation must belong to only one model call in the conversation snapshot. Use its reported duration only if positive and no longer than that model call. Missing or malformed durations never fall back to a later call, the whole turn or response speed. The same rule applies to Antigravity under T3 Code. Only the numeric `ttftMs` value enters the existing wire field and only with sharing enabled. No raw records are sent and prior uploads are not backfilled. The existing consent notice already covers first-token timing where available.
 
 ### Response speed
 
@@ -729,7 +735,7 @@ A third provider-side failure class, `throttled`: the provider rejected requests
 
 ## T3 Code (0.1.25)
 
-`client` is `t3-code` for supported T3 observations. The parser/metric pair is preserved and resolves the runtime: `codex-rollout-v2`/`turn-v1`; `claude-transcript-v4`/`claude-observed-turn-v1` or `claude-observed-subagent-turn-v1`; `antigravity-conversation-v1`/`antigravity-observed-execution-v1`. Every native numeric rule, source-kind constraint, provider rule, cache rule and TTFT availability follows that runtime. `clientVersion` is the native runtime version. No new wire fields or envelope version are introduced; T3 tuples and outcomes require app version 0.1.25. Request outcomes allow Codex/Claude parser-provider pairs only; Antigravity has no outcomes.
+`client` is `t3-code` for supported T3 observations. The parser/metric pair is preserved and resolves the runtime: `codex-rollout-v2`/`turn-v1`; `claude-transcript-v4`/`claude-observed-turn-v1` or `claude-observed-subagent-turn-v1`; `antigravity-conversation-v1`/`antigravity-observed-execution-v1`. Every native numeric rule, source-kind constraint, provider rule, cache rule and TTFT availability follows that runtime, including Antigravity’s first model call from 0.1.32. `clientVersion` is the native runtime version. No new wire fields or envelope version are introduced; T3 tuples and outcomes require app version 0.1.25. Request outcomes allow Codex/Claude parser-provider pairs only; Antigravity has no outcomes.
 
 Codex attribution uses exact, case-folded/trimmed session originators `T3 Code` or `t3code_desktop`. Claude SDK records also require a strong native session UUID and an unambiguous containing T3 turn interval, read with explicit SQL `json_extract` from the v2 provider-thread/turn projections. Bounds: seven-day lookback, 20,000 rows, ordered timestamps, completed interval at most 24 hours, active interval at most one hour, two-second boundary tolerance. Missing, stale, malformed or overlapping evidence does not classify a native turn as T3. No thread titles, messages, whole JSON payloads or debug logs are selected.
 

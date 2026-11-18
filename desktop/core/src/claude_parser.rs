@@ -1146,6 +1146,7 @@ impl ClaudeTranscriptParser {
             output_tokens,
             duration_seconds: duration,
             codex_ttft_seconds: None,
+            antigravity_ttft_seconds: None,
             turn_throughput_tps: throughput,
             streaming_tps: None,
             client_version: if self.version_ambiguous {

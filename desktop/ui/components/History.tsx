@@ -1,3 +1,4 @@
+import { ttftSeconds } from "../metrics";
 import { Mark, useAppStore, Chip } from "./primitives";
 import { ModelPicker } from "./Header";
 import { Footer } from "./Footer";
@@ -156,7 +157,7 @@ export function HistoryView({ dashboard }: { dashboard: Dashboard }) {
                       <span className="table-sub">{measurementTitle(m)}</span>
                     </td>
                     <td className="num">
-                      {m.codexTTFTSeconds === null ? "—" : `${num(m.codexTTFTSeconds)} s`}
+                      {ttftSeconds(m) === null ? "—" : `${num(ttftSeconds(m)!)} s`}
                     </td>
                   </tr>
                 ))}

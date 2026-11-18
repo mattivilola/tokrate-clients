@@ -153,6 +153,8 @@ struct AntigravityGeneration: Sendable, Equatable {
     let model: String
     /// The value of `used_non_gemini_model`; `nil` when the key is missing or not `true`/`false`.
     let usedNonGeminiModel: Bool?
+    /// ChatModelMetadata field 11, a protobuf Duration for this model call.
+    let ttftSeconds: Double?
 
     /// `nil` when the blob is unreadable or names no model.
     init?(data: Data) {
@@ -160,6 +162,12 @@ struct AntigravityGeneration: Sendable, Equatable {
               let model = message.string(19), model.utf8.count <= maximumAntigravityDecodedStringBytes,
               AntigravityModelID.isSafe(model) else { return nil }
         self.model = model
+        ttftSeconds = message.message(11).flatMap { duration in
+            guard let seconds = duration.proto3Varint(1), seconds <= 315_576_000_000,
+                  let nanos = duration.proto3Varint(2), nanos < 1_000_000_000 else { return nil }
+            let value = Double(seconds) + Double(nanos) / 1_000_000_000
+            return value > 0 ? value : nil
+        }
         var flag: Bool?
         for pair in message.repeatedMessages(20) ?? [] where pair.string(1) == Self.nonGeminiKey {
             switch pair.string(2) {

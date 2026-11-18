@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
-pub const APP_VERSION: &str = "0.1.31";
+pub const APP_VERSION: &str = "0.1.32";
 pub const MAX_PENDING_SAMPLES: usize = 1_000;
 /// The request-count entries wait in a queue of their own with the same cap.
 pub const MAX_PENDING_REQUEST_COUNTS: usize = 1_000;
@@ -83,70 +83,53 @@ pub struct SharedSample {
 
 impl SharedSample {
     pub fn from_metric(metric: &TurnMetric, sample_id: Uuid) -> Option<Self> {
-        let (client, parser_version, metric_version, supports_ttft) = match (
+        let (client, parser_version, metric_version) = match (
             metric.client.as_str(),
             metric.parser_version.as_str(),
             metric.metric_version.as_str(),
         ) {
-            (CODEX_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => (
-                CODEX_CLIENT,
-                CODEX_PARSER_VERSION,
-                CODEX_METRIC_VERSION,
-                true,
-            ),
-            (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION) => (
-                CLAUDE_CLIENT,
-                CLAUDE_PARSER_VERSION,
-                CLAUDE_METRIC_VERSION,
-                false,
-            ),
+            (CODEX_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => {
+                (CODEX_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION)
+            }
+            (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION) => {
+                (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION)
+            }
             (CLAUDE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION) => (
                 CLAUDE_CLIENT,
                 CLAUDE_PARSER_VERSION,
                 CLAUDE_SUBAGENT_METRIC_VERSION,
-                false,
             ),
             (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION) => {
-                (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION, false)
+                (GROK_CLIENT, GROK_PARSER_VERSION, GROK_METRIC_VERSION)
             }
             (ANTIGRAVITY_CLIENT, ANTIGRAVITY_PARSER_VERSION, ANTIGRAVITY_METRIC_VERSION) => (
                 ANTIGRAVITY_CLIENT,
                 ANTIGRAVITY_PARSER_VERSION,
                 ANTIGRAVITY_METRIC_VERSION,
-                false,
             ),
             (OPENCODE_CLIENT, OPENCODE_PARSER_VERSION, OPENCODE_METRIC_VERSION) => (
                 OPENCODE_CLIENT,
                 OPENCODE_PARSER_VERSION,
                 OPENCODE_METRIC_VERSION,
-                false,
             ),
             (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION) => {
-                (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION, false)
+                (KIMI_CLIENT, KIMI_PARSER_VERSION, KIMI_METRIC_VERSION)
             }
-            (T3_CODE_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => (
-                T3_CODE_CLIENT,
-                CODEX_PARSER_VERSION,
-                CODEX_METRIC_VERSION,
-                true,
-            ),
-            (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION) => (
-                T3_CODE_CLIENT,
-                CLAUDE_PARSER_VERSION,
-                CLAUDE_METRIC_VERSION,
-                false,
-            ),
+            (T3_CODE_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => {
+                (T3_CODE_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION)
+            }
+            (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION) => {
+                (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_METRIC_VERSION)
+            }
             (T3_CODE_CLIENT, CLAUDE_PARSER_VERSION, CLAUDE_SUBAGENT_METRIC_VERSION) => (
                 T3_CODE_CLIENT,
                 CLAUDE_PARSER_VERSION,
                 CLAUDE_SUBAGENT_METRIC_VERSION,
-                false,
             ),
             (T3_CODE_CLIENT, ANTIGRAVITY_PARSER_VERSION, ANTIGRAVITY_METRIC_VERSION) => (
                 T3_CODE_CLIENT,
                 ANTIGRAVITY_PARSER_VERSION,
                 ANTIGRAVITY_METRIC_VERSION,
-                false,
             ),
             _ => return None,
         };
@@ -197,14 +180,11 @@ impl SharedSample {
         let reasoning_output_tokens = metric
             .reasoning_output_tokens
             .filter(|value| (0..=metric.output_tokens).contains(value));
-        let ttft_ms = supports_ttft
-            .then_some(metric.codex_ttft_seconds)
-            .flatten()
-            .and_then(|value| {
-                let milliseconds = value * 1_000.0;
-                (milliseconds.is_finite() && (0.0..=duration_ms).contains(&milliseconds))
-                    .then_some(milliseconds)
-            });
+        let ttft_ms = metric.ttft_seconds().and_then(|value| {
+            let milliseconds = value * 1_000.0;
+            (milliseconds.is_finite() && (0.0..=duration_ms).contains(&milliseconds))
+                .then_some(milliseconds)
+        });
         let (response_output_tokens, response_duration_ms, response_count) =
             shared_response_fields(metric);
         let provider = shared_provider(

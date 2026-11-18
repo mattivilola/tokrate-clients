@@ -230,9 +230,15 @@ final class SyntheticAntigravityDatabase {
         return writer.data
     }
 
-    static func generationBlob(model: String, nonGemini: String?) -> Data {
+    static func generationBlob(model: String, nonGemini: String?, ttft: (UInt64, UInt64)? = nil) -> Data {
         var writer = ProtoWriter()
         writer.message(1) { generation in
+            if let (seconds, nanos) = ttft {
+                generation.message(11) { duration in
+                    duration.varint(1, seconds)
+                    duration.varint(2, nanos)
+                }
+            }
             generation.string(19, model)
             generation.message(20) { pair in
                 pair.string(1, "some_other_key")

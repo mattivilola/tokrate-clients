@@ -25,6 +25,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     public let outputTokens: Int
     public let durationSeconds: Double
     public let codexTTFTSeconds: Double?
+    public let antigravityTTFTSeconds: Double?
     /// Output tokens summed over the turn's qualifying API responses (see `ResponseSpeed`). Nil when
     /// no response qualified or the source cannot provide per-response timing.
     public let responseOutputTokens: Int?
@@ -90,7 +91,12 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         client == T3Runtime.client ? T3Runtime.nativeClient(parser: parserVersion, metric: metricVersion) : client
     }
     public var ttftSeconds: Double? {
-        isSupportedSourceTuple && runtimeClient == "codex" ? codexTTFTSeconds : nil
+        guard isSupportedSourceTuple else { return nil }
+        switch runtimeClient {
+        case "codex": return codexTTFTSeconds
+        case "antigravity": return antigravityTTFTSeconds
+        default: return nil
+        }
     }
     public var throughputLabel: String {
         Self.throughputLabel(client: client, parserVersion: parserVersion, metricVersion: metricVersion)
@@ -161,6 +167,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         outputTokens: Int,
         durationSeconds: Double,
         codexTTFTSeconds: Double?,
+        antigravityTTFTSeconds: Double? = nil,
         turnThroughputTPS: Double,
         streamingTPS: Double? = nil,
         client: String = TurnMetric.codexClient,
@@ -214,6 +221,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         self.outputTokens = outputTokens
         self.durationSeconds = durationSeconds
         self.codexTTFTSeconds = codexTTFTSeconds
+        self.antigravityTTFTSeconds = antigravityTTFTSeconds
         self.turnThroughputTPS = turnThroughputTPS
         self.streamingTPS = streamingTPS
     }
@@ -221,7 +229,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case reasoningEffort, id, completedAt, client, model, clientVersion, parserVersion, metricVersion
         case reasoningOutputTokens, sourceKind, provider, outputTokens, durationSeconds, codexTTFTSeconds
-        case turnThroughputTPS, streamingTPS
+        case turnThroughputTPS, streamingTPS, antigravityTTFTSeconds
         case responseOutputTokens, responseDurationSeconds, responseCount, providerRegion, delegatedOutputTokens, surface
         case inputTokens, cacheReadInputTokens, cacheWriteInputTokens
         case promptSizeBuckets
@@ -267,6 +275,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         outputTokens = try values.decode(Int.self, forKey: .outputTokens)
         durationSeconds = try values.decode(Double.self, forKey: .durationSeconds)
         codexTTFTSeconds = try values.decodeIfPresent(Double.self, forKey: .codexTTFTSeconds)
+        antigravityTTFTSeconds = try values.decodeIfPresent(Double.self, forKey: .antigravityTTFTSeconds)
         turnThroughputTPS = try values.decode(Double.self, forKey: .turnThroughputTPS)
         streamingTPS = try values.decodeIfPresent(Double.self, forKey: .streamingTPS)
         // Records saved before response speed (0.1.14; Grok Build 0.1.15) carry none of these fields.
@@ -312,6 +321,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
         try values.encode(outputTokens, forKey: .outputTokens)
         try values.encode(durationSeconds, forKey: .durationSeconds)
         try values.encodeIfPresent(codexTTFTSeconds, forKey: .codexTTFTSeconds)
+        try values.encodeIfPresent(antigravityTTFTSeconds, forKey: .antigravityTTFTSeconds)
         try values.encode(turnThroughputTPS, forKey: .turnThroughputTPS)
         try values.encodeIfPresent(streamingTPS, forKey: .streamingTPS)
         try values.encodeIfPresent(responseOutputTokens, forKey: .responseOutputTokens)
@@ -330,7 +340,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     public func withoutResponseTiming() -> TurnMetric {
         TurnMetric(
             id: id, completedAt: completedAt, model: model, outputTokens: outputTokens,
-            durationSeconds: durationSeconds, codexTTFTSeconds: codexTTFTSeconds,
+            durationSeconds: durationSeconds, codexTTFTSeconds: codexTTFTSeconds, antigravityTTFTSeconds: antigravityTTFTSeconds,
             turnThroughputTPS: turnThroughputTPS, streamingTPS: streamingTPS, client: client,
             clientVersion: clientVersion, parserVersion: parserVersion, metricVersion: metricVersion,
             reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,
@@ -345,7 +355,7 @@ public struct TurnMetric: Codable, Identifiable, Hashable, Sendable {
     public func withDelegatedOutputTokens(_ tokens: Int?) -> TurnMetric {
         TurnMetric(
             id: id, completedAt: completedAt, model: model, outputTokens: outputTokens,
-            durationSeconds: durationSeconds, codexTTFTSeconds: codexTTFTSeconds,
+            durationSeconds: durationSeconds, codexTTFTSeconds: codexTTFTSeconds, antigravityTTFTSeconds: antigravityTTFTSeconds,
             turnThroughputTPS: turnThroughputTPS, streamingTPS: streamingTPS, client: client,
             clientVersion: clientVersion, parserVersion: parserVersion, metricVersion: metricVersion,
             reasoningOutputTokens: reasoningOutputTokens, sourceKind: sourceKind, provider: provider,

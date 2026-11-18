@@ -1286,7 +1286,7 @@ fn outcomes_are_summed_per_bucket_and_queued_after_its_close_grace() {
     );
     assert_eq!(entry.client, "codex");
     assert_eq!(entry.client_version, "1.2.3");
-    assert_eq!(entry.app_version, "0.1.31");
+    assert_eq!(entry.app_version, "0.1.32");
     assert_eq!(entry.parser_version, "codex-rollout-v2");
     assert_eq!(entry.metric_version, "request-outcome-v1");
     assert_eq!(entry.model, "gpt-5");
@@ -2026,7 +2026,7 @@ fn a_request_with_only_counts_is_a_signed_version_2_envelope_with_both_lists() {
     // Keys are sorted, like the samples' keys.
     let text = String::from_utf8(request.body.clone()).unwrap();
     assert!(text.starts_with(
-        "{\"requestCounts\":[{\"appVersion\":\"0.1.31\",\"blocked\":9999,\"client\":\"codex\""
+        "{\"requestCounts\":[{\"appVersion\":\"0.1.32\",\"blocked\":9999,\"client\":\"codex\""
     ));
     assert!(text.contains("\"overloaded\":9999,\"parserVersion\""));
     assert!(text.contains("\"serverError\":9999,\"succeeded\":9999,\"throttled\":9999}"));

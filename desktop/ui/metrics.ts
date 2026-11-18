@@ -15,6 +15,7 @@ export interface Metric {
   outputTokens: number;
   durationSeconds: number;
   codexTTFTSeconds: number | null;
+  antigravityTTFTSeconds?: number | null;
   turnThroughputTPS: number;
   /** Bedrock inference-profile region (`us`, `eu`, ...); `unknown` without a prefix; null off Bedrock. */
   providerRegion?: string | null;
@@ -294,7 +295,7 @@ export function summarize(records: Metric[]) {
     ),
     ttft: stats(
       records.flatMap((m) =>
-        m.codexTTFTSeconds === null ? [] : [m.codexTTFTSeconds],
+        ttftSeconds(m) ?? [],
       ),
     ),
   };
@@ -340,7 +341,7 @@ export function signal(
   const eligible = records.filter((m) =>
     metric === "throughput"
       ? m.outputTokens >= 20
-      : m.codexTTFTSeconds !== null,
+      : ttftSeconds(m) !== null,
   );
   const current = period(eligible, now - DAY, now + 1),
     baseline = period(eligible, now - 7 * DAY, now - DAY);
@@ -527,4 +528,13 @@ export function sortCohortRows(rows: CohortRow[], sort: SortKey): CohortRow[] {
       ? (b.stats.throughput.median ?? -1) - (a.stats.throughput.median ?? -1)
       : (a.stats.ttft.median ?? Infinity) - (b.stats.ttft.median ?? Infinity);
   });
+}
+
+export function ttftSeconds(metric: Metric): number | null {
+  if (metric.parserVersion === "antigravity-conversation-v1"
+    && metric.metricVersion === "antigravity-observed-execution-v1"
+    && (metric.client === "antigravity" || metric.client === "t3-code")) {
+    return metric.antigravityTTFTSeconds ?? null;
+  }
+  return metric.codexTTFTSeconds;
 }

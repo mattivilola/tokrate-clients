@@ -11,6 +11,7 @@ struct AntigravityModelCall: Sendable {
     let thinkingTokens: Int
     let inputTokens: Int
     let cacheReadTokens: Int
+    let generationIndex: Int64
     let generation: AntigravityGeneration?
 
     var durationSeconds: TimeInterval { completedAt.seconds(since: createdAt) }
@@ -52,11 +53,12 @@ struct AntigravityTurnBuilder: Sendable {
     func finishedExecutions() -> [AntigravityFinishedExecution] {
         var stepsByExecution: [String: [AntigravityStep]] = [:]
         for step in steps { if let id = step.executionID { stepsByExecution[id, default: []].append(step) } }
+        let generationUse = Dictionary(grouping: steps.filter(\.isModelCall), by: \.generationIndex).mapValues(\.count)
         // An execution id with more than one executor row is ambiguous and skipped.
         let executorsByID = Dictionary(grouping: executors, by: \.executionID).compactMapValues { $0.count == 1 ? $0[0] : nil }
         return executorsByID.values.sorted { $0.executionID < $1.executionID }.compactMap { executor in
             guard executor.isFinished, let steps = stepsByExecution[executor.executionID],
-                  let metric = turn(for: executor, steps: steps) else { return nil }
+                  let metric = turn(for: executor, steps: steps, generationUse: generationUse) else { return nil }
             return AntigravityFinishedExecution(executionID: executor.executionID, metric: metric)
         }
     }
@@ -78,11 +80,11 @@ struct AntigravityTurnBuilder: Sendable {
             stepIndex: step.idx, executionID: step.executionID, createdAt: created, completedAt: completed,
             outputTokens: usage.outputTokens, thinkingTokens: usage.thinkingTokens,
             inputTokens: usage.inputTokens, cacheReadTokens: usage.cacheReadTokens,
-            generation: generations[step.generationIndex]
+            generationIndex: step.generationIndex, generation: generations[step.generationIndex]
         )
     }
 
-    private func turn(for executor: AntigravityExecutor, steps: [AntigravityStep]) -> TurnMetric? {
+    private func turn(for executor: AntigravityExecutor, steps: [AntigravityStep], generationUse: [Int64: Int]) -> TurnMetric? {
         let modelSteps = steps.filter(\.isModelCall)
         // Every step of the run must read completely, and every model call must have ordered timestamps.
         guard !modelSteps.isEmpty, !steps.contains(where: \.hasUnreadableField) else { return nil }
@@ -99,6 +101,14 @@ struct AntigravityTurnBuilder: Sendable {
         let names = calls.map { $0.generation?.model }
         let model: String? = names.first.flatMap { $0 }.flatMap { first in names.allSatisfy { $0 == first } ? first : nil }
         let provider = model != nil && calls.allSatisfy({ $0.generation?.provider == "google" }) ? "google" : "unknown"
+
+        let firstCall = calls.min { $0.createdAt < $1.createdAt }
+        let ttft = firstCall.flatMap { first -> Double? in
+            guard model != nil, generationUse[first.generationIndex] == 1,
+                  calls.filter({ $0.createdAt == first.createdAt }).count == 1,
+                  let value = first.generation?.ttftSeconds, value <= first.durationSeconds else { return nil }
+            return value
+        }
 
         let responses = calls.filter(\.qualifiesAsResponse)
         let responseTokens = responses.reduce(0) { $0 + $1.outputTokens }
@@ -131,6 +141,7 @@ struct AntigravityTurnBuilder: Sendable {
             outputTokens: outputTokens,
             durationSeconds: duration,
             codexTTFTSeconds: nil,
+            antigravityTTFTSeconds: ttft,
             turnThroughputTPS: Double(outputTokens) / duration,
             streamingTPS: nil,
             client: surface == .other ? T3Runtime.client : Self.client,

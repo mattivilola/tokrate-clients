@@ -37,7 +37,11 @@ pub(crate) fn finished_turns_for_client(
 ) -> Vec<ExecutionTurn> {
     let executors = unique_executors(snapshot);
     let mut steps: HashMap<&str, Vec<&Step>> = HashMap::new();
+    let mut generation_use = HashMap::new();
     for step in &snapshot.steps {
+        if step.usage.is_some() {
+            *generation_use.entry(step.generation).or_insert(0) += 1;
+        }
         if let Some(id) = step.execution_id.as_deref() {
             steps.entry(id).or_default().push(step);
         }
@@ -57,6 +61,7 @@ pub(crate) fn finished_turns_for_client(
             executor,
             execution_steps,
             snapshot,
+            &generation_use,
         ) {
             turns.push(ExecutionTurn {
                 execution_id: executor.id.clone(),
@@ -74,6 +79,7 @@ fn execution_metric(
     executor: &Executor,
     steps: &[&Step],
     snapshot: &Snapshot,
+    generation_use: &HashMap<i64, usize>,
 ) -> Option<TurnMetric> {
     let calls: Vec<&Step> = steps
         .iter()
@@ -124,6 +130,21 @@ fn execution_metric(
     let provider = provider_of(model.as_deref(), &generations);
     let effort = effort_of(executor.variant.as_deref(), model.as_deref());
 
+    let ttft = (|| {
+        model.as_ref()?;
+        let (index, (created, completed)) = spans
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (start, _))| start)?;
+        if generation_use.get(&calls[index].generation) != Some(&1)
+            || spans.iter().filter(|(start, _)| start == created).count() != 1
+        {
+            return None;
+        }
+        let value = generations[index]?.ttft_seconds?;
+        (value <= seconds_between(*created, *completed)?).then_some(value)
+    })();
+
     let mut responses = ResponseTotals::default();
     for (call, (created, completed)) in calls.iter().zip(&spans) {
         let tokens = call.usage.map_or(0, |usage| usage.output_tokens);
@@ -150,6 +171,7 @@ fn execution_metric(
         ANTIGRAVITY_PARSER_VERSION,
         ANTIGRAVITY_METRIC_VERSION,
     );
+    metric.antigravity_ttft_seconds = ttft;
     metric.response_output_tokens = response_output_tokens;
     metric.response_duration_seconds = response_duration_seconds;
     metric.response_count = response_count;

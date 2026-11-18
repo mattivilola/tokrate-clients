@@ -1164,7 +1164,7 @@ fn subagent_samples_share_only_allowlisted_keys_with_the_current_app_version() {
     );
     let sample = crate::SharedSample::from_metric(&metric, Uuid::new_v4()).unwrap();
     assert_eq!(sample.source_kind, "subagent");
-    assert_eq!(sample.app_version, "0.1.31");
+    assert_eq!(sample.app_version, "0.1.32");
     assert_eq!(sample.metric_version, "claude-observed-subagent-turn-v1");
     assert_eq!(sample.parser_version, "claude-transcript-v4");
     assert_eq!(sample.ttft_ms, None);
@@ -1960,7 +1960,7 @@ fn sharing_is_post_enable_only_off_wipes_queue_and_limits_retention() {
     let first = queue.batch(now + Duration::minutes(12));
     let retry = queue.batch(now + Duration::minutes(12));
     assert_eq!(first[0].sample_id, retry[0].sample_id);
-    assert_eq!(first[0].app_version, "0.1.31");
+    assert_eq!(first[0].app_version, "0.1.32");
     queue.disable();
     assert_eq!(queue.len(), 0);
     queue.enqueue(&[recent.clone()], now + Duration::seconds(5));
@@ -2176,6 +2176,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     );
     t3_antigravity.delegated_output_tokens = Some(0);
     t3_antigravity.surface = Some(crate::ToolSurface::Other);
+    t3_antigravity.antigravity_ttft_seconds = Some(1.375);
     let samples = [
         crate::SharedSample::from_metric(
             &claude,
@@ -2304,7 +2305,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         });
         fs::write(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/rust-signed-request-v0.1.28-mixed.json"),
+                .join("tests/fixtures/rust-signed-request-v0.1.32-mixed.json"),
             serde_json::to_vec_pretty(&packet).unwrap(),
         )
         .unwrap();
@@ -2312,7 +2313,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     }
     let actual: Value = serde_json::from_slice(&request.body).unwrap();
     let packet: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/rust-signed-request-v0.1.28-mixed.json"
+        "../tests/fixtures/rust-signed-request-v0.1.32-mixed.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2329,7 +2330,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts.len(), 5);
     assert_eq!(counts[0]["client"], "claude-code");
     assert_eq!(counts[0]["overloaded"], 3);
-    assert_eq!(counts[0]["appVersion"], "0.1.31");
+    assert_eq!(counts[0]["appVersion"], "0.1.32");
     assert_eq!(counts[0]["metricVersion"], "request-outcome-v1");
     assert_eq!(counts[1]["serverError"], 1);
     // Throttled is always sent, 0 when there is none.
@@ -2346,12 +2347,12 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(counts[3]["clientVersion"], "0.159.2");
     assert_eq!(counts[3]["parserVersion"], "codex-rollout-v2");
     assert_eq!(counts[3]["provider"], "openai");
-    assert_eq!(counts[3]["appVersion"], "0.1.31");
+    assert_eq!(counts[3]["appVersion"], "0.1.32");
     assert_eq!(counts[4]["client"], "t3-code");
     assert_eq!(counts[4]["clientVersion"], "2.1.295");
     assert_eq!(counts[4]["parserVersion"], "claude-transcript-v4");
     assert_eq!(counts[4]["provider"], "anthropic");
-    assert_eq!(counts[4]["appVersion"], "0.1.31");
+    assert_eq!(counts[4]["appVersion"], "0.1.32");
     assert_eq!(actual["samples"][0]["client"], "claude-code");
     assert_eq!(actual["samples"][0]["provider"], "anthropic");
     assert_eq!(actual["samples"][0]["ttftMs"], Value::Null);
@@ -2364,7 +2365,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
         actual["samples"][2]["metricVersion"],
         "claude-observed-subagent-turn-v1"
     );
-    assert_eq!(actual["samples"][2]["appVersion"], "0.1.31");
+    assert_eq!(actual["samples"][2]["appVersion"], "0.1.32");
     assert_eq!(actual["samples"][3]["client"], "claude-code");
     assert_eq!(actual["samples"][3]["provider"], "amazon-bedrock");
     assert_eq!(actual["samples"][3]["model"], "claude-sonnet-4-5-20250929");
@@ -2424,7 +2425,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][4]["inputTokens"], 36_590);
     assert_eq!(actual["samples"][4]["cacheReadInputTokens"], 30_976);
     assert_eq!(actual["samples"][4]["cacheWriteInputTokens"], Value::Null);
-    assert_eq!(actual["samples"][4]["appVersion"], "0.1.31");
+    assert_eq!(actual["samples"][4]["appVersion"], "0.1.32");
     assert_eq!(actual["samples"][5]["client"], "t3-code");
     assert_eq!(actual["samples"][5]["clientVersion"], "0.159.2");
     assert_eq!(actual["samples"][5]["parserVersion"], "codex-rollout-v2");
@@ -2432,7 +2433,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][5]["provider"], "openai");
     assert_eq!(actual["samples"][5]["surface"], "other");
     assert_eq!(actual["samples"][5]["ttftMs"], 250.0);
-    assert_eq!(actual["samples"][5]["appVersion"], "0.1.31");
+    assert_eq!(actual["samples"][5]["appVersion"], "0.1.32");
     assert_eq!(actual["samples"][6]["client"], "t3-code");
     assert_eq!(
         actual["samples"][6]["parserVersion"],
@@ -2445,7 +2446,7 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     assert_eq!(actual["samples"][6]["provider"], "anthropic");
     assert_eq!(actual["samples"][6]["surface"], "sdk");
     assert_eq!(actual["samples"][6]["cacheWriteInputTokens"], 1_000);
-    assert_eq!(actual["samples"][6]["appVersion"], "0.1.31");
+    assert_eq!(actual["samples"][6]["appVersion"], "0.1.32");
     assert_eq!(actual["samples"][7]["client"], "t3-code");
     assert_eq!(
         actual["samples"][7]["metricVersion"],
@@ -2464,8 +2465,8 @@ fn signed_cross_source_json_fixture_uses_exact_wire_fields_and_signature_bytes()
     );
     assert_eq!(actual["samples"][8]["provider"], "google");
     assert_eq!(actual["samples"][8]["surface"], "other");
-    assert_eq!(actual["samples"][8]["ttftMs"], Value::Null);
-    assert_eq!(actual["samples"][8]["appVersion"], "0.1.31");
+    assert_eq!(actual["samples"][8]["ttftMs"], 1375.0);
+    assert_eq!(actual["samples"][8]["appVersion"], "0.1.32");
     assert!(!request
         .body
         .windows(b"local-claude-digest".len())
@@ -2946,7 +2947,7 @@ fn sharing_allowlists_bedrock_and_vertex_providers_only_for_claude_code() {
         )),
         "unknown"
     );
-    assert_eq!(crate::APP_VERSION, "0.1.31");
+    assert_eq!(crate::APP_VERSION, "0.1.32");
 
     // Parser v1 and v2 records (saved by earlier versions) are never shared.
     for old_parser in [

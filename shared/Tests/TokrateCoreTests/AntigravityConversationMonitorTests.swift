@@ -96,6 +96,33 @@ final class AntigravityConversationMonitorTests: XCTestCase {
 
     // MARK: Finished executions
 
+    func testReportsOnlyValidFirstModelCallTiming() async throws {
+        let model = "gemini-4-carbon"
+        let database = try makeDatabase()
+        try database.addGenerationBlob(index: 1, SyntheticAntigravityDatabase.generationBlob(model: model, nonGemini: "false", ttft: (2, 125_000_000)))
+        try database.addGenerationBlob(index: 2, SyntheticAntigravityDatabase.generationBlob(model: model, nonGemini: "false", ttft: (1, 0)))
+        try addRun(database, variant: "gemini-4-carbon-high", model: nil, calls: [
+            Call(created: 8, completed: 10, output: 300, generation: 2),
+            Call(created: 1, completed: 5, output: 150, generation: 1)
+        ])
+        let valid = try onlyMetric(await monitor().poll())
+        XCTAssertEqual(valid.ttftSeconds, 2.125)
+        XCTAssertNil(valid.codexTTFTSeconds)
+        XCTAssertEqual(SharedSample(valid)?.ttftMs, 2125)
+
+        let argon = "gemini-4-argon"
+        let invalid = try makeDatabase("22222222-2222-4222-8222-222222222222", folder: "antigravity-cli")
+        try invalid.addGenerationBlob(index: 1, SyntheticAntigravityDatabase.generationBlob(model: argon, nonGemini: "false", ttft: (9, 0)))
+        try invalid.addGenerationBlob(index: 2, SyntheticAntigravityDatabase.generationBlob(model: argon, nonGemini: "false", ttft: (1, 0)))
+        try addRun(invalid, model: nil, calls: [
+            Call(created: 1, completed: 4, output: 150, generation: 1),
+            Call(created: 5, completed: 8, output: 150, generation: 2)
+        ])
+        let update = await monitor().poll()
+        let argonTurn = try XCTUnwrap(update.metrics.first { $0.model == argon })
+        XCTAssertNil(argonTurn.ttftSeconds)
+    }
+
     func testFinishedExecutionProducesTheContractedTurn() async throws {
         let database = try makeDatabase()
         try addRun(database, calls: standardCalls, finalCompleted: 31.75)
@@ -977,7 +1004,7 @@ final class AntigravityConversationMonitorTests: XCTestCase {
         XCTAssertEqual(json["reasoningEffort"] as? String, "medium")
         XCTAssertEqual(json["sourceKind"] as? String, "primary")
         XCTAssertEqual(json["delegatedOutputTokens"] as? Int, 0)
-        XCTAssertEqual(json["appVersion"] as? String, "0.1.31")
+        XCTAssertEqual(json["appVersion"] as? String, "0.1.32")
         XCTAssertEqual(json["surface"] as? String, "desktop")
         XCTAssertTrue(SharedSample.isAllowedProvider("google", client: "antigravity"))
         XCTAssertFalse(SharedSample.isAllowedProvider("google", client: "codex"))

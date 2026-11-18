@@ -276,7 +276,7 @@ fn model_lines(records: &[TurnMetric], now: DateTime<Utc>, max_models: usize) ->
             .unwrap_or("     —".into());
         let mut ttft: Vec<_> = group
             .iter()
-            .filter_map(|metric| metric.codex_ttft_seconds)
+            .filter_map(|metric| metric.ttft_seconds())
             .collect();
         let first = median(&mut ttft)
             .map(|value| format!("{value:.2}s"))

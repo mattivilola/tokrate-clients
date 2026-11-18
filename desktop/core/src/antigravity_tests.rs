@@ -1576,6 +1576,50 @@ fn source_monitor_polls_antigravity_under_its_own_root_and_charges_a_bounded_bud
 }
 
 #[test]
+fn first_call_ttft_is_read_from_duration_and_never_replaced_by_a_later_call() {
+    let model = "gemini-4-argon";
+    for (nanos, expected) in [(250_000_000, Some(1_250.0)), (1_000_000_000, None)] {
+        let fixture = Fixture::new();
+        let db = fixture.primary();
+        let start = now() - Duration::seconds(120);
+        db.executor(0, &executor_blob(4, EXECUTION, None));
+        for (idx, fraction) in [(1, nanos), (2, 125_000_000)] {
+            db.generation(
+                idx,
+                &Pb::default()
+                    .message(
+                        1,
+                        Pb::default()
+                            .string(19, model)
+                            .message(11, Pb::default().varint(1, 1).varint(2, fraction)),
+                    )
+                    .done(),
+            );
+        }
+        db.step(
+            &StepSpec::new(1, EXECUTION)
+                .span(start + Duration::seconds(5), start + Duration::seconds(8))
+                .usage(150, 0)
+                .generation(2),
+        );
+        db.step(
+            &StepSpec::new(2, EXECUTION)
+                .span(start, start + Duration::seconds(3))
+                .usage(150, 0)
+                .generation(1),
+        );
+        let turn = poll(&mut fixture.monitor(), now()).remove(0);
+        assert_eq!(turn.model.as_deref(), Some(model));
+        assert_eq!(
+            SharedSample::from_metric(&turn, Uuid::new_v4())
+                .unwrap()
+                .ttft_ms,
+            expected
+        );
+    }
+}
+
+#[test]
 fn antigravity_turns_are_shared_only_with_final_delegated_output_and_the_google_provider() {
     let fixture = Fixture::new();
     let db = fixture.primary();

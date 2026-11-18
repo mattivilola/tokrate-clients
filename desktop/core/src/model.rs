@@ -151,6 +151,12 @@ pub struct TurnMetric {
     pub duration_seconds: f64,
     #[serde(rename = "codexTTFTSeconds")]
     pub codex_ttft_seconds: Option<f64>,
+    #[serde(
+        default,
+        rename = "antigravityTTFTSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub antigravity_ttft_seconds: Option<f64>,
     #[serde(rename = "turnThroughputTPS")]
     pub turn_throughput_tps: f64,
     #[serde(rename = "streamingTPS")]
@@ -282,6 +288,25 @@ impl ResponseMetric {
 }
 
 impl TurnMetric {
+    pub fn ttft_seconds(&self) -> Option<f64> {
+        match (
+            self.client.as_str(),
+            self.parser_version.as_str(),
+            self.metric_version.as_str(),
+        ) {
+            (
+                ANTIGRAVITY_CLIENT | T3_CODE_CLIENT,
+                ANTIGRAVITY_PARSER_VERSION,
+                ANTIGRAVITY_METRIC_VERSION,
+            ) => self.antigravity_ttft_seconds,
+            (CODEX_CLIENT | T3_CODE_CLIENT, CODEX_PARSER_VERSION, CODEX_METRIC_VERSION) => {
+                self.codex_ttft_seconds
+            }
+            (CODEX_CLIENT, "codex-rollout-v1", CODEX_METRIC_VERSION) => self.codex_ttft_seconds,
+            _ => None,
+        }
+    }
+
     /// The whole-turn throughput is a possible speed; a record above the bound is a measurement
     /// error and is neither kept nor shared.
     pub fn turn_speed_is_plausible(&self) -> bool {
@@ -329,6 +354,7 @@ impl TurnMetric {
             output_tokens,
             duration_seconds,
             codex_ttft_seconds,
+            antigravity_ttft_seconds: None,
             turn_throughput_tps,
             streaming_tps,
             client_version,
@@ -394,6 +420,7 @@ impl TurnMetric {
             output_tokens,
             duration_seconds,
             codex_ttft_seconds: None,
+            antigravity_ttft_seconds: None,
             turn_throughput_tps: if duration_seconds > 0.0 {
                 output_tokens as f64 / duration_seconds
             } else {

@@ -74,11 +74,12 @@ pub(crate) struct Executor {
     pub variant: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Generation {
     pub model: Option<String>,
     /// The generation carries `used_non_gemini_model` and every such pair says `false`.
     pub gemini_only: bool,
+    pub ttft_seconds: Option<f64>,
 }
 
 /// Generations decoded so far for one database, by `gen_metadata.idx`. A generation row never
@@ -359,6 +360,7 @@ fn decode_generation(blob: &[u8]) -> Option<Generation> {
             return Ok(Generation {
                 model: None,
                 gemini_only: false,
+                ttft_seconds: None,
             });
         };
         let model = bounded(inner.string(19)?)?;
@@ -371,6 +373,15 @@ fn decode_generation(blob: &[u8]) -> Option<Generation> {
         Ok(Generation {
             model,
             gemini_only: !flags.is_empty() && flags.iter().all(|flag| *flag),
+            ttft_seconds: inner.message(11).ok().flatten().and_then(|duration| {
+                let seconds = duration.varint(1).ok()?.unwrap_or(0);
+                let nanos = duration.varint(2).ok()?.unwrap_or(0);
+                if seconds > 315_576_000_000 || nanos >= 1_000_000_000 {
+                    return None;
+                }
+                let value = seconds as f64 + nanos as f64 / 1e9;
+                (value > 0.0).then_some(value)
+            }),
         })
     })();
     generation.ok()
