@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly TOKRATE_VERSION=0.1.31
+readonly TOKRATE_VERSION=0.1.32
 readonly RELEASE_TAG="v${TOKRATE_VERSION}-headless-alpha.1"
 readonly RELEASE_BASE="https://github.com/mattivilola/tokrate-clients/releases/download/${RELEASE_TAG}"
 # SHA-256 pins for the native Debian release archives.
-readonly SHA256_AMD64='79e626e70b9c4286ed425d74131832db5a4dff8fd665dfc32b8eb27fea422d20'
-readonly SHA256_ARM64='41c5f75527a9dfbc00ca22c43b863e0162d29647731be97d4bc7ab53e8022394'
+readonly SHA256_AMD64='f0f2794877f08afd37cc9e61a2cad4b5e00c0fdf2c0babc549c5c8e4d78f0184'
+readonly SHA256_ARM64='c9365a2a0ce17d1cd1aca417e87e15916087c1759af07f07b55fe6d58a869434'
 
 usage() {
   cat <<'EOF'
